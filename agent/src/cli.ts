@@ -81,6 +81,19 @@ async function doctor(): Promise<void> {
       console.log(`${name}: ${value ? "yes" : "no"}`);
     }
 
+    if (report.dataQuality) {
+      const { visitDrugRows, orphanVisitDrugRows } = report.dataQuality;
+      console.log("\n## ความครบถ้วนของข้อมูล visitdrug");
+      console.log(`รายการจ่ายยาทั้งหมด: ${visitDrugRows.toLocaleString("th-TH")}`);
+      console.log(
+        `ไม่มี visit คู่กันแล้ว: ${orphanVisitDrugRows.toLocaleString("th-TH")}` +
+          " (ยังถูกดึงและส่งขึ้นศูนย์กลาง โดยใช้วันที่จาก dateupdate)",
+      );
+      console.log(
+        `ดึงได้ทั้งหมด: ${visitDrugRows.toLocaleString("th-TH")} / ${visitDrugRows.toLocaleString("th-TH")} รายการ`,
+      );
+    }
+
     if (report.warnings.length) {
       console.log("\n## คำเตือน");
       for (const warning of report.warnings) console.log(`- ${warning}`);

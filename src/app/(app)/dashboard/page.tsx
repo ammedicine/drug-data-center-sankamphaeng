@@ -10,7 +10,9 @@ import {
   formatNumber,
   relativeTime,
 } from "@/components/ui/primitives";
+import { DateRangeFilter } from "@/components/ui/date-range-filter";
 import { requireUser, resolveDrugTypeScope, resolveFacilityScope } from "@/lib/auth/rbac";
+import { buildFiscalYear, currentFiscalRange, fiscalYearOf } from "@/lib/fiscal-year";
 import { getFleetSummary, listAgents } from "@/lib/services/monitoring";
 import {
   getUsageByDrug,
@@ -24,19 +26,31 @@ import { drugTypeLabel } from "@/lib/shared/canonical";
 export const metadata = { title: "แดชบอร์ด" };
 export const dynamic = "force-dynamic";
 
-function defaultRange(): { from: string; to: string } {
-  const to = new Date();
-  const from = new Date(to.getTime() - 29 * 86_400_000);
-  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+function isoDate(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : fallback;
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
   const user = await requireUser();
   const scope = resolveFacilityScope(user);
   // The dashboard always shows the medicine categories only (01, 05, 10) so the
   // headline totals mean the same thing for every role.
   const typeScope = resolveDrugTypeScope(user);
-  const range = defaultRange();
+  // Default window is the current fiscal year (1 ต.ค. - วันนี้); picking a
+  // fiscal year overrides the two date fields.
+  const fallback = currentFiscalRange();
+  const fyParam = Number(params.fy);
+  const picked = Number.isInteger(fyParam) && fyParam > 2400 ? buildFiscalYear(fyParam) : null;
+  const range = picked
+    ? { from: picked.start, to: picked.end }
+    : { from: isoDate(params.from, fallback.from), to: isoDate(params.to, fallback.to) };
+  const fiscal = fiscalYearOf(new Date(`${range.from}T00:00:00`));
+
   const filters = {
     facilityIds: scope.facilityIds,
     from: range.from,
@@ -59,8 +73,12 @@ export default async function DashboardPage() {
     <>
       <PageHeader
         title={isSuper ? "ภาพรวมทั้งอำเภอ" : "ภาพรวมสถานบริการ"}
-        subtitle={`ข้อมูลการจ่ายยาระหว่าง ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบัน วัคซีน และยาสมุนไพร`}
+        subtitle={`${fiscal.label} · ข้อมูล ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบัน วัคซีน และยาสมุนไพร`}
       />
+
+      <Card className="mb-6 no-print">
+        <DateRangeFilter from={range.from} to={range.to} fiscal={fiscal} basePath="/dashboard" />
+      </Card>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="รายการจ่ายยา" value={summary.dispensingRows} unit="รายการ" />

@@ -66,6 +66,34 @@ export class SchemaInspector {
     return Number(row?.n ?? 0) > 0;
   }
 
+  /**
+   * Completeness check for visitdrug, the table the dispensing screen writes to.
+   * A row whose visit record was later deleted is still a real dispensing entry,
+   * so it is counted here and extracted (dated from dateupdate) rather than
+   * dropped by a join.
+   */
+  private async dataQuality(
+    pcucode: string | null,
+  ): Promise<{ visitDrugRows: number; orphanVisitDrugRows: number } | undefined> {
+    if (!pcucode) return undefined;
+    try {
+      const row = await this.db.queryOne<RowDataPacket & { total: number; orphan: number }>(
+        `SELECT COUNT(*) AS total,
+                SUM(CASE WHEN v.visitno IS NULL THEN 1 ELSE 0 END) AS orphan
+           FROM visitdrug vd
+           LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+          WHERE vd.pcucode = ?`,
+        [pcucode],
+      );
+      return {
+        visitDrugRows: Number(row?.total ?? 0),
+        orphanVisitDrugRows: Number(row?.orphan ?? 0),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Reads this installation's own pcucode from office.offid (0000x is a placeholder). */
   async detectPcucode(): Promise<string | null> {
     if (await this.tableExists("office")) {
@@ -170,6 +198,13 @@ export class SchemaInspector {
 
     const pcucode = tables.visit ? await this.detectPcucode() : null;
     const facilityName = await this.detectFacilityName(pcucode);
+    const dataQuality = await this.dataQuality(pcucode);
+    if (dataQuality?.orphanVisitDrugRows) {
+      warnings.push(
+        `พบ ${dataQuality.orphanVisitDrugRows} รายการใน visitdrug ที่ไม่มีข้อมูล visit แล้ว ` +
+          "(ระบบยังส่งขึ้นศูนย์กลางโดยใช้วันที่จาก dateupdate และทำเครื่องหมายไว้)",
+      );
+    }
 
     const usable =
       Boolean(quantityColumn) &&
@@ -203,6 +238,7 @@ export class SchemaInspector {
           : null,
         dateColumn: dateFromVisit ? "visit.visitdate" : `visitdrug.${dateColumn}`,
       },
+      dataQuality,
       warnings,
     };
 

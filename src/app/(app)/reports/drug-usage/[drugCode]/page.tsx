@@ -17,6 +17,7 @@ import {
   getUsageSummary,
   getUsageTrend,
 } from "@/lib/services/reports";
+import { currentFiscalRange, fiscalYearOf } from "@/lib/fiscal-year";
 import { drugTypeLabel } from "@/lib/shared/canonical";
 
 export const dynamic = "force-dynamic";
@@ -43,10 +44,10 @@ export default async function DrugDetailPage({
     typeof query.facility === "string" ? query.facility : null,
   );
 
-  const today = new Date().toISOString().slice(0, 10);
-  const monthAgo = new Date(Date.now() - 89 * 86_400_000).toISOString().slice(0, 10);
-  const from = isoDate(query.from, monthAgo);
-  const to = isoDate(query.to, today);
+  const fallback = currentFiscalRange();
+  const from = isoDate(query.from, fallback.from);
+  const to = isoDate(query.to, fallback.to);
+  const fiscal = fiscalYearOf(new Date(`${from}T00:00:00`));
 
   const typeScope = resolveDrugTypeScope(user);
   const filters = {
@@ -77,7 +78,7 @@ export default async function DrugDetailPage({
           </Link>
         }
         title={detail?.drugName ?? drugCode}
-        subtitle={`รหัสยา ${drugCode} · ${drugTypeLabel(detail?.drugType)} · ข้อมูล ${from} ถึง ${to}`}
+        subtitle={`รหัสยา ${drugCode} · ${drugTypeLabel(detail?.drugType)} · ${fiscal.label} · ข้อมูล ${from} ถึง ${to}`}
         actions={
           detail?.drugFlag ? (
             <StatusBadge status={detail.drugFlag === "1" ? "ACTIVE" : "INACTIVE"} />

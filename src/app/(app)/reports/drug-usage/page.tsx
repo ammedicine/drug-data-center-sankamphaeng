@@ -27,6 +27,12 @@ import {
   getUsageSummary,
   getUsageTrend,
 } from "@/lib/services/reports";
+import {
+  buildFiscalYear,
+  currentFiscalRange,
+  fiscalYearOf,
+  recentFiscalYears,
+} from "@/lib/fiscal-year";
 import { PRIMARY_DRUG_TYPES, drugTypeLabel } from "@/lib/shared/canonical";
 
 export const metadata = { title: "รายงานปริมาณการจ่ายยา" };
@@ -62,11 +68,13 @@ export default async function DrugUsageReportPage({
   const user = await requireUser();
   const isSuper = user.role === "SUPER_ADMIN";
 
-  const today = new Date().toISOString().slice(0, 10);
-  const monthAgo = new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10);
-
-  const from = isoDate(params.from, monthAgo);
-  const to = isoDate(params.to, today);
+  // Same default as the dashboard: the current fiscal year up to today.
+  const fallback = currentFiscalRange();
+  const fyParam = Number(params.fy);
+  const picked = Number.isInteger(fyParam) && fyParam > 2400 ? buildFiscalYear(fyParam) : null;
+  const from = picked ? picked.start : isoDate(params.from, fallback.from);
+  const to = picked ? picked.end : isoDate(params.to, fallback.to);
+  const fiscal = fiscalYearOf(new Date(`${from}T00:00:00`));
   const search = typeof params.q === "string" && params.q.trim() ? params.q.trim() : null;
   const requestedFacility = typeof params.facility === "string" ? params.facility : null;
 
@@ -131,7 +139,7 @@ export default async function DrugUsageReportPage({
     <>
       <PageHeader
         title="รายงานปริมาณการจ่ายยา"
-        subtitle="ข้อมูลการจ่ายยาให้ผู้รับบริการจาก JHCIS ของสถานบริการ"
+        subtitle={`${fiscal.label} · ข้อมูลการจ่ายยาให้ผู้รับบริการจาก JHCIS ของสถานบริการ`}
         actions={
           <Link
             href={`/api/reports/drug-usage/export?${new URLSearchParams(
@@ -146,7 +154,17 @@ export default async function DrugUsageReportPage({
 
       <Card className="mb-6 no-print">
         <form method="get" className="space-y-4 p-5">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="ปีงบประมาณ" hint="เลือกแล้วกดค้นหา จะใช้ช่วง 1 ต.ค. - 30 ก.ย.">
+              <select name="fy" defaultValue="" className={inputClass}>
+                <option value="">— กำหนดวันที่เอง —</option>
+                {recentFiscalYears(5).map((year) => (
+                  <option key={year.year} value={year.year}>
+                    {year.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Field label="ตั้งแต่วันที่">
               <input type="date" name="from" defaultValue={from} className={inputClass} />
             </Field>

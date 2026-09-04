@@ -38,6 +38,7 @@ interface ValidatedRecord {
   unit: string | null;
   unitCode: string | null;
   clinic: string | null;
+  visitMissing: boolean;
   sourcePcucode: string;
   sourceVersion: string | null;
   syncBatchId: string;
@@ -98,6 +99,7 @@ function validate(
       unit: record.unit?.trim().slice(0, 64) ?? null,
       unitCode: record.unitCode?.trim().slice(0, 15) ?? null,
       clinic: record.clinic?.trim().slice(0, 5) ?? null,
+      visitMissing: record.visitMissing === true,
       sourcePcucode: ctx.pcucode,
       sourceVersion: ctx.sourceVersion,
       syncBatchId: ctx.batchId,
@@ -241,6 +243,7 @@ export async function ingestUsageRecords(input: {
           unit: sql`VALUES(unit)`,
           unitCode: sql`VALUES(unit_code)`,
           clinic: sql`VALUES(clinic)`,
+          visitMissing: sql`VALUES(visit_missing)`,
           sourceVersion: sql`VALUES(source_version)`,
           syncBatchId: sql`VALUES(sync_batch_id)`,
           agentId: sql`VALUES(agent_id)`,

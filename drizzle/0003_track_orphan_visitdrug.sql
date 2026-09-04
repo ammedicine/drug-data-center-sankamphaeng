@@ -1,0 +1,1 @@
+ALTER TABLE `drug_usage` ADD `visit_missing` boolean DEFAULT false NOT NULL;

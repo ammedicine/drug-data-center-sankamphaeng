@@ -34,6 +34,8 @@ export {
 /** One dispensing row as extracted from JHCIS visitdrug + visit + cdrug. */
 export interface DrugUsageRecord {
   visitNo: number;
+  /** true when the visit row is gone from JHCIS and the date came from dateupdate */
+  visitMissing?: boolean;
   drugCode: string;
   /** name at extraction time, kept as a historical snapshot */
   drugName: string | null;
@@ -130,6 +132,11 @@ export interface SchemaReport {
     supportsDrugType: boolean;
     /** cdrugunitsell is present, so unit codes can be shown as names */
     supportsUnitName: boolean;
+  };
+  /** rows that cannot be tied back to a visit record (still extracted) */
+  dataQuality?: {
+    visitDrugRows: number;
+    orphanVisitDrugRows: number;
   };
   /** resolved column mapping actually used by the extractor */
   mapping: {

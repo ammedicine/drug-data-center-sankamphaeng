@@ -37,6 +37,25 @@ Extract → Validate → Normalize → Batch → Upload → Verify → Commit
 ออกแบบเช่นนี้เพราะ Central **ไม่สามารถ** เรียกเข้า LAN ของ รพ.สต. ได้ตาม architecture
 (ไม่มี inbound port) การสั่งงานจึงต้องเป็นแบบ pull เท่านั้น
 
+## 2.2 ความครบถ้วน: ยึด visitdrug เป็นตัวตั้ง
+
+ลำดับจริงใน JHCIS: เปิดคิว -> `visit` (visitno + visitdate) -> คียา -> `visitdrug`
+
+`visitdrug` คือแหล่งข้อมูลจริงของการจ่ายยา ส่วน `visit` ให้แค่วันที่ ดังนั้น:
+
+- ใช้ **LEFT JOIN visit** ไม่ใช่ INNER JOIN (บน DB จริงพบ 18 แถวที่ visit ถูกลบไปแล้ว
+  ซึ่ง INNER JOIN จะทำให้หายเงียบ ๆ)
+- แถวที่ไม่มี visit -> วันที่ใช้ `DATE(visitdrug.dateupdate)` และตั้งธง `visit_missing = 1`
+- `agent doctor` รายงานจำนวนแถวทั้งหมด/แถวที่ไม่มี visit ทุกครั้ง ไม่ปล่อยให้เงียบ
+
+### การไล่ข้อมูล (paging)
+
+`visitdrug` เก็บแบบไม่เรียงลำดับ จึงต้องมีคีย์เรียงที่ unique:
+`(visitdate, visitno, drugcode)` ตรงกับ PK `(pcucode, visitno, drugcode)` -> ไม่ข้าม ไม่ซ้ำ
+
+Agent ไล่ `visit` ผ่าน index `vs_date` ครั้งละ 400 รายการแบบ keyset แล้วดึง `visitdrug`
+ของ visitno ชุดนั้นผ่าน PK — ไม่ใช้ `LIMIT/OFFSET` เพราะ offset ลึกทำให้การ sync ทั้งฐานช้ามาก
+
 ## 3. Idempotency
 
 ```

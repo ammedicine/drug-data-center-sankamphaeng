@@ -21,6 +21,7 @@ const usageRecord = z.object({
   unit: z.string().max(64).nullable(),
   unitCode: z.string().max(15).nullable().optional().default(null),
   clinic: z.string().max(5).nullable(),
+  visitMissing: z.boolean().optional().default(false),
   usageDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 

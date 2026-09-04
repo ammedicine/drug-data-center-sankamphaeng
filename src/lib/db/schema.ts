@@ -315,6 +315,8 @@ export const drugUsage = mysqlTable(
     /** the raw JHCIS unit code, kept so a wrong mapping stays traceable */
     unitCode: varchar("unit_code", { length: 15 }),
     clinic: varchar("clinic", { length: 5 }),
+    /** JHCIS had no visit row for this dispensing: date fell back to dateupdate */
+    visitMissing: boolean("visit_missing").notNull().default(false),
     sourcePcucode: char("source_pcucode", { length: 5 }).notNull(),
     sourceVersion: varchar("source_version", { length: 40 }),
     syncBatchId: id("sync_batch_id").notNull(),

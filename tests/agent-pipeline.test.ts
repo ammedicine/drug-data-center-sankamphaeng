@@ -258,6 +258,7 @@ describe.runIf(await jhcisReachable())("agent pipeline against real JHCISDB", ()
         "unit",
         "unitCode",
         "usageDate",
+        "visitMissing",
         "visitNo",
       ].sort(),
     );
@@ -268,6 +269,8 @@ describe.runIf(await jhcisReachable())("agent pipeline against real JHCISDB", ()
     // units must arrive as names (เม็ด/ขวด/...), not as raw cdrugunitsell codes
     const withUnit = state.uploads.flatMap((c) => c.records).find((r) => r.unit);
     if (withUnit) expect(withUnit.unit).not.toMatch(/^\d{3}$/);
+    // visitMissing is a data-quality flag, never a patient attribute
+    expect(typeof record.visitMissing).toBe("boolean");
   });
 
   it("keeps every chunk within the server's upload limit", () => {

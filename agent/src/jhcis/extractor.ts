@@ -4,6 +4,18 @@
  * Only the columns needed for the "ปริมาณการจ่ายยา" report are selected -
  * never SELECT *, never patient identity. Every query is bound to this
  * installation's own pcucode and to an explicit date window.
+ *
+ * How the data actually sits in JHCIS (confirmed against a live V5.1 database):
+ *  - opening a queue creates a `visit` row carrying visitno + visitdate
+ *  - the drugs keyed for that person land in `visitdrug`, one row per drug, in
+ *    no particular physical order, each carrying its visitno
+ *  - `visitdrug` is therefore the source of truth for dispensing and `visit`
+ *    only supplies the service date
+ *
+ * Paging walks `visit` through its vs_date index and then reads each batch of
+ * visits' drug rows through the visitdrug primary key. LIMIT/OFFSET is avoided
+ * deliberately: with 265k rows a deep OFFSET re-scans everything before it and
+ * turns a full sync into a crawl.
  */
 import type { RowDataPacket } from "mysql2/promise";
 
@@ -12,7 +24,15 @@ import type { DrugMasterRecord, DrugUsageRecord } from "@shared/canonical";
 import type { JhcisConnection } from "./connection";
 import type { SchemaMapping } from "./schema-inspector";
 
-interface UsageRow extends RowDataPacket {
+/** Visits fetched per round trip; each yields roughly 1-3 drug rows. */
+const VISIT_BATCH = 400;
+
+interface VisitRow extends RowDataPacket {
+  visitno: number;
+  visitdate: string;
+}
+
+interface DrugRow extends RowDataPacket {
   visitno: number;
   drugcode: string;
   drugname: string | null;
@@ -21,6 +41,9 @@ interface UsageRow extends RowDataPacket {
   unit: string | null;
   unitcode: string | null;
   clinic: string | null;
+}
+
+interface OrphanRow extends DrugRow {
   usagedate: string;
 }
 
@@ -30,10 +53,16 @@ export class UsageExtractor {
     private readonly mapping: SchemaMapping,
   ) {}
 
-  /** SQL for one page of dispensing rows, ordered so paging is deterministic. */
-  private buildQuery(): string {
+  /** Date of a dispensing row: the visit date, or dateupdate when the visit is gone. */
+  private dateExpr(): string {
+    return this.mapping.dateFromVisit
+      ? "COALESCE(v.visitdate, DATE(vd.dateupdate))"
+      : `COALESCE(vd.${this.mapping.dateColumn}, v.visitdate, DATE(vd.dateupdate))`;
+  }
+
+  /** SELECT list + joins shared by the visit-driven and orphan queries. */
+  private drugSelect(): { columns: string; joins: string } {
     const m = this.mapping;
-    const dateExpr = m.dateFromVisit ? "v.visitdate" : `vd.${m.dateColumn}`;
     const unitCodeExpr = m.unitColumn ? `c.${m.unitColumn}` : "NULL";
     // cdrug.unitsell holds a code (e.g. 027); the readable name lives in
     // cdrugunitsell. Fall back to the code when the lookup is unavailable.
@@ -42,15 +71,11 @@ export class UsageExtractor {
         ? `COALESCE(us.unitsellname, c.${m.unitColumn})`
         : `c.${m.unitColumn}`
       : "NULL";
-    const unitJoin =
-      m.unitColumn && m.hasUnitLookup
-        ? `LEFT JOIN cdrugunitsell us ON us.unitsellcode = c.${m.unitColumn}`
-        : "";
     const typeExpr = m.hasDrugType ? "c.drugtype" : "NULL";
     const clinicExpr = m.hasClinic ? "vd.clinic" : "NULL";
 
-    return `
-      SELECT
+    return {
+      columns: `
         vd.visitno            AS visitno,
         vd.drugcode           AS drugcode,
         c.drugname            AS drugname,
@@ -58,62 +83,145 @@ export class UsageExtractor {
         vd.${m.quantityColumn} AS quantity,
         ${unitNameExpr}       AS unit,
         ${unitCodeExpr}       AS unitcode,
-        ${clinicExpr}         AS clinic,
-        DATE_FORMAT(${dateExpr}, '%Y-%m-%d') AS usagedate
-      FROM visitdrug vd
-      JOIN visit v
-        ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
-      LEFT JOIN cdrug c
-        ON c.drugcode = vd.drugcode
-      ${unitJoin}
-      WHERE vd.pcucode = ?
-        AND ${dateExpr} >= ?
-        AND ${dateExpr} <= ?
-      ORDER BY ${dateExpr}, vd.visitno, vd.drugcode
-      LIMIT ? OFFSET ?`;
+        ${clinicExpr}         AS clinic`,
+      joins: `
+        LEFT JOIN cdrug c ON c.drugcode = vd.drugcode
+        ${
+          m.unitColumn && m.hasUnitLookup
+            ? `LEFT JOIN cdrugunitsell us ON us.unitsellcode = c.${m.unitColumn}`
+            : ""
+        }`,
+    };
+  }
+
+  private toRecord(row: DrugRow, usageDate: string, visitMissing: boolean): DrugUsageRecord {
+    return {
+      visitNo: Number(row.visitno),
+      visitMissing,
+      drugCode: String(row.drugcode).trim(),
+      drugName: row.drugname ? String(row.drugname).trim() : null,
+      drugType: row.drugtype ? String(row.drugtype).trim() : null,
+      quantity: row.quantity === null ? 0 : Number(row.quantity),
+      unit: row.unit ? String(row.unit).trim() : null,
+      unitCode: row.unitcode ? String(row.unitcode).trim() : null,
+      clinic: row.clinic ? String(row.clinic).trim() : null,
+      usageDate,
+    };
   }
 
   /** Total rows in the window - used for progress and batch bookkeeping. */
   async countUsage(pcucode: string, from: string, to: string): Promise<number> {
-    const dateExpr = this.mapping.dateFromVisit ? "v.visitdate" : `vd.${this.mapping.dateColumn}`;
+    const dateExpr = this.dateExpr();
     const row = await this.db.queryOne<RowDataPacket & { n: number }>(
       `SELECT COUNT(*) AS n
          FROM visitdrug vd
-         JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
         WHERE vd.pcucode = ? AND ${dateExpr} >= ? AND ${dateExpr} <= ?`,
       [pcucode, from, to],
     );
     return Number(row?.n ?? 0);
   }
 
-  /** Streams the window in pages so memory stays flat on an initial sync. */
+  /**
+   * Data-quality check: visitdrug rows whose visit record is gone. They are
+   * still extracted (dated from dateupdate) - this count exists so an operator
+   * can see how much of the data is in that state.
+   */
+  async countOrphanRows(pcucode: string): Promise<number> {
+    const row = await this.db.queryOne<RowDataPacket & { n: number }>(
+      `SELECT COUNT(*) AS n
+         FROM visitdrug vd
+         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+        WHERE vd.pcucode = ? AND v.visitno IS NULL`,
+      [pcucode],
+    );
+    return Number(row?.n ?? 0);
+  }
+
+  /** Every visitdrug row for this facility, whether or not it joins to a visit. */
+  async countAllRows(pcucode: string): Promise<number> {
+    const row = await this.db.queryOne<RowDataPacket & { n: number }>(
+      "SELECT COUNT(*) AS n FROM visitdrug WHERE pcucode = ?",
+      [pcucode],
+    );
+    return Number(row?.n ?? 0);
+  }
+
+  /**
+   * Streams the window as batches of dispensing rows.
+   *
+   * Ordering is (visitdate, visitno, drugcode), which is unique because the
+   * visitdrug primary key is (pcucode, visitno, drugcode) - so no row is
+   * skipped or repeated across batches even though visitdrug itself is stored
+   * in no particular order.
+   */
   async *streamUsage(
     pcucode: string,
     from: string,
     to: string,
-    pageSize = 500,
+    _pageSize = 500,
   ): AsyncGenerator<DrugUsageRecord[]> {
-    const sql = this.buildQuery();
-    let offset = 0;
+    const { columns, joins } = this.drugSelect();
+
+    // 1. Walk the visits in the window through the vs_date index, keyset-style.
+    let cursorDate = from;
+    let cursorVisitNo = -1;
 
     for (;;) {
-      const rows = await this.db.query<UsageRow>(sql, [pcucode, from, to, pageSize, offset]);
-      if (!rows.length) return;
+      const visits = await this.db.query<VisitRow>(
+        `SELECT visitno, DATE_FORMAT(visitdate, '%Y-%m-%d') AS visitdate
+           FROM visit
+          WHERE pcucode = ?
+            AND visitdate >= ? AND visitdate <= ?
+            AND (visitdate > ? OR (visitdate = ? AND visitno > ?))
+          ORDER BY visitdate, visitno
+          LIMIT ?`,
+        [pcucode, from, to, cursorDate, cursorDate, cursorVisitNo, VISIT_BATCH],
+      );
+      if (!visits.length) break;
 
-      yield rows.map((row) => ({
-        visitNo: Number(row.visitno),
-        drugCode: String(row.drugcode).trim(),
-        drugName: row.drugname ? String(row.drugname).trim() : null,
-        drugType: row.drugtype ? String(row.drugtype).trim() : null,
-        quantity: row.quantity === null ? 0 : Number(row.quantity),
-        unit: row.unit ? String(row.unit).trim() : null,
-        unitCode: row.unitcode ? String(row.unitcode).trim() : null,
-        clinic: row.clinic ? String(row.clinic).trim() : null,
-        usageDate: String(row.usagedate),
-      }));
+      const dateByVisit = new Map<number, string>();
+      for (const visit of visits) dateByVisit.set(Number(visit.visitno), String(visit.visitdate));
 
-      if (rows.length < pageSize) return;
-      offset += pageSize;
+      const placeholders = visits.map(() => "?").join(",");
+      const rows = await this.db.query<DrugRow>(
+        `SELECT ${columns}
+           FROM visitdrug vd
+           ${joins}
+          WHERE vd.pcucode = ? AND vd.visitno IN (${placeholders})
+          ORDER BY vd.visitno, vd.drugcode`,
+        [pcucode, ...visits.map((visit) => Number(visit.visitno))],
+      );
+
+      if (rows.length) {
+        yield rows.map((row) =>
+          this.toRecord(row, dateByVisit.get(Number(row.visitno)) ?? from, false),
+        );
+      }
+
+      const last = visits[visits.length - 1];
+      cursorDate = String(last.visitdate);
+      cursorVisitNo = Number(last.visitno);
+      if (visits.length < VISIT_BATCH) break;
+    }
+
+    // 2. Dispensing rows whose visit record was deleted. A pharmacist did key
+    // them, so they are reported rather than dropped: dated from dateupdate and
+    // flagged so the central side can tell them apart.
+    const orphans = await this.db.query<OrphanRow>(
+      `SELECT ${columns},
+              DATE_FORMAT(DATE(vd.dateupdate), '%Y-%m-%d') AS usagedate
+         FROM visitdrug vd
+         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+         ${joins}
+        WHERE vd.pcucode = ?
+          AND v.visitno IS NULL
+          AND DATE(vd.dateupdate) >= ? AND DATE(vd.dateupdate) <= ?
+        ORDER BY vd.visitno, vd.drugcode`,
+      [pcucode, from, to],
+    );
+    if (orphans.length) {
+      yield orphans.map((row) => this.toRecord(row, String(row.usagedate), true));
     }
   }
 
@@ -126,6 +234,7 @@ export class UsageExtractor {
       ? `LEFT JOIN cdrugunitsell us ON us.unitsellcode = c.unitsell
          LEFT JOIN cdrugunitsell uu ON uu.unitsellcode = c.unitusage`
       : "";
+
     const rows = await this.db.query<
       RowDataPacket & {
         drugcode: string;
@@ -174,11 +283,10 @@ export class UsageExtractor {
 
   /** Newest dispensing date available locally - the upper bound for a sync. */
   async maxUsageDate(pcucode: string): Promise<string | null> {
-    const dateExpr = this.mapping.dateFromVisit ? "v.visitdate" : `vd.${this.mapping.dateColumn}`;
     const row = await this.db.queryOne<RowDataPacket & { d: string | null }>(
-      `SELECT DATE_FORMAT(MAX(${dateExpr}), '%Y-%m-%d') AS d
+      `SELECT DATE_FORMAT(MAX(${this.dateExpr()}), '%Y-%m-%d') AS d
          FROM visitdrug vd
-         JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
         WHERE vd.pcucode = ?`,
       [pcucode],
     );
@@ -187,11 +295,10 @@ export class UsageExtractor {
 
   /** Oldest dispensing date - the lower bound for an initial sync. */
   async minUsageDate(pcucode: string): Promise<string | null> {
-    const dateExpr = this.mapping.dateFromVisit ? "v.visitdate" : `vd.${this.mapping.dateColumn}`;
     const row = await this.db.queryOne<RowDataPacket & { d: string | null }>(
-      `SELECT DATE_FORMAT(MIN(${dateExpr}), '%Y-%m-%d') AS d
+      `SELECT DATE_FORMAT(MIN(${this.dateExpr()}), '%Y-%m-%d') AS d
          FROM visitdrug vd
-         JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
         WHERE vd.pcucode = ?`,
       [pcucode],
     );

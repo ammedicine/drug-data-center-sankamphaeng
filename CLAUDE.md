@@ -88,6 +88,29 @@ drugtype ที่พบจริง: 02(5468) 01(656) 11(619) 05(182) 03(178) 1
 ### ปริมาณข้อมูล (dev DB)
 cdrug 7,410 / visitdrug 265,787 / visit 130,422 / pcucode เดียว = `05957` / visitdate 1972-12-24 → 2026-08-08
 
+### ความครบถ้วนของ visitdrug (ตรวจแล้ว 2026-09-04)
+ลำดับการทำงานจริงของ JHCIS: เปิดคิว -> ได้ `visit.visitno` -> คียาให้คนนั้น -> แถวยาไปอยู่ `visitdrug`
+(แต่ละแถวมี visitno กำกับ และ **ไม่ได้เรียงลำดับ** ในตาราง)
+
+| ตรวจ | ผล |
+|---|---|
+| `visitdrug` ทั้งหมด (pcucode 05957) | 265,787 |
+| JOIN `visit` ติด | 265,769 |
+| **ไม่มี visit คู่กัน (visit ถูกลบ)** | **18** |
+
+- เดิมใช้ `JOIN visit` แบบ INNER -> 18 แถวนั้นหายเงียบ ๆ **แก้แล้วเป็น LEFT JOIN**
+- แถวที่ไม่มี visit ใช้วันที่จาก `DATE(vd.dateupdate)` แทน และตั้งธง `drug_usage.visit_missing = 1`
+- `agent doctor` แสดงหัวข้อ "ความครบถ้วนของข้อมูล visitdrug" ให้เห็นตัวเลขนี้ทุกครั้ง
+- **หลักการ: ยึด `visitdrug` เป็นตัวตั้ง ส่วน `visit` เป็นแค่ตัวให้วันที่ ห้ามใช้เป็นตัวกรองทิ้งแถว**
+
+### การแบ่งหน้าดึงข้อมูล (สำคัญต่อความครบและความเร็ว)
+- คีย์เรียงที่ใช้คือ `(visitdate, visitno, drugcode)` ซึ่ง **unique** เพราะ PK ของ visitdrug คือ
+  `(pcucode, visitno, drugcode)` -> ต่อให้ตารางเรียงมั่วก็ไม่มีแถวข้ามหรือซ้ำ
+- **ห้ามใช้ `LIMIT/OFFSET`** สำหรับ full sync: offset ลึกทำให้ scan ซ้ำทุกหน้า (265k แถวใช้เวลาเป็นชั่วโมง)
+- วิธีที่ใช้: ไล่ `visit` ผ่าน index `vs_date` แบบ keyset (`visitdate, visitno` > cursor) ครั้งละ 400 visit
+  แล้วดึง `visitdrug` ของชุด visitno นั้นผ่าน PK -> เร็วและคงลำดับ
+- แถว orphan ดึงแยกอีกรอบเดียวตอนท้าย
+
 ### หน่วยนับยา ต้องแปลงรหัสก่อน (ยืนยันจาก DB จริง)
 - `cdrug.unitsell` / `cdrug.unitusage` เก็บ **รหัส** ไม่ใช่ชื่อ (เช่น 027, 009, 006)
 - ตารางแปลงคือ **`cdrugunitsell(unitsellcode, unitsellname)`** — 027=เม็ด, 009=แคปซูล, 006=ขวด
@@ -106,6 +129,11 @@ cdrug 7,410 / visitdrug 265,787 / visit 130,422 / pcucode เดียว = `059
 `record_key = sha256(facility_id|pcucode|visitno|drugcode)`
 sync ถัดไปเริ่มจาก `last_visit_date - REPROCESS_DAYS (default 7)` เพื่อจับข้อมูลย้อนหลังที่คีย์ทีหลัง
 Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส่งซ้ำได้ ไม่เกิดข้อมูลซ้ำ
+
+### ช่วงเวลาเริ่มต้นของรายงาน
+- ใช้ **ปีงบประมาณไทย** (1 ต.ค. - 30 ก.ย.) เป็นค่าเริ่มต้นทุกหน้า: 1 ต.ค. ของปีงบฯ ปัจจุบัน ถึง **วันนี้**
+- `src/lib/fiscal-year.ts` เป็นตัวคำนวณกลาง (`currentFiscalRange`, `buildFiscalYear`, `recentFiscalYears`)
+- หน้าแดชบอร์ด/รายงานเลือกช่วงเองได้ และเลือกเป็น "ปีงบประมาณ" ย้อนหลัง 5 ปีได้
 
 ## 3.5 สิทธิ์ผู้ใช้ (4 ระดับ)
 
