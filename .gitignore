@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+.env
+.env.*
+!.env.example
+*.local
+.vercel
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+agent/data/
+agent/logs/
+agent/agent.config.json
+coverage/
