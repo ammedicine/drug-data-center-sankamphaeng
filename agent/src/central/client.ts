@@ -171,8 +171,8 @@ export async function withRetry<T>(
   operation: () => Promise<T>,
   options: { attempts?: number; baseDelayMs?: number; label: string } = { label: "request" },
 ): Promise<T> {
-  const attempts = options.attempts ?? 5;
-  const baseDelay = options.baseDelayMs ?? 2000;
+  const attempts = options.attempts ?? Number(process.env.AGENT_RETRY_ATTEMPTS ?? 5);
+  const baseDelay = options.baseDelayMs ?? Number(process.env.AGENT_RETRY_BASE_MS ?? 2000);
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {

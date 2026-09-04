@@ -110,9 +110,18 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 - [x] PHASE 11 — security checklist + unit test 20 ข้อ (docs/SECURITY.md)
 - [ ] PHASE 12 — Production deploy (รอ TiDB Cloud + Vercel env จริง — ดู docs/DEPLOYMENT.md)
 
+### ทดสอบแล้ว
+- `tests/security.test.ts` — 20 เคส: facility isolation, record key, HMAC, การเข้ารหัส credential
+- `tests/agent-pipeline.test.ts` — 6 เคส E2E ยิงจาก **JHCISDB จริง (05957)** เข้า mock Central API
+  ที่ตรวจลายเซ็นด้วยโค้ดชุดเดียวกับ production: extract → sign → chunk → คิว → upload → complete
+  รวมถึงเคสเน็ตหลุดกลางทางแล้วกู้คืนได้ (ข้ามอัตโนมัติถ้าต่อ JHCIS ไม่ได้)
+- **บั๊กที่เทสจับได้และแก้แล้ว:** เดิมถ้าอัปโหลด drug master ล้ม จะ throw ออกจาก `run()`
+  ทำให้ไม่ได้ปิด batch และไม่ได้ flush คิว → ตอนนี้จับ error แล้วทำงานต่อ (master จะส่งใหม่รอบหน้า)
+
 ### ยังไม่ได้ทดสอบ (ต้องมี TiDB ก่อน)
-- end-to-end จริง: enroll → sync → รายงาน (local MySQL 5.6 ใช้แทนไม่ได้ เพราะ schema ใช้ JSON column ซึ่งมีตั้งแต่ 5.7)
-- ทดสอบ facility isolation ระดับ integration (ตอนนี้มี unit test ของ `resolveFacilityScope` แล้ว)
+- ฝั่ง Central จริง: migrate → seed → enroll → รับข้อมูลลง TiDB → รายงานบนเว็บ
+  (local MySQL 5.6 ใช้แทนไม่ได้ เพราะ schema ใช้ JSON column ซึ่งมีตั้งแต่ 5.7)
+- facility isolation ระดับ integration (ตอนนี้มี unit test ของ `resolveFacilityScope` แล้ว)
 
 ## 5. คำสั่งที่ใช้บ่อย
 

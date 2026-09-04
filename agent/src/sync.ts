@@ -242,20 +242,28 @@ export class SyncRunner {
         };
       }
 
-      // 2. Drug master first, so usage rows can be resolved in the UI immediately.
+      // 2. Drug master. A failure here must NOT abort the run: the usage rows
+      // are already durable in the queue, and the master is re-sent every sync.
       const master = await extractor.fetchDrugMaster();
       if (master.length) {
-        await withRetry(
-          () =>
-            this.client.upload({
-              batchRef,
-              pcucode,
-              sourceVersion,
-              drugs: master,
-              records: [],
-            }),
-          { label: "upload drug master" },
-        );
+        try {
+          await withRetry(
+            () =>
+              this.client.upload({
+                batchRef,
+                pcucode,
+                sourceVersion,
+                drugs: master,
+                records: [],
+              }),
+            { label: "upload drug master" },
+          );
+        } catch (error) {
+          log.warn("drug master upload failed - continuing with usage records", {
+            batchRef,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
 
       // 3. Upload every queued chunk (including leftovers from earlier runs).
