@@ -10,7 +10,7 @@ import {
 import { EXPORT_RULE, rateLimit } from "@/lib/security/rate-limit";
 import { clientIp, writeAudit } from "@/lib/services/audit";
 import { getUsageByDrug } from "@/lib/services/reports";
-import { drugTypeLabel } from "@/lib/shared/canonical";
+import { drugStatus, drugTypeLabel } from "@/lib/shared/canonical";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,13 +63,23 @@ export async function GET(req: NextRequest) {
       { page: 1, pageSize: MAX_ROWS },
     );
 
-    const header = ["ลำดับ", "รหัสยา", "ชื่อยา", "ประเภท", "ครั้งที่จ่าย", "จำนวนจ่าย", "หน่วย"];
+    const header = [
+      "ลำดับ",
+      "รหัสยา",
+      "ชื่อยา",
+      "ประเภท",
+      "สถานะรหัส",
+      "ครั้งที่จ่าย",
+      "จำนวนจ่าย",
+      "หน่วย",
+    ];
     const body = rows.map((row, index) =>
       [
         index + 1,
         row.drugCode,
         row.drugName,
         drugTypeLabel(row.drugType),
+        drugStatus(row.drugFlag).label,
         row.dispensingRows,
         row.totalQuantity,
         row.unit ?? "",

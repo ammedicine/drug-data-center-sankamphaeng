@@ -80,9 +80,12 @@ export default async function DrugDetailPage({
         title={detail?.drugName ?? drugCode}
         subtitle={`รหัสยา ${drugCode} · ${drugTypeLabel(detail?.drugType)} · ${fiscal.label} · ข้อมูล ${from} ถึง ${to}`}
         actions={
-          detail?.drugFlag ? (
-            <StatusBadge status={detail.drugFlag === "1" ? "ACTIVE" : "INACTIVE"} />
-          ) : null
+          // A code with no master row is "ไม่ทราบสถานะ", never "ใช้งาน".
+          <StatusBadge
+            status={
+              detail?.drugFlag === "2" ? "INACTIVE" : detail?.drugFlag ? "ACTIVE" : "UNKNOWN"
+            }
+          />
         }
       />
 

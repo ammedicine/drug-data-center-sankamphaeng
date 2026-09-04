@@ -192,7 +192,8 @@ const STATUS_STYLES: Record<string, string> = {
   FAILED: "bg-danger-soft text-danger",
   ABORTED: "bg-warn-soft text-warn",
   ACTIVE: "bg-ok-soft text-ok",
-  INACTIVE: "bg-raised text-muted",
+  INACTIVE: "bg-warn-soft text-warn",
+  UNKNOWN: "bg-raised text-muted",
   PENDING: "bg-warn-soft text-warn",
 };
 
@@ -209,6 +210,7 @@ const STATUS_LABELS: Record<string, string> = {
   ABORTED: "ยกเลิก",
   ACTIVE: "ใช้งาน",
   INACTIVE: "ปิดใช้งาน",
+  UNKNOWN: "ไม่ทราบสถานะ",
   PENDING: "รออนุมัติ",
 };
 

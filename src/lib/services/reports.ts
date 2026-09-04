@@ -97,16 +97,19 @@ export async function getUsageByDrug(
   const totalQuantity = sql<number>`SUM(${drugUsage.quantity})`.as("total_quantity");
   const dispensingRows = sql<number>`COUNT(*)`.as("dispensing_rows");
 
-  // Category first so the report always reads as grouped sections, then the
+  // A code switched off in JHCIS (drugflag = 2) still has history worth
+  // reading, but nobody looks for it first - so it sinks below the codes still
+  // in use. Then category, so the report reads as grouped sections, then the
   // requested order inside each category (ชื่อยา by default).
+  const retired = sql`retired`;
   const orderBy =
     sort === "code"
-      ? [asc(drugUsage.drugType), asc(drugUsage.drugCode)]
+      ? [retired, asc(drugUsage.drugType), asc(drugUsage.drugCode)]
       : sort === "rows"
-        ? [asc(drugUsage.drugType), sql`dispensing_rows desc`]
+        ? [retired, asc(drugUsage.drugType), sql`dispensing_rows desc`]
         : sort === "quantity"
-          ? [asc(drugUsage.drugType), sql`total_quantity desc`]
-          : [asc(drugUsage.drugType), sql`drug_name asc`];
+          ? [retired, asc(drugUsage.drugType), sql`total_quantity desc`]
+          : [retired, asc(drugUsage.drugType), sql`drug_name asc`];
 
   const rows = await db
     .select({
@@ -119,6 +122,7 @@ export async function getUsageByDrug(
       // A code can be switched off in JHCIS long after it was last dispensed,
       // so the flag comes from the master while the dates come from the facts.
       drugFlag: sql<string | null>`MAX(${drugs.drugFlag})`,
+      retired: sql<number>`CASE WHEN MAX(${drugs.drugFlag}) = '2' THEN 2 WHEN MAX(${drugs.drugFlag}) IS NULL THEN 1 ELSE 0 END`.as("retired"),
       firstUsageDate: sql<string | null>`DATE_FORMAT(MIN(${drugUsage.usageDate}), '%Y-%m-%d')`,
       lastUsageDate: sql<string | null>`DATE_FORMAT(MAX(${drugUsage.usageDate}), '%Y-%m-%d')`,
     })
@@ -251,6 +255,64 @@ export async function getUsageByFacility(filters: UsageFilters): Promise<Facilit
     totalQuantity: Number(r.totalQuantity ?? 0),
     dispensingRows: Number(r.dispensingRows ?? 0),
     distinctDrugs: Number(r.distinctDrugs ?? 0),
+  }));
+}
+
+export interface FacilityDrugRow extends UsageByDrugRow {
+  facilityId: string;
+}
+
+/**
+ * Every drug each facility dispensed in the window, in one query.
+ *
+ * The dashboard sends this to the browser once so picking a facility shows its
+ * list instantly, without a request per click. Ordering matches the report:
+ * codes still in use first, alphabetically, retired codes at the bottom.
+ */
+export async function getUsageByFacilityAndDrug(
+  filters: UsageFilters,
+  limit = 4000,
+): Promise<FacilityDrugRow[]> {
+  const drugName = sql<string>`MAX(${drugUsage.drugNameSnapshot})`.as("drug_name");
+  const retired = sql<number>`CASE WHEN MAX(${drugs.drugFlag}) = '2' THEN 2 WHEN MAX(${drugs.drugFlag}) IS NULL THEN 1 ELSE 0 END`.as(
+    "retired",
+  );
+
+  const rows = await db
+    .select({
+      facilityId: drugUsage.facilityId,
+      drugCode: drugUsage.drugCode,
+      drugName,
+      drugType: drugUsage.drugType,
+      unit: sql<string | null>`MAX(${drugUsage.unit})`,
+      totalQuantity: sql<number>`SUM(${drugUsage.quantity})`,
+      dispensingRows: sql<number>`COUNT(*)`,
+      drugFlag: sql<string | null>`MAX(${drugs.drugFlag})`,
+      retired,
+      firstUsageDate: sql<string | null>`DATE_FORMAT(MIN(${drugUsage.usageDate}), '%Y-%m-%d')`,
+      lastUsageDate: sql<string | null>`DATE_FORMAT(MAX(${drugUsage.usageDate}), '%Y-%m-%d')`,
+    })
+    .from(drugUsage)
+    .leftJoin(
+      drugs,
+      and(eq(drugs.facilityId, drugUsage.facilityId), eq(drugs.drugCode, drugUsage.drugCode)),
+    )
+    .where(whereClause(filters))
+    .groupBy(drugUsage.facilityId, drugUsage.drugCode, drugUsage.drugType)
+    .orderBy(drugUsage.facilityId, sql`retired`, sql`drug_name asc`)
+    .limit(limit);
+
+  return rows.map((r) => ({
+    facilityId: r.facilityId,
+    drugCode: r.drugCode,
+    drugName: r.drugName ?? r.drugCode,
+    drugType: r.drugType,
+    unit: r.unit,
+    totalQuantity: Number(r.totalQuantity ?? 0),
+    dispensingRows: Number(r.dispensingRows ?? 0),
+    drugFlag: r.drugFlag ?? null,
+    firstUsageDate: r.firstUsageDate ?? null,
+    lastUsageDate: r.lastUsageDate ?? null,
   }));
 }
 

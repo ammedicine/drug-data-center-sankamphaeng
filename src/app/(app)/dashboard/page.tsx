@@ -4,6 +4,7 @@ import { Boxes, ListChecks, Pill, Server } from "lucide-react";
 
 import { RankingChart, TrendChart } from "@/components/ui/charts";
 import { CellMeta, DataTable } from "@/components/ui/data-table";
+import { FacilityDrilldown } from "@/components/ui/facility-drilldown";
 import {
   Card,
   PageHeader,
@@ -21,6 +22,7 @@ import {
   getUsageByDrug,
   getUsageByDrugType,
   getUsageByFacility,
+  getUsageByFacilityAndDrug,
   getUsageSummary,
   getUsageTrend,
 } from "@/lib/services/reports";
@@ -62,21 +64,27 @@ export default async function DashboardPage({
   };
   const isSuper = user.role === "SUPER_ADMIN";
 
-  const [summary, fleet, trend, topDrugs, agentRows, byFacility, byType] = await Promise.all([
-    getUsageSummary(filters),
-    getFleetSummary(scope.facilityIds),
-    getUsageTrend(filters, "day"),
-    getUsageByDrug(filters, { page: 1, pageSize: 10 }),
-    listAgents(scope.facilityIds),
-    isSuper ? getUsageByFacility(filters) : Promise.resolve([]),
-    getUsageByDrugType(filters),
-  ]);
+  const [summary, fleet, trend, topDrugs, agentRows, byFacility, byType, facilityDrugs] =
+    await Promise.all([
+      getUsageSummary(filters),
+      getFleetSummary(scope.facilityIds),
+      getUsageTrend(filters, "day"),
+      // the ranking is about volume, so it is ordered by quantity, not by name
+      getUsageByDrug(filters, { page: 1, pageSize: 10 }, "quantity"),
+      listAgents(scope.facilityIds),
+      getUsageByFacility(filters),
+      getUsageByDrugType(filters),
+      getUsageByFacilityAndDrug(filters),
+    ]);
+
+  // Links out of the drill-down keep the window the dashboard is showing.
+  const linkParams = new URLSearchParams({ from: range.from, to: range.to }).toString();
 
   return (
     <>
       <PageHeader
         title={isSuper ? "ภาพรวมทั้งอำเภอ" : "ภาพรวมสถานบริการ"}
-        subtitle={`${fiscal.label} · ข้อมูล ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบัน วัคซีน และยาสมุนไพร`}
+        subtitle={`${fiscal.label} · ข้อมูล ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบันและยาสมุนไพร`}
       />
 
       <div className="mb-5 rounded-[10px] border border-line bg-surface no-print">
@@ -106,7 +114,7 @@ export default async function DashboardPage({
 
       <Section
         title="แยกตามหมวดยา"
-        description="ยาแผนปัจจุบัน วัคซีน และยาสมุนไพร ในช่วงเวลาที่เลือก"
+        description="ยาแผนปัจจุบันและยาสมุนไพร ในช่วงเวลาที่เลือก"
       >
         <div className="grid gap-3 sm:grid-cols-3">
           {byType.map((row) => (
@@ -152,10 +160,19 @@ export default async function DashboardPage({
         </Card>
       </div>
 
+      <div className="mt-5">
+        <FacilityDrilldown
+          facilities={byFacility}
+          drugs={facilityDrugs}
+          linkParams={linkParams}
+          initialFacilityId={scope.single}
+        />
+      </div>
+
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
         <Card
           title="ยาที่มีการจ่ายสูงสุด"
-          description="เรียงตามปริมาณรวม"
+          description="10 อันดับแรกตามปริมาณรวมทุกสถานบริการในสิทธิ์"
           actions={
             <Link
               href="/reports/drug-usage"
@@ -177,11 +194,11 @@ export default async function DashboardPage({
                 render: (row) => (
                   <>
                     <Link
-                      href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}`}
+                      href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}?${linkParams}`}
                       className="font-medium text-ink transition-colors duration-150 hover:text-brand"
                     >
-                    {row.drugName}
-                  </Link>
+                      {row.drugName}
+                    </Link>
                     <CellMeta>{row.drugCode}</CellMeta>
                   </>
                 ),
@@ -189,7 +206,10 @@ export default async function DashboardPage({
               {
                 key: "type",
                 header: "ประเภท",
-                render: (row) => <span className="text-xs text-muted">{drugTypeLabel(row.drugType)}</span>,
+                hideBelow: "sm",
+                render: (row) => (
+                  <span className="text-xs text-muted">{drugTypeLabel(row.drugType)}</span>
+                ),
               },
               {
                 key: "qty",
@@ -206,73 +226,44 @@ export default async function DashboardPage({
           />
         </Card>
 
-        {isSuper ? (
-          <Card title="ปริมาณการจ่ายยาแยกตามสถานบริการ" description="เปรียบเทียบระหว่าง รพ.สต.">
-            <DataTable
-              rowKey={(row) => row.facilityId}
-              rows={byFacility}
-              emptyTitle="ยังไม่มีข้อมูล"
-              columns={[
-                {
-                  key: "facility",
-                  header: "สถานบริการ",
-                  render: (row) => (
-                    <>
-                      <span className="font-medium text-ink">{row.facilityName}</span>
-                      <CellMeta>{row.facilityCode}</CellMeta>
-                    </>
-                  ),
-                },
-                {
-                  key: "drugs",
-                  header: "รายการยา",
-                  align: "right",
-                  render: (row) => formatNumber(row.distinctDrugs),
-                },
-                {
-                  key: "qty",
-                  header: "ปริมาณรวม",
-                  align: "right",
-                  render: (row) => formatNumber(row.totalQuantity),
-                },
-              ]}
-            />
-          </Card>
-        ) : (
-          <Card title="สถานะ Agent" description="ตัวเชื่อมข้อมูลจาก JHCIS ของสถานบริการ">
-            <DataTable
-              rowKey={(row) => row.id}
-              rows={agentRows}
-              emptyTitle="ยังไม่มี Agent"
-              emptyDescription="ติดต่อผู้ดูแลระบบส่วนกลางเพื่อสร้างและติดตั้ง Agent"
-              columns={[
-                {
-                  key: "name",
-                  header: "Agent",
-                  render: (row) => (
-                    <>
-                      <span className="font-medium text-ink">{row.name}</span>
-                      <CellMeta>{row.hostname ?? "-"}</CellMeta>
-                    </>
-                  ),
-                },
-                {
-                  key: "status",
-                  header: "สถานะ",
-                  render: (row) => <StatusBadge status={row.effectiveStatus} />,
-                },
-                {
-                  key: "sync",
-                  header: "ซิงก์ล่าสุด",
-                  align: "right",
-                  render: (row) => (
-                    <span className="text-xs text-muted">{relativeTime(row.lastSuccessfulSyncAt)}</span>
-                  ),
-                },
-              ]}
-            />
-          </Card>
-        )}
+        <Card title="สถานะ Agent" description="ตัวเชื่อมข้อมูลจาก JHCIS ของสถานบริการ">
+          <DataTable
+            rowKey={(row) => row.id}
+            rows={agentRows}
+            emptyTitle="ยังไม่มี Agent"
+            emptyDescription="ติดต่อผู้ดูแลระบบส่วนกลางเพื่อสร้างและติดตั้ง Agent"
+            columns={[
+              {
+                key: "name",
+                header: "Agent",
+                render: (row) => (
+                  <>
+                    <span className="font-medium text-ink">{row.name}</span>
+                    <CellMeta>
+                      {isSuper ? `${row.facilityCode} · ` : ""}
+                      {row.hostname ?? "-"}
+                    </CellMeta>
+                  </>
+                ),
+              },
+              {
+                key: "status",
+                header: "สถานะ",
+                render: (row) => <StatusBadge status={row.effectiveStatus} />,
+              },
+              {
+                key: "sync",
+                header: "ซิงก์ล่าสุด",
+                align: "right",
+                render: (row) => (
+                  <span className="text-xs text-muted">
+                    {relativeTime(row.lastSuccessfulSyncAt)}
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </Card>
       </div>
     </>
   );

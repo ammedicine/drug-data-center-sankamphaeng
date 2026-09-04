@@ -225,8 +225,28 @@ export class UsageExtractor {
     }
   }
 
-  /** Drug master rows referenced by the window, so names stay in sync. */
-  async fetchDrugMaster(limit = 2000): Promise<DrugMasterRecord[]> {
+  /**
+   * The whole cdrug master, one page at a time.
+   *
+   * It has to be the whole table, not a slice: a usage row whose drug code has
+   * no master row loses its category, its unit and - the reason this was
+   * noticed - its drugflag, so a code the facility had switched off (flag 2)
+   * was being reported as still in use. cdrug is ~7,400 rows on a real V5.1
+   * database, so this pages by drugcode rather than holding it all in memory.
+   */
+  async *streamDrugMaster(pageSize = 1000): AsyncGenerator<DrugMasterRecord[]> {
+    let after = "";
+    for (;;) {
+      const page = await this.fetchDrugMaster(pageSize, after);
+      if (!page.length) return;
+      yield page;
+      if (page.length < pageSize) return;
+      after = page[page.length - 1]!.drugCode;
+    }
+  }
+
+  /** One page of the drug master, ordered by drugcode after `after`. */
+  async fetchDrugMaster(limit = 1000, after = ""): Promise<DrugMasterRecord[]> {
     const m = this.mapping;
     const sellName = m.hasUnitLookup ? "us.unitsellname" : "NULL";
     const usageName = m.hasUnitLookup ? "uu.unitsellname" : "NULL";
@@ -262,9 +282,10 @@ export class UsageExtractor {
          ${usageName}                                AS unitusagename
        FROM cdrug c
        ${unitJoins}
+       WHERE c.drugcode > ?
        ORDER BY c.drugcode
        LIMIT ?`,
-      [limit],
+      [after, limit],
     );
 
     return rows.map((row) => ({

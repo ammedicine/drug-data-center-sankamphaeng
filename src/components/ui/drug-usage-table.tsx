@@ -5,7 +5,7 @@ import { Search } from "lucide-react";
 import { useDeferredValue, useMemo, useState } from "react";
 
 import { EmptyState, formatNumber, inputClass } from "@/components/ui/primitives";
-import { drugTypeLabel } from "@/lib/shared/drug-types";
+import { drugStatus, drugTypeLabel } from "@/lib/shared/drug-types";
 
 export interface DrugUsageTableRow {
   drugCode: string;
@@ -91,8 +91,8 @@ export function DrugUsageTable({
   const counts = useMemo(
     () => ({
       all: rows.length,
-      active: rows.filter((row) => row.drugFlag !== "2").length,
-      inactive: rows.filter((row) => row.drugFlag === "2").length,
+      active: rows.filter((row) => drugStatus(row.drugFlag).rank === 0).length,
+      inactive: rows.filter((row) => drugStatus(row.drugFlag).rank === 2).length,
     }),
     [rows],
   );
@@ -104,15 +104,22 @@ export function DrugUsageTable({
         status === "all"
           ? true
           : status === "inactive"
-            ? row.drugFlag === "2"
-            : row.drugFlag !== "2",
+            ? drugStatus(row.drugFlag).rank === 2
+            : drugStatus(row.drugFlag).rank !== 2,
       )
       .map((row) => ({ row, score: score(row, needle) }))
       .filter((item) => item.score > 0);
 
     scored.sort((a, b) => {
-      // While searching, the best match wins; otherwise keep category grouping.
+      // While searching, the best match wins; otherwise keep the report order.
       if (needle && b.score !== a.score) return b.score - a.score;
+
+      // Codes switched off in JHCIS always sit below the ones still in use:
+      // they are history, not something anyone is about to order.
+      const rankA = drugStatus(a.row.drugFlag).rank;
+      const rankB = drugStatus(b.row.drugFlag).rank;
+      if (rankA !== rankB) return rankA - rankB;
+
       const typeA = a.row.drugType ?? "zz";
       const typeB = b.row.drugType ?? "zz";
       if (typeA !== typeB) return typeA.localeCompare(typeB);
@@ -264,10 +271,10 @@ export function DrugUsageTable({
                   <td className="px-4 py-2.5">
                     <span
                       className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${
-                        row.drugFlag === "2" ? "bg-warn-soft text-warn" : "bg-ok-soft text-ok"
+                        drugStatus(row.drugFlag).className
                       }`}
                     >
-                      {row.drugFlag === "2" ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                      {drugStatus(row.drugFlag).label}
                     </span>
                   </td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-xs text-muted numeric">

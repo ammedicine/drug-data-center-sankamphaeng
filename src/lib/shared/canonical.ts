@@ -27,6 +27,7 @@ export const AGENT_HEADERS = {
 export {
   DRUG_TYPE_LABELS,
   PRIMARY_DRUG_TYPES,
+  drugStatus,
   drugTypeLabel,
   isPrimaryDrugType,
 } from "./drug-types";

@@ -352,28 +352,32 @@ export class SyncRunner {
         };
       }
 
-      // 2. Drug master. A failure here must NOT abort the run: the usage rows
-      // are already durable in the queue, and the master is re-sent every sync.
-      const master = await extractor.fetchDrugMaster();
-      if (master.length) {
-        try {
+      // 2. Drug master, the whole of cdrug in pages. A failure here must NOT
+      // abort the run: the usage rows are already durable in the queue, and the
+      // master is re-sent every sync.
+      let masterSent = 0;
+      try {
+        for await (const page of extractor.streamDrugMaster()) {
           await withRetry(
             () =>
               this.client.upload({
                 batchRef,
                 pcucode,
                 sourceVersion,
-                drugs: master,
+                drugs: page,
                 records: [],
               }),
             { label: "upload drug master" },
           );
-        } catch (error) {
-          log.warn("drug master upload failed - continuing with usage records", {
-            batchRef,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          masterSent += page.length;
         }
+        log.info("drug master uploaded", { batchRef, drugs: masterSent });
+      } catch (error) {
+        log.warn("drug master upload failed - continuing with usage records", {
+          batchRef,
+          sent: masterSent,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
 
       // 3. Upload every queued chunk (including leftovers from earlier runs).

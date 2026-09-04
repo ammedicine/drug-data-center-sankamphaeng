@@ -106,9 +106,9 @@ describe("ADMIN is read-everything, change-nothing", () => {
 });
 
 describe("drug category scope", () => {
-  const PRIMARY = ["01", "05", "10"];
+  const PRIMARY = ["01", "10"];
 
-  it("defaults every role to the three medicine categories", () => {
+  it("defaults every role to the dispensed-medicine categories", () => {
     expect(resolveDrugTypeScope(facilityAUser).types).toEqual(PRIMARY);
     expect(resolveDrugTypeScope(admin).types).toEqual(PRIMARY);
     expect(resolveDrugTypeScope(superAdmin).types).toEqual(PRIMARY);
@@ -127,7 +127,14 @@ describe("drug category scope", () => {
   });
 
   it("allows narrowing within the allowed categories", () => {
-    expect(resolveDrugTypeScope(facilityAUser, ["05"]).types).toEqual(["05"]);
+    expect(resolveDrugTypeScope(facilityAUser, ["10"]).types).toEqual(["10"]);
+  });
+
+  it("hides vaccines from everyone but a super admin who asks for them", () => {
+    expect(PRIMARY).not.toContain("05");
+    expect(resolveDrugTypeScope(facilityAUser, ["05"]).types).toEqual(PRIMARY);
+    expect(resolveDrugTypeScope(admin, ["05"]).types).toEqual(PRIMARY);
+    expect(resolveDrugTypeScope(superAdmin, ["05"]).types).toEqual(["05"]);
   });
 });
 

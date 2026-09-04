@@ -16,10 +16,11 @@ import { getSession, type SessionUser } from "./session";
 /**
  * Which cdrug.drugtype values a session may read.
  *
- * USER / FACILITY_ADMIN / ADMIN are limited to the three medicine categories
- * (01, 05, 10) - the rest of cdrug is supplies and service items. SUPER_ADMIN
- * defaults to the same three but may widen the selection, so the default view
- * is comparable across roles.
+ * USER / FACILITY_ADMIN / ADMIN are limited to the dispensed-medicine
+ * categories (01 ยาแผนปัจจุบัน, 10 ยาสมุนไพร) - the rest of cdrug is supplies
+ * and service items, and 05 วัคซีน belongs to EPI, which this system does not
+ * report. SUPER_ADMIN defaults to the same set but may widen it (including to
+ * 05), so the default view is comparable across roles.
  *
  * Like the facility scope, this is decided here and never taken from the
  * client, so a crafted query string cannot widen it.
