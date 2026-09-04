@@ -83,7 +83,7 @@ export default async function DrugDetailPage({
           // A code with no master row is "ไม่ทราบสถานะ", never "ใช้งาน".
           <StatusBadge
             status={
-              detail?.drugFlag === "2" ? "INACTIVE" : detail?.drugFlag ? "ACTIVE" : "UNKNOWN"
+              detail?.drugFlag === "1" ? "ACTIVE" : detail?.drugFlag === "2" ? "INACTIVE" : "UNKNOWN"
             }
           />
         }

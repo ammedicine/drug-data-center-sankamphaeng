@@ -47,10 +47,10 @@ export function drugTypeLabel(code: string | null | undefined): string {
 /**
  * How a drug code's cdrug.drugflag reads on screen.
  *
- * flag "2" is a code the facility switched off. A missing master row is NOT the
- * same as an open code - it means the drug master has not been synced for that
- * code yet - so it gets its own label rather than being flattered into
- * "เปิดใช้งาน", which is what used to happen.
+ * JHCIS records exactly two states: "1" open, "2" switched off. A missing
+ * master row is NOT the same as an open code - it means the drug master has no
+ * row for that code - so it gets its own label rather than being flattered
+ * into "เปิดใช้งาน", which is what used to happen.
  *
  * `rank` is the sort key every listing uses: open codes first, unknown next,
  * closed codes at the bottom.
@@ -62,7 +62,9 @@ export type DrugStatus = {
 };
 
 export function drugStatus(flag: string | null | undefined): DrugStatus {
+  if (flag === "1") return { rank: 0, label: "เปิดใช้งาน", className: "bg-ok-soft text-ok" };
   if (flag === "2") return { rank: 2, label: "ปิดใช้งาน", className: "bg-warn-soft text-warn" };
-  if (!flag) return { rank: 1, label: "ไม่ทราบสถานะ", className: "bg-raised text-muted" };
-  return { rank: 0, label: "เปิดใช้งาน", className: "bg-ok-soft text-ok" };
+  // Anything else - no master row, or a value JHCIS never documented - is
+  // unknown. Only "1" means open.
+  return { rank: 1, label: "ไม่ทราบสถานะ", className: "bg-raised text-muted" };
 }

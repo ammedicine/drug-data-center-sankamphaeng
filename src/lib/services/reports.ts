@@ -122,7 +122,7 @@ export async function getUsageByDrug(
       // A code can be switched off in JHCIS long after it was last dispensed,
       // so the flag comes from the master while the dates come from the facts.
       drugFlag: sql<string | null>`MAX(${drugs.drugFlag})`,
-      retired: sql<number>`CASE WHEN MAX(${drugs.drugFlag}) = '2' THEN 2 WHEN MAX(${drugs.drugFlag}) IS NULL THEN 1 ELSE 0 END`.as("retired"),
+      retired: sql<number>`CASE WHEN MAX(${drugs.drugFlag}) = '1' THEN 0 WHEN MAX(${drugs.drugFlag}) = '2' THEN 2 ELSE 1 END`.as("retired"),
       firstUsageDate: sql<string | null>`DATE_FORMAT(MIN(${drugUsage.usageDate}), '%Y-%m-%d')`,
       lastUsageDate: sql<string | null>`DATE_FORMAT(MAX(${drugUsage.usageDate}), '%Y-%m-%d')`,
     })
@@ -274,7 +274,7 @@ export async function getUsageByFacilityAndDrug(
   limit = 4000,
 ): Promise<FacilityDrugRow[]> {
   const drugName = sql<string>`MAX(${drugUsage.drugNameSnapshot})`.as("drug_name");
-  const retired = sql<number>`CASE WHEN MAX(${drugs.drugFlag}) = '2' THEN 2 WHEN MAX(${drugs.drugFlag}) IS NULL THEN 1 ELSE 0 END`.as(
+  const retired = sql<number>`CASE WHEN MAX(${drugs.drugFlag}) = '1' THEN 0 WHEN MAX(${drugs.drugFlag}) = '2' THEN 2 ELSE 1 END`.as(
     "retired",
   );
 
