@@ -30,7 +30,13 @@ const id = (name: string) => varchar(name, { length: 30 });
 const createdAt = timestamp("created_at").notNull().defaultNow();
 const updatedAt = timestamp("updated_at").notNull().defaultNow().onUpdateNow();
 
-export const USER_ROLES = ["SUPER_ADMIN", "FACILITY_ADMIN", "USER"] as const;
+/**
+ * SUPER_ADMIN   เห็นทุกสถานบริการ + จัดการได้ทุกอย่าง
+ * ADMIN         เห็นทุกสถานบริการ แต่ดูอย่างเดียว (ไม่จัดการผู้ใช้/agent/facility)
+ * FACILITY_ADMIN เห็นเฉพาะสถานบริการตัวเอง + จัดการผู้ใช้ในสถานบริการตัวเอง
+ * USER          เห็นเฉพาะสถานบริการตัวเอง
+ */
+export const USER_ROLES = ["SUPER_ADMIN", "ADMIN", "FACILITY_ADMIN", "USER"] as const;
 export const AGENT_STATUSES = ["ONLINE", "OFFLINE", "SYNCING", "ERROR", "DISABLED"] as const;
 export const BATCH_STATUSES = ["STARTED", "UPLOADING", "COMPLETED", "FAILED", "ABORTED"] as const;
 export const SYNC_MODES = ["INITIAL", "INCREMENTAL", "MANUAL_RANGE", "RETRY"] as const;
@@ -41,13 +47,20 @@ export const users = mysqlTable(
   "users",
   {
     id: id("id").primaryKey(),
+    /** login name chosen at registration; email stays optional */
+    username: varchar("username", { length: 60 }),
     email: varchar("email", { length: 255 }).notNull(),
     passwordHash: varchar("password_hash", { length: 255 }).notNull(),
     fullName: varchar("full_name", { length: 160 }).notNull(),
+    /** ตำแหน่ง เช่น พยาบาลวิชาชีพ, เจ้าพนักงานเภสัชกรรม */
+    position: varchar("position", { length: 120 }),
     role: mysqlEnum("role", USER_ROLES).notNull().default("USER"),
     /** null for SUPER_ADMIN; every other role is bound to exactly one facility */
     facilityId: id("facility_id"),
+    /** self-registered accounts start inactive and wait for approval */
     isActive: boolean("is_active").notNull().default(true),
+    approvedAt: datetime("approved_at"),
+    approvedByUserId: id("approved_by_user_id"),
     lastLoginAt: datetime("last_login_at"),
     /** bumped on password change / forced logout: invalidates issued sessions */
     sessionEpoch: int("session_epoch").notNull().default(1),
@@ -56,6 +69,7 @@ export const users = mysqlTable(
   },
   (t) => ({
     emailUq: uniqueIndex("users_email_uq").on(t.email),
+    usernameUq: uniqueIndex("users_username_uq").on(t.username),
     facilityIdx: index("users_facility_idx").on(t.facilityId, t.isActive),
   }),
 );
@@ -261,8 +275,11 @@ export const drugs = mysqlTable(
     drugTypeSub: varchar("drug_type_sub", { length: 2 }),
     /** 1 = active, 2 = disabled in JHCIS (historical usage is still kept) */
     drugFlag: char("drug_flag", { length: 1 }),
+    /** JHCIS unit codes plus the names resolved from cdrugunitsell */
     unitSell: varchar("unit_sell", { length: 15 }),
+    unitSellName: varchar("unit_sell_name", { length: 64 }),
     unitUsage: varchar("unit_usage", { length: 15 }),
+    unitUsageName: varchar("unit_usage_name", { length: 64 }),
     sourceVersion: varchar("source_version", { length: 40 }),
     syncedAt: datetime("synced_at"),
     createdAt,
@@ -293,7 +310,10 @@ export const drugUsage = mysqlTable(
     visitNo: bigint("visit_no", { mode: "number" }).notNull(),
     usageDate: date("usage_date", { mode: "string" }).notNull(),
     quantity: decimal("quantity", { precision: 14, scale: 2 }).notNull(),
-    unit: varchar("unit", { length: 15 }),
+    /** human-readable unit (เม็ด, ขวด, ...) resolved from cdrugunitsell */
+    unit: varchar("unit", { length: 64 }),
+    /** the raw JHCIS unit code, kept so a wrong mapping stays traceable */
+    unitCode: varchar("unit_code", { length: 15 }),
     clinic: varchar("clinic", { length: 5 }),
     sourcePcucode: char("source_pcucode", { length: 5 }).notNull(),
     sourceVersion: varchar("source_version", { length: 40 }),

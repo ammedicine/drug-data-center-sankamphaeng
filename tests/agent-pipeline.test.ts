@@ -249,12 +249,25 @@ describe.runIf(await jhcisReachable())("agent pipeline against real JHCISDB", ()
     const record = state.uploads.flatMap((call) => call.records)[0];
     expect(record).toBeDefined();
     expect(Object.keys(record).sort()).toEqual(
-      ["clinic", "drugCode", "drugName", "drugType", "quantity", "unit", "usageDate", "visitNo"].sort(),
+      [
+        "clinic",
+        "drugCode",
+        "drugName",
+        "drugType",
+        "quantity",
+        "unit",
+        "unitCode",
+        "usageDate",
+        "visitNo",
+      ].sort(),
     );
     expect(record.usageDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(record.usageDate >= RANGE.from && record.usageDate <= RANGE.to).toBe(true);
     expect(Number.isFinite(record.quantity)).toBe(true);
     expect(record.drugCode.length).toBeGreaterThan(0);
+    // units must arrive as names (เม็ด/ขวด/...), not as raw cdrugunitsell codes
+    const withUnit = state.uploads.flatMap((c) => c.records).find((r) => r.unit);
+    if (withUnit) expect(withUnit.unit).not.toMatch(/^\d{3}$/);
   });
 
   it("keeps every chunk within the server's upload limit", () => {

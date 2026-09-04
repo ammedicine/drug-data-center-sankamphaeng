@@ -1,6 +1,6 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { eq, or } from "drizzle-orm";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
@@ -15,18 +15,21 @@ export interface LoginState {
 }
 
 /**
- * Password login. The same generic message is returned for unknown accounts and
- * wrong passwords so the form cannot be used to enumerate users.
+ * Password login by user id (or email, for the accounts seeded before
+ * registration existed). The same generic message is returned for unknown
+ * accounts and wrong passwords so the form cannot be used to enumerate users;
+ * the one exception is an account that exists and authenticated correctly but
+ * is still awaiting approval - that person needs to know why they are blocked.
  */
 export async function loginAction(_prev: LoginState, formData: FormData): Promise<LoginState> {
-  const email = String(formData.get("email") ?? "")
+  const identifier = String(formData.get("identifier") ?? formData.get("email") ?? "")
     .trim()
     .toLowerCase();
   const password = String(formData.get("password") ?? "");
   const ip = clientIp(await headers());
 
-  if (!email || !password) {
-    return { error: "กรุณากรอกอีเมลและรหัสผ่าน" };
+  if (!identifier || !password) {
+    return { error: "กรุณากรอกชื่อผู้ใช้และรหัสผ่าน" };
   }
 
   const [user] = await db
@@ -36,27 +39,42 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
       fullName: users.fullName,
       role: users.role,
       facilityId: users.facilityId,
+      username: users.username,
       passwordHash: users.passwordHash,
       isActive: users.isActive,
       sessionEpoch: users.sessionEpoch,
     })
     .from(users)
-    .where(eq(users.email, email))
+    .where(or(eq(users.username, identifier), eq(users.email, identifier)))
     .limit(1);
 
   const ok = user ? await verifyPassword(password, user.passwordHash) : false;
 
-  if (!user || !ok || !user.isActive) {
+  if (!user || !ok) {
     await writeAudit({
       actorType: "USER",
       actorId: user?.id ?? null,
-      actorLabel: email,
+      actorLabel: identifier,
       action: "LOGIN_FAILED",
       resource: "session",
       ip,
-      metadata: { reason: !user ? "unknown_user" : !ok ? "bad_password" : "inactive" },
+      metadata: { reason: user ? "bad_password" : "unknown_user" },
     });
-    return { error: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" };
+    return { error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" };
+  }
+
+  if (!user.isActive) {
+    await writeAudit({
+      actorType: "USER",
+      actorId: user.id,
+      actorLabel: identifier,
+      action: "LOGIN_FAILED",
+      resource: "session",
+      facilityId: user.facilityId,
+      ip,
+      metadata: { reason: "pending_or_disabled" },
+    });
+    return { error: "บัญชีนี้ยังไม่ได้รับอนุมัติ หรือถูกปิดใช้งาน กรุณาติดต่อผู้ดูแลระบบ" };
   }
 
   await setSessionCookie({

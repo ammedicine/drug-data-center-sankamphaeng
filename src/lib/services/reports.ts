@@ -14,7 +14,8 @@ export interface UsageFilters {
   facilityIds: string[] | null; // null = all facilities (SUPER_ADMIN)
   from: string; // yyyy-mm-dd
   to: string; // yyyy-mm-dd
-  drugType?: string | null;
+  /** cdrug.drugtype values this query may read; resolved by resolveDrugTypeScope */
+  drugTypes?: string[] | null;
   drugCode?: string | null;
   search?: string | null;
 }
@@ -30,7 +31,9 @@ function whereClause(filters: UsageFilters): SQL {
     lte(drugUsage.usageDate, filters.to),
   ];
   if (filters.facilityIds) parts.push(inArray(drugUsage.facilityId, filters.facilityIds));
-  if (filters.drugType) parts.push(eq(drugUsage.drugType, filters.drugType));
+  if (filters.drugTypes && filters.drugTypes.length) {
+    parts.push(inArray(drugUsage.drugType, filters.drugTypes));
+  }
   if (filters.drugCode) parts.push(eq(drugUsage.drugCode, filters.drugCode));
   if (filters.search) {
     const term = `%${filters.search.trim()}%`;
@@ -79,30 +82,40 @@ export interface UsageByDrugRow {
 export async function getUsageByDrug(
   filters: UsageFilters,
   paging: Paging,
-  sort: "quantity" | "rows" | "code" = "quantity",
+  sort: "name" | "quantity" | "rows" | "code" = "name",
 ): Promise<{ rows: UsageByDrugRow[]; total: number }> {
   const where = whereClause(filters);
 
+  // Aliased so ORDER BY can reference the aggregate without repeating it
+  // (TiDB runs ONLY_FULL_GROUP_BY and compares expressions textually).
+  const drugName = sql<string>`MAX(${drugUsage.drugNameSnapshot})`.as("drug_name");
+  const totalQuantity = sql<number>`SUM(${drugUsage.quantity})`.as("total_quantity");
+  const dispensingRows = sql<number>`COUNT(*)`.as("dispensing_rows");
+
+  // Category first so the report always reads as grouped sections, then the
+  // requested order inside each category (ชื่อยา by default).
   const orderBy =
     sort === "code"
-      ? asc(drugUsage.drugCode)
+      ? [asc(drugUsage.drugType), asc(drugUsage.drugCode)]
       : sort === "rows"
-        ? desc(sql`COUNT(*)`)
-        : desc(sql`SUM(${drugUsage.quantity})`);
+        ? [asc(drugUsage.drugType), sql`dispensing_rows desc`]
+        : sort === "quantity"
+          ? [asc(drugUsage.drugType), sql`total_quantity desc`]
+          : [asc(drugUsage.drugType), sql`drug_name asc`];
 
   const rows = await db
     .select({
       drugCode: drugUsage.drugCode,
-      drugName: sql<string>`MAX(${drugUsage.drugNameSnapshot})`,
-      drugType: sql<string | null>`MAX(${drugUsage.drugType})`,
+      drugName,
+      drugType: drugUsage.drugType,
       unit: sql<string | null>`MAX(${drugUsage.unit})`,
-      totalQuantity: sql<number>`SUM(${drugUsage.quantity})`,
-      dispensingRows: sql<number>`COUNT(*)`,
+      totalQuantity,
+      dispensingRows,
     })
     .from(drugUsage)
     .where(where)
-    .groupBy(drugUsage.drugCode)
-    .orderBy(orderBy)
+    .groupBy(drugUsage.drugCode, drugUsage.drugType)
+    .orderBy(...orderBy)
     .limit(paging.pageSize)
     .offset((paging.page - 1) * paging.pageSize);
 
@@ -134,10 +147,12 @@ export async function getUsageTrend(
   filters: UsageFilters,
   granularity: "day" | "month" = "day",
 ): Promise<TrendPoint[]> {
-  const period =
-    granularity === "month"
-      ? sql<string>`DATE_FORMAT(${drugUsage.usageDate}, '%Y-%m')`
-      : sql<string>`DATE_FORMAT(${drugUsage.usageDate}, '%Y-%m-%d')`;
+  // Group and order by the SELECT alias, not by the expression: drizzle renders
+  // the same sql`` template unqualified in SELECT but table-qualified in
+  // GROUP BY, and TiDB runs with ONLY_FULL_GROUP_BY, which compares them
+  // textually and rejects the mismatch.
+  const format = granularity === "month" ? "%Y-%m" : "%Y-%m-%d";
+  const period = sql<string>`DATE_FORMAT(${drugUsage.usageDate}, ${format})`.as("period");
 
   const rows = await db
     .select({
@@ -147,13 +162,42 @@ export async function getUsageTrend(
     })
     .from(drugUsage)
     .where(whereClause(filters))
-    .groupBy(period)
-    .orderBy(asc(period));
+    .groupBy(sql`period`)
+    .orderBy(sql`period asc`);
 
   return rows.map((r) => ({
     period: String(r.period),
     totalQuantity: Number(r.totalQuantity ?? 0),
     dispensingRows: Number(r.dispensingRows ?? 0),
+  }));
+}
+
+export interface DrugTypeUsageRow {
+  drugType: string | null;
+  distinctDrugs: number;
+  dispensingRows: number;
+  totalQuantity: number;
+}
+
+/** Per-category totals shown above the table so หมวดยา stay clearly separated. */
+export async function getUsageByDrugType(filters: UsageFilters): Promise<DrugTypeUsageRow[]> {
+  const rows = await db
+    .select({
+      drugType: drugUsage.drugType,
+      distinctDrugs: sql<number>`COUNT(DISTINCT ${drugUsage.drugCode})`,
+      dispensingRows: sql<number>`COUNT(*)`,
+      totalQuantity: sql<number>`SUM(${drugUsage.quantity})`,
+    })
+    .from(drugUsage)
+    .where(whereClause(filters))
+    .groupBy(drugUsage.drugType)
+    .orderBy(asc(drugUsage.drugType));
+
+  return rows.map((r) => ({
+    drugType: r.drugType,
+    distinctDrugs: Number(r.distinctDrugs ?? 0),
+    dispensingRows: Number(r.dispensingRows ?? 0),
+    totalQuantity: Number(r.totalQuantity ?? 0),
   }));
 }
 
@@ -216,7 +260,7 @@ export async function getDrugDetail(
       genericName: drugs.genericName,
       drugType: drugs.drugType,
       drugFlag: drugs.drugFlag,
-      unit: drugs.unitSell,
+      unit: sql<string | null>`COALESCE(${drugs.unitSellName}, ${drugs.unitSell})`,
     })
     .from(drugs)
     .where(and(...parts))

@@ -10,11 +10,11 @@ import {
   formatNumber,
   relativeTime,
 } from "@/components/ui/primitives";
-import { requireUser } from "@/lib/auth/rbac";
-import { resolveFacilityScope } from "@/lib/auth/rbac";
+import { requireUser, resolveDrugTypeScope, resolveFacilityScope } from "@/lib/auth/rbac";
 import { getFleetSummary, listAgents } from "@/lib/services/monitoring";
 import {
   getUsageByDrug,
+  getUsageByDrugType,
   getUsageByFacility,
   getUsageSummary,
   getUsageTrend,
@@ -33,24 +33,33 @@ function defaultRange(): { from: string; to: string } {
 export default async function DashboardPage() {
   const user = await requireUser();
   const scope = resolveFacilityScope(user);
+  // The dashboard always shows the medicine categories only (01, 05, 10) so the
+  // headline totals mean the same thing for every role.
+  const typeScope = resolveDrugTypeScope(user);
   const range = defaultRange();
-  const filters = { facilityIds: scope.facilityIds, from: range.from, to: range.to };
+  const filters = {
+    facilityIds: scope.facilityIds,
+    from: range.from,
+    to: range.to,
+    drugTypes: typeScope.types,
+  };
   const isSuper = user.role === "SUPER_ADMIN";
 
-  const [summary, fleet, trend, topDrugs, agentRows, byFacility] = await Promise.all([
+  const [summary, fleet, trend, topDrugs, agentRows, byFacility, byType] = await Promise.all([
     getUsageSummary(filters),
     getFleetSummary(scope.facilityIds),
     getUsageTrend(filters, "day"),
     getUsageByDrug(filters, { page: 1, pageSize: 10 }),
     listAgents(scope.facilityIds),
     isSuper ? getUsageByFacility(filters) : Promise.resolve([]),
+    getUsageByDrugType(filters),
   ]);
 
   return (
     <>
       <PageHeader
         title={isSuper ? "ภาพรวมทั้งอำเภอ" : "ภาพรวมสถานบริการ"}
-        subtitle={`ข้อมูลการจ่ายยาระหว่าง ${range.from} ถึง ${range.to}`}
+        subtitle={`ข้อมูลการจ่ายยาระหว่าง ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบัน วัคซีน และยาสมุนไพร`}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -65,6 +74,18 @@ export default async function DashboardPage() {
             fleet.lastSyncAt ? `ซิงก์ล่าสุด ${relativeTime(fleet.lastSyncAt)}` : "ยังไม่เคยซิงก์"
           }
         />
+      </div>
+
+      <div className="mt-6 grid gap-4 sm:grid-cols-3">
+        {byType.map((row) => (
+          <StatCard
+            key={row.drugType ?? "unknown"}
+            label={drugTypeLabel(row.drugType)}
+            value={row.totalQuantity}
+            unit="หน่วย"
+            hint={`${row.distinctDrugs.toLocaleString("th-TH")} รายการยา · จ่าย ${row.dispensingRows.toLocaleString("th-TH")} ครั้ง`}
+          />
+        ))}
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-3">

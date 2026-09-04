@@ -8,7 +8,7 @@ import {
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
-import { requireSuperAdmin } from "@/lib/auth/rbac";
+import { requireAllFacilityViewer } from "@/lib/auth/rbac";
 import {
   HEARTBEAT_TIMEOUT_MINUTES,
   getFleetSummary,
@@ -20,7 +20,7 @@ export const metadata = { title: "การเฝ้าระวังระบ�
 export const dynamic = "force-dynamic";
 
 export default async function MonitoringPage() {
-  await requireSuperAdmin();
+  await requireAllFacilityViewer();
 
   const [fleet, agentRows, failed, recent] = await Promise.all([
     getFleetSummary(null),

@@ -1,13 +1,13 @@
 import { DataTable } from "@/components/ui/data-table";
 import { Card, PageHeader, formatDateTime } from "@/components/ui/primitives";
-import { requireSuperAdmin } from "@/lib/auth/rbac";
+import { requireAllFacilityViewer } from "@/lib/auth/rbac";
 import { listAuditLogs } from "@/lib/services/facilities";
 
 export const metadata = { title: "บันทึกการใช้งาน" };
 export const dynamic = "force-dynamic";
 
 export default async function AuditPage() {
-  await requireSuperAdmin();
+  await requireAllFacilityViewer();
   const rows = await listAuditLogs(null, 200);
 
   return (

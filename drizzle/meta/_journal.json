@@ -8,6 +8,20 @@
       "when": 1788520464432,
       "tag": "0000_greedy_tomas",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1788525313519,
+      "tag": "0001_add_registration_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1788525493293,
+      "tag": "0002_resolve_unit_names",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { ForbiddenError, requireApiUser, resolveFacilityScope, UnauthorizedError } from "@/lib/auth/rbac";
+import {
+  ForbiddenError,
+  requireApiUser,
+  resolveDrugTypeScope,
+  resolveFacilityScope,
+  UnauthorizedError,
+} from "@/lib/auth/rbac";
 import { clientIp, writeAudit } from "@/lib/services/audit";
 import { getUsageByDrug } from "@/lib/services/reports";
 import { drugTypeLabel } from "@/lib/shared/canonical";
@@ -28,13 +34,18 @@ export async function GET(req: NextRequest) {
     const from = url.searchParams.get("from") ?? today;
     const to = url.searchParams.get("to") ?? today;
     const scope = resolveFacilityScope(user, url.searchParams.get("facility"));
+    const requestedTypes = (url.searchParams.get("types") ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^\d{1,2}$/.test(item));
+    const typeScope = resolveDrugTypeScope(user, requestedTypes);
 
     const { rows } = await getUsageByDrug(
       {
         facilityIds: scope.facilityIds,
         from,
         to,
-        drugType: url.searchParams.get("drugType"),
+        drugTypes: typeScope.types,
         search: url.searchParams.get("q"),
       },
       { page: 1, pageSize: MAX_ROWS },
@@ -63,7 +74,7 @@ export async function GET(req: NextRequest) {
       resource: "drug_usage_report",
       facilityId: scope.single,
       ip: clientIp(req.headers),
-      metadata: { from, to, rows: rows.length },
+      metadata: { from, to, rows: rows.length, drugTypes: typeScope.types },
     });
 
     // BOM so Excel on Windows opens the Thai text correctly.

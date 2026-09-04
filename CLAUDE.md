@@ -88,11 +88,37 @@ drugtype ที่พบจริง: 02(5468) 01(656) 11(619) 05(182) 03(178) 1
 ### ปริมาณข้อมูล (dev DB)
 cdrug 7,410 / visitdrug 265,787 / visit 130,422 / pcucode เดียว = `05957` / visitdate 1972-12-24 → 2026-08-08
 
+### หน่วยนับยา ต้องแปลงรหัสก่อน (ยืนยันจาก DB จริง)
+- `cdrug.unitsell` / `cdrug.unitusage` เก็บ **รหัส** ไม่ใช่ชื่อ (เช่น 027, 009, 006)
+- ตารางแปลงคือ **`cdrugunitsell(unitsellcode, unitsellname)`** — 027=เม็ด, 009=แคปซูล, 006=ขวด
+- Agent LEFT JOIN ตารางนี้ตั้งแต่ต้นทาง แล้วส่งขึ้น Central เป็น `unit` (ชื่อ) + `unitCode` (รหัสเดิมไว้ตรวจสอบ)
+- ถ้าไม่มีตารางนี้ SchemaInspector จะเตือนและ fallback เป็นรหัส (`supportsUnitName: false`)
+
+### หมวดยา (drugtype) ที่ถือว่าเป็น "ยา"
+- **01 ยาแผนปัจจุบัน, 05 วัคซีน, 10 ยาสมุนไพร** เท่านั้นที่นับเป็นยา
+- ที่เหลือ (02 เวชภัณฑ์มิใช่ยา, 06 หัตถการ, 11 ครุภัณฑ์ ฯลฯ) เป็นวัสดุ/บริการ ถ้ารวมเข้าไปยอดจะเพี้ยน
+- USER / FACILITY_ADMIN / ADMIN → บังคับเห็นแค่ 3 หมวดนี้ (`resolveDrugTypeScope`)
+- SUPER_ADMIN → ค่าเริ่มต้นก็ 3 หมวดนี้ แต่ติ๊กเพิ่มหมวดอื่นได้
+- Agent ยัง sync ทุกหมวดขึ้น Central (ตัดตอนแสดงผล ไม่ตัดตอนเก็บ) เพื่อให้ super admin ตรวจย้อนหลังได้
+
 ### กลยุทธ์ incremental ที่เลือก (เพราะ dateupdate เชื่อไม่ได้)
 ใช้ **date window ของ `visit.visitdate`** + deterministic key
 `record_key = sha256(facility_id|pcucode|visitno|drugcode)`
 sync ถัดไปเริ่มจาก `last_visit_date - REPROCESS_DAYS (default 7)` เพื่อจับข้อมูลย้อนหลังที่คีย์ทีหลัง
 Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส่งซ้ำได้ ไม่เกิดข้อมูลซ้ำ
+
+## 3.5 สิทธิ์ผู้ใช้ (4 ระดับ)
+
+| role | เห็นข้อมูล | จัดการระบบ |
+|---|---|---|
+| SUPER_ADMIN | ทุกสถานบริการ ทุกหมวดยา | ได้ทั้งหมด (facility/agent/user) |
+| ADMIN | ทุกสถานบริการ เฉพาะยา 3 หมวด | **ไม่ได้** (อ่านอย่างเดียว) |
+| FACILITY_ADMIN | สถานบริการตัวเอง เฉพาะยา 3 หมวด | ผู้ใช้ในสถานบริการตัวเอง + สั่งซิงก์ |
+| USER | สถานบริการตัวเอง เฉพาะยา 3 หมวด | ไม่ได้ |
+
+- สมัครสมาชิกเองได้ที่ `/register` เก็บ: ชื่อ-นามสกุล, ตำแหน่ง, user id, รหัสผ่าน, รหัสสถานบริการ (pcucode), ชื่อสถานบริการ
+- บัญชีที่สมัครเองจะ **inactive จนกว่าผู้ดูแลอนุมัติ** ที่ `/admin/users` (ถ้าเปิดใช้ทันทีเท่ากับไม่มี facility isolation)
+- login ด้วย **user id** หรืออีเมลก็ได้ (บัญชีเก่าที่ seed ไว้ยังใช้อีเมลได้)
 
 ## 4. สถานะการทำงาน (อัปเดตทุกครั้ง)
 
@@ -108,7 +134,20 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 - [x] PHASE 9 — Admin monitoring (/admin/monitoring, /admin/agents, /sync) + Sync Now
 - [x] PHASE 10 — UI/UX (design system + component ตาม §19)
 - [x] PHASE 11 — security checklist + unit test 20 ข้อ (docs/SECURITY.md)
-- [ ] PHASE 12 — Production deploy (รอ TiDB Cloud + Vercel env จริง — ดู docs/DEPLOYMENT.md)
+- [x] PHASE 12 — เชื่อม TiDB Cloud จริงแล้ว (migrate + seed + sync + รายงาน ผ่านครบวง)
+      เหลือ deploy ขึ้น Vercel
+
+### ผลทดสอบกับของจริง (2026-09-04)
+- TiDB Cloud `sankamphaeng_drug` (TiDB v8.5.3 serverless) — 15 ตาราง, migration 0000-0002
+- sync ข้อมูลจริง 2026-06-01→08-08 = **4,650 แถว** ปฏิเสธ 0 · sync ซ้ำแล้วยัง 4,650 (idempotent)
+- หน่วยแปลงถูก: เม็ด/ขวด/แคปซูล/หลอด/อัน
+- รายงานหน้าเว็บ: ยา 3 หมวด = 93,618 หน่วย (01 = 93,260 / 10 = 358)
+
+### บั๊กที่เจอตอนทดสอบจริงและแก้แล้ว
+1. `getUsageTrend` — drizzle เรนเดอร์ expression เดียวกันต่างกันใน SELECT (`usage_date`) กับ GROUP BY
+   (`drug_usage`.`usage_date`) พอเจอ ONLY_FULL_GROUP_BY ของ TiDB เลยพัง → แก้เป็น group/order by alias
+2. อัปโหลด drug master ล้ม แล้ว throw ออกจาก `run()` ทำให้ไม่ปิด batch และไม่ flush คิว → จับ error แล้วไปต่อ
+3. ลืม apply migration 0002 → upload ล้มทั้งหมด แต่ **คิวออฟไลน์เก็บครบ** พอ migrate แล้ว `retry` ส่งได้ทั้ง 4,650
 
 ### ทดสอบแล้ว
 - `tests/security.test.ts` — 20 เคส: facility isolation, record key, HMAC, การเข้ารหัส credential
@@ -148,3 +187,10 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 | docs/SYNC.md | sync pipeline + idempotency |
 | docs/AGENT.md | ติดตั้ง/ใช้งาน Agent |
 | docs/DEPLOYMENT.md | Vercel + TiDB |
+
+## 7. กติกาเวลาทดสอบในเครื่อง
+
+- **ห้ามรัน `next build` ขณะ dev server ทำงาน** — มันเขียนทับ `.next` แล้ว dev server พังทันที
+  ถ้าเผลอ ให้หยุด dev server → `rm -rf .next` → เริ่มใหม่
+- client component **ห้าม** import `src/lib/shared/canonical.ts` (มี `node:crypto`) ให้ใช้ `drug-types.ts` แทน
+- migration ต้อง `npm run db:generate` **แล้ว** `npm run db:migrate` ทุกครั้ง ก่อนทดสอบ sync

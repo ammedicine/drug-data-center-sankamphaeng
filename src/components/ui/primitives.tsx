@@ -109,6 +109,7 @@ const STATUS_STYLES: Record<string, string> = {
   ABORTED: "bg-warn-bg text-warn",
   ACTIVE: "bg-ok-bg text-ok",
   INACTIVE: "bg-[#eef1f4] text-muted",
+  PENDING: "bg-warn-bg text-warn",
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -124,6 +125,7 @@ const STATUS_LABELS: Record<string, string> = {
   ABORTED: "ยกเลิก",
   ACTIVE: "ใช้งาน",
   INACTIVE: "ปิดใช้งาน",
+  PENDING: "รออนุมัติ",
 };
 
 export function StatusBadge({ status }: { status: string }) {

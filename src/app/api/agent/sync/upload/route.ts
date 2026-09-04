@@ -18,7 +18,8 @@ const usageRecord = z.object({
   drugName: z.string().max(255).nullable(),
   drugType: z.string().max(2).nullable(),
   quantity: z.number(),
-  unit: z.string().max(15).nullable(),
+  unit: z.string().max(64).nullable(),
+  unitCode: z.string().max(15).nullable().optional().default(null),
   clinic: z.string().max(5).nullable(),
   usageDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
@@ -31,7 +32,9 @@ const drugRecord = z.object({
   drugTypeSub: z.string().max(2).nullable(),
   drugFlag: z.string().max(1).nullable(),
   unitSell: z.string().max(15).nullable(),
+  unitSellName: z.string().max(64).nullable().optional().default(null),
   unitUsage: z.string().max(15).nullable(),
+  unitUsageName: z.string().max(64).nullable().optional().default(null),
 });
 
 const schema = z.object({

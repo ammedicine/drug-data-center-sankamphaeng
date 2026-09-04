@@ -27,14 +27,14 @@ export function LoginForm() {
         </p>
       ) : null}
 
-      <Field label="อีเมล">
+      <Field label="ชื่อผู้ใช้ (user id) หรืออีเมล">
         <input
-          name="email"
-          type="email"
+          name="identifier"
+          type="text"
           autoComplete="username"
           required
           className={inputClass}
-          placeholder="you@sankamphaeng.go.th"
+          placeholder="somchai.j"
         />
       </Field>
 

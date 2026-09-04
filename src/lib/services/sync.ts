@@ -36,6 +36,7 @@ interface ValidatedRecord {
   usageDate: string;
   quantity: string;
   unit: string | null;
+  unitCode: string | null;
   clinic: string | null;
   sourcePcucode: string;
   sourceVersion: string | null;
@@ -94,7 +95,8 @@ function validate(
       visitNo,
       usageDate: record.usageDate,
       quantity: quantity.toFixed(2),
-      unit: record.unit?.trim().slice(0, 15) ?? null,
+      unit: record.unit?.trim().slice(0, 64) ?? null,
+      unitCode: record.unitCode?.trim().slice(0, 15) ?? null,
       clinic: record.clinic?.trim().slice(0, 5) ?? null,
       sourcePcucode: ctx.pcucode,
       sourceVersion: ctx.sourceVersion,
@@ -168,7 +170,9 @@ export async function upsertDrugMaster(
       drugTypeSub: r.drugTypeSub?.trim().slice(0, 2) ?? null,
       drugFlag: r.drugFlag?.trim().slice(0, 1) ?? null,
       unitSell: r.unitSell?.trim().slice(0, 15) ?? null,
+      unitSellName: r.unitSellName?.trim().slice(0, 64) ?? null,
       unitUsage: r.unitUsage?.trim().slice(0, 15) ?? null,
+      unitUsageName: r.unitUsageName?.trim().slice(0, 64) ?? null,
       sourceVersion,
       syncedAt: new Date(),
     }));
@@ -185,7 +189,9 @@ export async function upsertDrugMaster(
           drugTypeSub: sql`VALUES(drug_type_sub)`,
           drugFlag: sql`VALUES(drug_flag)`,
           unitSell: sql`VALUES(unit_sell)`,
+          unitSellName: sql`VALUES(unit_sell_name)`,
           unitUsage: sql`VALUES(unit_usage)`,
+          unitUsageName: sql`VALUES(unit_usage_name)`,
           sourceVersion: sql`VALUES(source_version)`,
           syncedAt: sql`VALUES(synced_at)`,
         },
@@ -233,6 +239,7 @@ export async function ingestUsageRecords(input: {
           usageDate: sql`VALUES(usage_date)`,
           quantity: sql`VALUES(quantity)`,
           unit: sql`VALUES(unit)`,
+          unitCode: sql`VALUES(unit_code)`,
           clinic: sql`VALUES(clinic)`,
           sourceVersion: sql`VALUES(source_version)`,
           syncBatchId: sql`VALUES(sync_batch_id)`,

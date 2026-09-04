@@ -7,7 +7,7 @@ import {
   formatDateTime,
   relativeTime,
 } from "@/components/ui/primitives";
-import { requireSuperAdmin } from "@/lib/auth/rbac";
+import { canManageSystem, requireAllFacilityViewer } from "@/lib/auth/rbac";
 import { listFacilityOptions } from "@/lib/services/facilities";
 import { getFleetSummary, listAgents } from "@/lib/services/monitoring";
 
@@ -23,7 +23,8 @@ export const metadata = { title: "จัดการ Agent" };
 export const dynamic = "force-dynamic";
 
 export default async function AgentsPage() {
-  await requireSuperAdmin();
+  const user = await requireAllFacilityViewer();
+  const canManage = canManageSystem(user);
   const [rows, facilities, fleet] = await Promise.all([
     listAgents(null),
     listFacilityOptions(null),
@@ -48,17 +49,21 @@ export default async function AgentsPage() {
         />
       </div>
 
-      <Card className="my-6" title="ลงทะเบียน Agent ใหม่">
-        <div className="p-5">
-          {facilities.length ? (
-            <CollapsibleForm label="+ สร้าง Agent">
-              <AgentForm facilities={facilities} />
-            </CollapsibleForm>
-          ) : (
-            <p className="text-sm text-muted">กรุณาเพิ่มสถานบริการก่อนสร้าง Agent</p>
-          )}
-        </div>
-      </Card>
+      {canManage ? (
+        <Card className="my-6" title="ลงทะเบียน Agent ใหม่">
+          <div className="p-5">
+            {facilities.length ? (
+              <CollapsibleForm label="+ สร้าง Agent">
+                <AgentForm facilities={facilities} />
+              </CollapsibleForm>
+            ) : (
+              <p className="text-sm text-muted">กรุณาเพิ่มสถานบริการก่อนสร้าง Agent</p>
+            )}
+          </div>
+        </Card>
+      ) : (
+        <div className="my-6" />
+      )}
 
       <Card title={`Agent ทั้งหมด (${rows.length})`}>
         <DataTable
@@ -131,13 +136,14 @@ export default async function AgentsPage() {
               key: "actions",
               header: "",
               align: "right",
-              render: (row) => (
-                <div className="flex flex-col items-end gap-2">
-                  {row.status !== "DISABLED" ? <SyncNowForm agentId={row.id} /> : null}
-                  <AgentTokenForm agentId={row.id} />
-                  {row.status !== "DISABLED" ? <AgentRevokeForm agentId={row.id} /> : null}
-                </div>
-              ),
+              render: (row) =>
+                canManage ? (
+                  <div className="flex flex-col items-end gap-2">
+                    {row.status !== "DISABLED" ? <SyncNowForm agentId={row.id} /> : null}
+                    <AgentTokenForm agentId={row.id} />
+                    {row.status !== "DISABLED" ? <AgentRevokeForm agentId={row.id} /> : null}
+                  </div>
+                ) : null,
             },
           ]}
         />

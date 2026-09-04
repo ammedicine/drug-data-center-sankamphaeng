@@ -11,14 +11,17 @@
 | แก้ payload ระหว่างทาง | ลายเซ็นครอบ `sha256(body)` |
 | Token ติดตั้งรั่ว | token ใช้ครั้งเดียว หมดอายุ 60 นาที เก็บเป็น hash และถูกเผาก่อนออก credential |
 | DB dump รั่ว → ปลอม Agent | secret เก็บแบบเข้ารหัส AES-256-GCM ด้วย `AGENT_SIGNING_SECRET` ที่อยู่นอก DB |
-| ยกระดับสิทธิ์ตัวเอง | FACILITY_ADMIN สร้าง SUPER_ADMIN ไม่ได้ และสร้างผู้ใช้นอกสถานบริการตัวเองไม่ได้ |
+| ยกระดับสิทธิ์ตัวเอง | FACILITY_ADMIN สร้าง SUPER_ADMIN/ADMIN ไม่ได้ และสร้างผู้ใช้นอกสถานบริการตัวเองไม่ได้ |
+| สมัครสมาชิกเองแล้วเห็นข้อมูลทันที | บัญชีที่สมัครเองถูกสร้างเป็น inactive ต้องรออนุมัติ (`approved_at`) |
+| ADMIN แก้ข้อมูลระบบ | `canManageSystem()` เป็น SUPER_ADMIN เท่านั้น ปุ่มถูกซ่อน **และ** server action ปฏิเสธ |
+| ดูข้อมูลนอกหมวดยาที่ได้รับสิทธิ์ | `resolveDrugTypeScope()` ตัดหมวดที่ไม่ได้รับอนุญาตออกเสมอ |
 | ข้อมูลผู้ป่วยรั่วขึ้น cloud | ไม่ดึง/ไม่ส่ง/ไม่เก็บ ชื่อ เลขบัตร ที่อยู่ เบอร์โทร — เก็บเพียง `visit_no` เป็น reference |
 | JHCIS ถูกแก้ไขโดยไม่ตั้งใจ | ชั้น connection ปฏิเสธทุก statement ที่ไม่ใช่ SELECT/SHOW/DESCRIBE/EXPLAIN |
 
 ## 2. Checklist (PROJECT_SPEC §31)
 
 - [x] HTTPS — Vercel บังคับ, Agent เรียกผ่าน HTTPS เท่านั้น
-- [x] RBAC — SUPER_ADMIN / FACILITY_ADMIN / USER (`src/lib/auth/rbac.ts`)
+- [x] RBAC — SUPER_ADMIN / ADMIN (อ่านอย่างเดียวทุกสถานบริการ) / FACILITY_ADMIN / USER (`src/lib/auth/rbac.ts`)
 - [x] Facility isolation — server-side ทุกเส้นทาง + มี test
 - [x] Server-side authorization — ทุกหน้าเรียก `requireUser()/requireSuperAdmin()`; middleware เป็นแค่ชั้นเสริม
 - [x] Agent authentication — keyId + secret เฉพาะตัว

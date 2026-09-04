@@ -281,35 +281,49 @@ export async function createUserAction(
   const email = String(formData.get("email") ?? "")
     .trim()
     .toLowerCase();
+  const username = String(formData.get("username") ?? "")
+    .trim()
+    .toLowerCase();
+  const position = String(formData.get("position") ?? "").trim() || null;
   const fullName = String(formData.get("fullName") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const role = String(formData.get("role") ?? "USER");
   const facilityId = String(formData.get("facilityId") ?? "") || null;
 
   if (!email || !fullName) return fail("กรุณากรอกอีเมลและชื่อ-นามสกุล");
+  if (username && !/^[a-z0-9._-]{4,60}$/.test(username)) {
+    return fail("ชื่อผู้ใช้ต้องยาว 4-60 ตัว ใช้ได้เฉพาะ a-z 0-9 . _ -");
+  }
   const weak = validatePasswordStrength(password);
   if (weak) return fail(weak);
 
   // A FACILITY_ADMIN may only create users inside its own facility, and may
   // never create a SUPER_ADMIN (privilege escalation guard).
   if (!isSuperAdmin(actor)) {
-    if (role === "SUPER_ADMIN") return fail("ไม่มีสิทธิ์สร้างผู้ดูแลระบบส่วนกลาง");
+    if (role === "SUPER_ADMIN" || role === "ADMIN") {
+      return fail("ไม่มีสิทธิ์สร้างผู้ดูแลระดับอำเภอ");
+    }
     if (!facilityId || facilityId !== actor.facilityId) {
       return fail("สร้างผู้ใช้ได้เฉพาะในสถานบริการของตนเอง");
     }
   }
-  if (role !== "SUPER_ADMIN" && !facilityId) return fail("กรุณาเลือกสถานบริการ");
-  if (role === "SUPER_ADMIN" && facilityId) return fail("ผู้ดูแลส่วนกลางต้องไม่ผูกกับสถานบริการ");
+  const facilityWide = role === "SUPER_ADMIN" || role === "ADMIN";
+  if (!facilityWide && !facilityId) return fail("กรุณาเลือกสถานบริการ");
 
   const userId = newId();
   try {
     await db.insert(users).values({
       id: userId,
       email,
+      username: username || null,
+      position,
       fullName,
       passwordHash: await hashPassword(password),
-      role: role as "SUPER_ADMIN" | "FACILITY_ADMIN" | "USER",
-      facilityId: role === "SUPER_ADMIN" ? null : facilityId,
+      role: role as "SUPER_ADMIN" | "ADMIN" | "FACILITY_ADMIN" | "USER",
+      // created by an admin, so it is approved on the spot
+      facilityId: role === "SUPER_ADMIN" || role === "ADMIN" ? null : facilityId,
+      approvedAt: new Date(),
+      approvedByUserId: actor.userId,
     });
   } catch {
     return fail("อีเมลนี้ถูกใช้งานแล้ว");
@@ -347,15 +361,23 @@ export async function toggleUserAction(
   if (!target) return fail("ไม่พบผู้ใช้");
   if (target.id === actor.userId) return fail("ไม่สามารถปิดใช้งานบัญชีของตนเองได้");
   if (!isSuperAdmin(actor)) {
-    if (target.role === "SUPER_ADMIN" || target.facilityId !== actor.facilityId) {
+    if (
+      target.role === "SUPER_ADMIN" ||
+      target.role === "ADMIN" ||
+      target.facilityId !== actor.facilityId
+    ) {
       return fail("ไม่มีสิทธิ์จัดการผู้ใช้รายนี้");
     }
   }
 
   await db
     .update(users)
-    // bumping the epoch invalidates any session token already issued
-    .set({ isActive: nextActive, sessionEpoch: nextActive ? undefined : Date.now() % 1_000_000 })
+    .set({
+      isActive: nextActive,
+      // bumping the epoch invalidates any session token already issued
+      sessionEpoch: nextActive ? undefined : Date.now() % 1_000_000,
+      ...(nextActive ? { approvedAt: new Date(), approvedByUserId: actor.userId } : {}),
+    })
     .where(eq(users.id, userId));
 
   await writeAudit({

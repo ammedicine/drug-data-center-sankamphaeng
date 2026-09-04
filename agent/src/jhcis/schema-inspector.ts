@@ -27,6 +27,8 @@ const VISITDRUG_DATE_CANDIDATES = ["dateservice", "datedispense", "dispensedate"
 const UNIT_CANDIDATES = ["unitsell", "unitusage", "unitpacking"];
 
 const REQUIRED_TABLES = ["cdrug", "visitdrug", "visit"];
+/** unit codes in cdrug.unitsell are meaningless on their own: cdrugunitsell holds the names */
+const UNIT_LOOKUP_TABLE = "cdrugunitsell";
 
 export interface SchemaMapping {
   /** table.column holding the dispensed amount */
@@ -39,6 +41,8 @@ export interface SchemaMapping {
   hasClinic: boolean;
   hasDrugType: boolean;
   hasGenericName: boolean;
+  /** cdrugunitsell(unitsellcode, unitsellname) is available for unit names */
+  hasUnitLookup: boolean;
 }
 
 export class SchemaInspector {
@@ -113,6 +117,20 @@ export class SchemaInspector {
     }
     tables.office = await this.tableExists("office");
 
+    // Unit names live in a lookup table; without it the report would show raw
+    // codes like "027" instead of "เม็ด".
+    const unitLookupCols = (await this.tableExists(UNIT_LOOKUP_TABLE))
+      ? await this.columnsOf(UNIT_LOOKUP_TABLE)
+      : new Set<string>();
+    const hasUnitLookup =
+      unitLookupCols.has("unitsellcode") && unitLookupCols.has("unitsellname");
+    tables[UNIT_LOOKUP_TABLE] = hasUnitLookup;
+    if (!hasUnitLookup) {
+      warnings.push(
+        `ไม่พบตาราง ${UNIT_LOOKUP_TABLE}(unitsellcode, unitsellname) - รายงานจะแสดงรหัสหน่วยแทนชื่อหน่วย`,
+      );
+    }
+
     const columns: Record<string, Record<string, boolean>> = {};
     const cdrugCols = tables.cdrug ? await this.columnsOf("cdrug") : new Set<string>();
     const visitdrugCols = tables.visitdrug ? await this.columnsOf("visitdrug") : new Set<string>();
@@ -174,10 +192,15 @@ export class SchemaInspector {
         supportsQuantity: Boolean(quantityColumn),
         supportsDispensedDate: dateFromVisit ? columns.visit.visitdate : true,
         supportsDrugType: cdrugCols.has("drugtype"),
+        supportsUnitName: hasUnitLookup,
       },
       mapping: {
         quantityColumn: quantityColumn ? `visitdrug.${quantityColumn}` : null,
-        unitColumn: unitColumn ? `cdrug.${unitColumn}` : null,
+        unitColumn: unitColumn
+          ? hasUnitLookup
+            ? `cdrug.${unitColumn} -> ${UNIT_LOOKUP_TABLE}.unitsellname`
+            : `cdrug.${unitColumn}`
+          : null,
         dateColumn: dateFromVisit ? "visit.visitdate" : `visitdrug.${dateColumn}`,
       },
       warnings,
@@ -192,6 +215,7 @@ export class SchemaInspector {
           hasClinic: visitdrugCols.has("clinic"),
           hasDrugType: cdrugCols.has("drugtype"),
           hasGenericName: cdrugCols.has("druggenericname"),
+          hasUnitLookup,
         }
       : null;
 

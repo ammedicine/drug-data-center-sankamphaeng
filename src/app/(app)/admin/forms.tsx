@@ -232,11 +232,17 @@ export function UserForm({
       <div className="sm:col-span-2 lg:col-span-3">
         <Feedback state={state} />
       </div>
-      <Field label="อีเมล">
-        <input name="email" type="email" required className={inputClass} />
+      <Field label="ชื่อผู้ใช้ (user id)" hint="4-60 ตัว a-z 0-9 . _ -">
+        <input name="username" required className={inputClass} placeholder="somchai.j" />
       </Field>
       <Field label="ชื่อ-นามสกุล">
         <input name="fullName" required className={inputClass} />
+      </Field>
+      <Field label="ตำแหน่ง">
+        <input name="position" className={inputClass} placeholder="พยาบาลวิชาชีพ" />
+      </Field>
+      <Field label="อีเมล">
+        <input name="email" type="email" required className={inputClass} />
       </Field>
       <Field label="รหัสผ่านเริ่มต้น" hint="อย่างน้อย 10 ตัวอักษร มีตัวอักษรและตัวเลข">
         <input name="password" type="password" required className={inputClass} />
@@ -248,13 +254,20 @@ export function UserForm({
           onChange={(e) => setRole(e.target.value)}
           className={inputClass}
         >
-          <option value="USER">ผู้ใช้งาน</option>
+          <option value="USER">ผู้ใช้งาน (เห็นสถานบริการตัวเอง)</option>
           <option value="FACILITY_ADMIN">ผู้ดูแลสถานบริการ</option>
-          {allowSuperAdmin ? <option value="SUPER_ADMIN">ผู้ดูแลระบบส่วนกลาง</option> : null}
+          {allowSuperAdmin ? <option value="ADMIN">แอดมิน (ดูได้ทุกสถานบริการ)</option> : null}
+          {allowSuperAdmin ? (
+            <option value="SUPER_ADMIN">ผู้ดูแลระบบส่วนกลาง (จัดการได้ทั้งหมด)</option>
+          ) : null}
         </select>
       </Field>
       <Field label="สถานบริการ">
-        <select name="facilityId" className={inputClass} disabled={role === "SUPER_ADMIN"}>
+        <select
+          name="facilityId"
+          className={inputClass}
+          disabled={role === "SUPER_ADMIN" || role === "ADMIN"}
+        >
           <option value="">- ไม่ผูกสถานบริการ -</option>
           {facilities.map((f) => (
             <option key={f.id} value={f.id}>
@@ -270,13 +283,26 @@ export function UserForm({
   );
 }
 
-export function UserToggleForm({ userId, isActive }: { userId: string; isActive: boolean }) {
-  const [, action] = useActionState<ActionState, FormData>(toggleUserAction, {});
+export function UserToggleForm({
+  userId,
+  isActive,
+  pending = false,
+}: {
+  userId: string;
+  isActive: boolean;
+  /** never approved yet - the button reads "อนุมัติ" instead of "เปิดใช้งาน" */
+  pending?: boolean;
+}) {
+  const [state, action] = useActionState<ActionState, FormData>(toggleUserAction, {});
   return (
     <form action={action}>
       <input type="hidden" name="userId" value={userId} />
       <input type="hidden" name="isActive" value={String(!isActive)} />
-      <Submit label={isActive ? "ปิดใช้งาน" : "เปิดใช้งาน"} variant={isActive ? "danger" : "primary"} />
+      <Submit
+        label={isActive ? "ปิดใช้งาน" : pending ? "อนุมัติ" : "เปิดใช้งาน"}
+        variant={isActive ? "danger" : "primary"}
+      />
+      {state.error ? <Feedback state={state} /> : null}
     </form>
   );
 }

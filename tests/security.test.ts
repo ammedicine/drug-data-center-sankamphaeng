@@ -6,7 +6,13 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { encryptSecret, decryptSecret } from "@/lib/agent-auth/crypto";
-import { ForbiddenError, resolveFacilityScope } from "@/lib/auth/rbac";
+import {
+  ForbiddenError,
+  canManageSystem,
+  canViewAllFacilities,
+  resolveDrugTypeScope,
+  resolveFacilityScope,
+} from "@/lib/auth/rbac";
 import type { SessionUser } from "@/lib/auth/session";
 import {
   buildSigningString,
@@ -33,6 +39,16 @@ const facilityAUser: SessionUser = {
 };
 
 const facilityAAdmin: SessionUser = { ...facilityAUser, userId: "u3", role: "FACILITY_ADMIN" };
+
+/** district-wide read-only account */
+const admin: SessionUser = {
+  userId: "u4",
+  email: "viewer@example.org",
+  fullName: "Admin",
+  role: "ADMIN",
+  facilityId: null,
+  epoch: 1,
+};
 
 describe("facility isolation", () => {
   it("pins a facility user to its own facility", () => {
@@ -67,6 +83,51 @@ describe("facility isolation", () => {
     expect(() => resolveFacilityScope({ ...facilityAUser, facilityId: null })).toThrow(
       ForbiddenError,
     );
+  });
+});
+
+describe("ADMIN is read-everything, change-nothing", () => {
+  it("reads every facility like a super admin", () => {
+    expect(canViewAllFacilities(admin)).toBe(true);
+    expect(resolveFacilityScope(admin).facilityIds).toBeNull();
+    expect(resolveFacilityScope(admin, "FAC_B").facilityIds).toEqual(["FAC_B"]);
+  });
+
+  it("cannot manage the system", () => {
+    expect(canManageSystem(admin)).toBe(false);
+    expect(canManageSystem(facilityAAdmin)).toBe(false);
+    expect(canManageSystem(superAdmin)).toBe(true);
+  });
+
+  it("does not grant facility users a wider view", () => {
+    expect(canViewAllFacilities(facilityAUser)).toBe(false);
+    expect(canViewAllFacilities(facilityAAdmin)).toBe(false);
+  });
+});
+
+describe("drug category scope", () => {
+  const PRIMARY = ["01", "05", "10"];
+
+  it("defaults every role to the three medicine categories", () => {
+    expect(resolveDrugTypeScope(facilityAUser).types).toEqual(PRIMARY);
+    expect(resolveDrugTypeScope(admin).types).toEqual(PRIMARY);
+    expect(resolveDrugTypeScope(superAdmin).types).toEqual(PRIMARY);
+  });
+
+  it("refuses to widen the scope for anyone but a super admin", () => {
+    expect(resolveDrugTypeScope(facilityAUser, ["02", "11"]).types).toEqual(PRIMARY);
+    expect(resolveDrugTypeScope(admin, ["02"]).types).toEqual(PRIMARY);
+    expect(resolveDrugTypeScope(facilityAAdmin, ["01", "02"]).types).toEqual(["01"]);
+  });
+
+  it("lets a super admin add other categories", () => {
+    expect(resolveDrugTypeScope(superAdmin, ["01", "02"]).types).toEqual(["01", "02"]);
+    expect(resolveDrugTypeScope(superAdmin).canWiden).toBe(true);
+    expect(resolveDrugTypeScope(admin).canWiden).toBe(false);
+  });
+
+  it("allows narrowing within the allowed categories", () => {
+    expect(resolveDrugTypeScope(facilityAUser, ["05"]).types).toEqual(["05"]);
   });
 });
 

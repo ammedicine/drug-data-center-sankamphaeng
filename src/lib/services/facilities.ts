@@ -69,12 +69,16 @@ export async function listFacilityOptions(
 
 export interface UserListRow {
   id: string;
+  username: string | null;
+  position: string | null;
   email: string;
   fullName: string;
   role: UserRole;
   facilityId: string | null;
   facilityName: string | null;
   isActive: boolean;
+  approvedAt: Date | null;
+  createdAt: Date;
   lastLoginAt: Date | null;
 }
 
@@ -82,18 +86,22 @@ export async function listUsers(scopeIds: string[] | null): Promise<UserListRow[
   const rows = await db
     .select({
       id: users.id,
+      username: users.username,
+      position: users.position,
       email: users.email,
       fullName: users.fullName,
       role: users.role,
       facilityId: users.facilityId,
       facilityName: facilities.name,
       isActive: users.isActive,
+      approvedAt: users.approvedAt,
+      createdAt: users.createdAt,
       lastLoginAt: users.lastLoginAt,
     })
     .from(users)
     .leftJoin(facilities, eq(facilities.id, users.facilityId))
     .where(scopeIds ? inArray(users.facilityId, scopeIds) : undefined)
-    .orderBy(users.email);
+    .orderBy(users.isActive, users.createdAt);
 
   return rows;
 }

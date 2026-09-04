@@ -8,7 +8,34 @@
  */
 import { redirect } from "next/navigation";
 
+import { PRIMARY_DRUG_TYPES } from "@/lib/shared/canonical";
+
 import { getSession, type SessionUser } from "./session";
+
+/**
+ * Which cdrug.drugtype values a session may read.
+ *
+ * USER / FACILITY_ADMIN / ADMIN are limited to the three medicine categories
+ * (01, 05, 10) - the rest of cdrug is supplies and service items. SUPER_ADMIN
+ * defaults to the same three but may widen the selection, so the default view
+ * is comparable across roles.
+ *
+ * Like the facility scope, this is decided here and never taken from the
+ * client, so a crafted query string cannot widen it.
+ */
+export function resolveDrugTypeScope(
+  user: SessionUser,
+  requested?: string[] | null,
+): { types: string[]; canWiden: boolean } {
+  const primary: string[] = [...PRIMARY_DRUG_TYPES];
+  const canWiden = user.role === "SUPER_ADMIN";
+
+  if (!requested || requested.length === 0) return { types: primary, canWiden };
+  if (canWiden) return { types: requested, canWiden };
+
+  const allowed = requested.filter((type) => primary.includes(type));
+  return { types: allowed.length ? allowed : primary, canWiden };
+}
 
 export class ForbiddenError extends Error {
   readonly status = 403;
@@ -30,13 +57,34 @@ export function isSuperAdmin(user: SessionUser): boolean {
   return user.role === "SUPER_ADMIN";
 }
 
+/**
+ * SUPER_ADMIN and ADMIN both read every facility; only SUPER_ADMIN may change
+ * anything. Keeping "can see" and "can change" as separate predicates is what
+ * makes ADMIN a genuinely read-only role instead of an honour system.
+ */
+export function canViewAllFacilities(user: SessionUser): boolean {
+  return user.role === "SUPER_ADMIN" || user.role === "ADMIN";
+}
+
+/** Full administrative control: facilities, agents, users, settings. */
+export function canManageSystem(user: SessionUser): boolean {
+  return user.role === "SUPER_ADMIN";
+}
+
 export function canManageFacility(user: SessionUser, facilityId: string): boolean {
   if (isSuperAdmin(user)) return true;
+  // ADMIN is read-only: it never manages, not even its own facility.
   return user.role === "FACILITY_ADMIN" && user.facilityId === facilityId;
 }
 
 export function canManageUsers(user: SessionUser): boolean {
   return user.role === "SUPER_ADMIN" || user.role === "FACILITY_ADMIN";
+}
+
+/** May a user approve a pending registration for this facility? */
+export function canApproveUsers(user: SessionUser, facilityId: string | null): boolean {
+  if (user.role === "SUPER_ADMIN") return true;
+  return user.role === "FACILITY_ADMIN" && Boolean(facilityId) && user.facilityId === facilityId;
 }
 
 export function canTriggerSync(user: SessionUser): boolean {
@@ -53,6 +101,13 @@ export async function requireUser(): Promise<SessionUser> {
 export async function requireSuperAdmin(): Promise<SessionUser> {
   const user = await requireUser();
   if (!isSuperAdmin(user)) redirect("/dashboard?error=forbidden");
+  return user;
+}
+
+/** Pages that ADMIN may read but only SUPER_ADMIN may act on. */
+export async function requireAllFacilityViewer(): Promise<SessionUser> {
+  const user = await requireUser();
+  if (!canViewAllFacilities(user)) redirect("/dashboard?error=forbidden");
   return user;
 }
 
@@ -75,7 +130,7 @@ export function resolveFacilityScope(
   user: SessionUser,
   requestedFacilityId?: string | null,
 ): { facilityIds: string[] | null; single: string | null } {
-  if (isSuperAdmin(user)) {
+  if (canViewAllFacilities(user)) {
     if (requestedFacilityId && requestedFacilityId !== "ALL") {
       return { facilityIds: [requestedFacilityId], single: requestedFacilityId };
     }

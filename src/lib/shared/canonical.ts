@@ -22,24 +22,14 @@ export const AGENT_HEADERS = {
   version: "x-agent-version",
 } as const;
 
-/** JHCIS drug types we understand; anything else is passed through as-is. */
-export const DRUG_TYPE_LABELS: Record<string, string> = {
-  "01": "ยาแผนปัจจุบัน",
-  "02": "เวชภัณฑ์มิใช่ยา",
-  "03": "วัสดุการแพทย์",
-  "04": "วัสดุทันตกรรม",
-  "05": "วัคซีน",
-  "06": "หัตถการ/บริการ",
-  "07": "วัสดุวิทยาศาสตร์",
-  "10": "ยาสมุนไพร",
-  "11": "ครุภัณฑ์/อื่น ๆ",
-  "91": "อื่น ๆ",
-};
-
-export function drugTypeLabel(code: string | null | undefined): string {
-  if (!code) return "ไม่ระบุ";
-  return DRUG_TYPE_LABELS[code] ?? `ประเภท ${code}`;
-}
+// Drug category vocabulary lives in drug-types.ts so client components can
+// import it without pulling node:crypto into the browser bundle.
+export {
+  DRUG_TYPE_LABELS,
+  PRIMARY_DRUG_TYPES,
+  drugTypeLabel,
+  isPrimaryDrugType,
+} from "./drug-types";
 
 /** One dispensing row as extracted from JHCIS visitdrug + visit + cdrug. */
 export interface DrugUsageRecord {
@@ -50,8 +40,10 @@ export interface DrugUsageRecord {
   drugType: string | null;
   /** JHCIS visitdrug.unit - the dispensed amount (NOT a unit of measure) */
   quantity: number;
-  /** unit of measure resolved from cdrug.unitsell / cdrug.unitusage */
+  /** unit of measure, already resolved to a name via cdrugunitsell */
   unit: string | null;
+  /** the raw JHCIS unit code behind `unit` */
+  unitCode: string | null;
   clinic: string | null;
   /** visit.visitdate, ISO yyyy-mm-dd */
   usageDate: string;
@@ -66,7 +58,9 @@ export interface DrugMasterRecord {
   drugTypeSub: string | null;
   drugFlag: string | null;
   unitSell: string | null;
+  unitSellName: string | null;
   unitUsage: string | null;
+  unitUsageName: string | null;
 }
 
 /**
@@ -134,6 +128,8 @@ export interface SchemaReport {
     supportsQuantity: boolean;
     supportsDispensedDate: boolean;
     supportsDrugType: boolean;
+    /** cdrugunitsell is present, so unit codes can be shown as names */
+    supportsUnitName: boolean;
   };
   /** resolved column mapping actually used by the extractor */
   mapping: {

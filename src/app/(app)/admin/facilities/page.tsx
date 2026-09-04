@@ -1,6 +1,6 @@
 import { DataTable } from "@/components/ui/data-table";
 import { Card, PageHeader, StatusBadge, relativeTime } from "@/components/ui/primitives";
-import { requireSuperAdmin } from "@/lib/auth/rbac";
+import { canManageSystem, requireAllFacilityViewer } from "@/lib/auth/rbac";
 import { listFacilities } from "@/lib/services/facilities";
 
 import { CollapsibleForm, FacilityForm, FacilityToggleForm } from "../forms";
@@ -9,7 +9,8 @@ export const metadata = { title: "จัดการสถานบริกา�
 export const dynamic = "force-dynamic";
 
 export default async function FacilitiesPage() {
-  await requireSuperAdmin();
+  const user = await requireAllFacilityViewer();
+  const canManage = canManageSystem(user);
   const rows = await listFacilities(null);
 
   return (
@@ -19,13 +20,15 @@ export default async function FacilitiesPage() {
         subtitle="รพ.สต. ที่อยู่ในระบบ พร้อมสถานะ Agent และการซิงก์ข้อมูล"
       />
 
-      <Card className="mb-6" title="เพิ่มสถานบริการใหม่">
-        <div className="p-5">
-          <CollapsibleForm label="+ เพิ่มสถานบริการ">
-            <FacilityForm />
-          </CollapsibleForm>
-        </div>
-      </Card>
+      {canManage ? (
+        <Card className="mb-6" title="เพิ่มสถานบริการใหม่">
+          <div className="p-5">
+            <CollapsibleForm label="+ เพิ่มสถานบริการ">
+              <FacilityForm />
+            </CollapsibleForm>
+          </div>
+        </Card>
+      ) : null}
 
       <Card title={`สถานบริการทั้งหมด (${rows.length})`}>
         <DataTable
@@ -90,7 +93,10 @@ export default async function FacilitiesPage() {
               key: "actions",
               header: "",
               align: "right",
-              render: (row) => <FacilityToggleForm facilityId={row.id} isActive={row.isActive} />,
+              render: (row) =>
+                canManage ? (
+                  <FacilityToggleForm facilityId={row.id} isActive={row.isActive} />
+                ) : null,
             },
           ]}
         />

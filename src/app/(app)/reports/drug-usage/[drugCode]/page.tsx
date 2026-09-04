@@ -10,7 +10,7 @@ import {
   StatusBadge,
   formatNumber,
 } from "@/components/ui/primitives";
-import { requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
+import { requireUser, resolveDrugTypeScope, resolveFacilityScope } from "@/lib/auth/rbac";
 import {
   getDrugDetail,
   getUsageByFacility,
@@ -48,7 +48,14 @@ export default async function DrugDetailPage({
   const from = isoDate(query.from, monthAgo);
   const to = isoDate(query.to, today);
 
-  const filters = { facilityIds: scope.facilityIds, from, to, drugCode };
+  const typeScope = resolveDrugTypeScope(user);
+  const filters = {
+    facilityIds: scope.facilityIds,
+    from,
+    to,
+    drugCode,
+    drugTypes: typeScope.types,
+  };
 
   const [detail, summary, daily, byFacility] = await Promise.all([
     getDrugDetail(scope.facilityIds, drugCode),

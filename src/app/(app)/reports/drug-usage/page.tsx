@@ -1,7 +1,8 @@
 import Link from "next/link";
 
 import { TrendChart } from "@/components/ui/charts";
-import { DataTable, Pagination } from "@/components/ui/data-table";
+import { DataTable } from "@/components/ui/data-table";
+import { DrugUsageTable } from "@/components/ui/drug-usage-table";
 import {
   Button,
   Card,
@@ -12,23 +13,44 @@ import {
   formatNumber,
   inputClass,
 } from "@/components/ui/primitives";
-import { requireUser, resolveFacilityScope, ForbiddenError } from "@/lib/auth/rbac";
+import {
+  ForbiddenError,
+  requireUser,
+  resolveDrugTypeScope,
+  resolveFacilityScope,
+} from "@/lib/auth/rbac";
 import { listFacilityOptions } from "@/lib/services/facilities";
 import {
   getAvailableDrugTypes,
   getUsageByDrug,
+  getUsageByDrugType,
   getUsageSummary,
   getUsageTrend,
 } from "@/lib/services/reports";
-import { drugTypeLabel } from "@/lib/shared/canonical";
+import { PRIMARY_DRUG_TYPES, drugTypeLabel } from "@/lib/shared/canonical";
 
 export const metadata = { title: "รายงานปริมาณการจ่ายยา" };
 export const dynamic = "force-dynamic";
 
-const PAGE_SIZE = 25;
+/**
+ * The aggregated list is sent to the browser in one go so the search box can
+ * filter instantly. A รพ.สต. has a few hundred distinct drugs; the cap is a
+ * safety net for an all-facility view.
+ */
+const MAX_ROWS = 3000;
 
 function isoDate(value: unknown, fallback: string): string {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : fallback;
+}
+
+/** `types=01,05` -> ["01","05"]; empty means "use the default scope". */
+function parseTypes(value: unknown): string[] | null {
+  const raw = Array.isArray(value) ? value.join(",") : typeof value === "string" ? value : "";
+  const list = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => /^\d{1,2}$/.test(item));
+  return list.length ? list : null;
 }
 
 export default async function DrugUsageReportPage({
@@ -45,10 +67,12 @@ export default async function DrugUsageReportPage({
 
   const from = isoDate(params.from, monthAgo);
   const to = isoDate(params.to, today);
-  const drugType = typeof params.drugType === "string" && params.drugType ? params.drugType : null;
   const search = typeof params.q === "string" && params.q.trim() ? params.q.trim() : null;
   const requestedFacility = typeof params.facility === "string" ? params.facility : null;
-  const page = Math.max(1, Number(params.page ?? 1) || 1);
+
+  // Category scope is decided server-side: USER/ADMIN can never widen past
+  // ยา (01, 05, 10); SUPER_ADMIN starts on the same three and may add more.
+  const typeScope = resolveDrugTypeScope(user, parseTypes(params.types));
 
   let scope;
   try {
@@ -68,20 +92,37 @@ export default async function DrugUsageReportPage({
     throw error;
   }
 
-  const filters = { facilityIds: scope.facilityIds, from, to, drugType, search };
+  const filters = {
+    facilityIds: scope.facilityIds,
+    from,
+    to,
+    drugTypes: typeScope.types,
+    search,
+  };
 
-  const [summary, table, trend, drugTypes, facilityOptions] = await Promise.all([
+  const [summary, byType, table, trend, availableTypes, facilityOptions] = await Promise.all([
     getUsageSummary(filters),
-    getUsageByDrug(filters, { page, pageSize: PAGE_SIZE }),
-    getUsageTrend(filters, from === to ? "day" : "day"),
-    getAvailableDrugTypes(scope.facilityIds),
+    getUsageByDrugType(filters),
+    getUsageByDrug(filters, { page: 1, pageSize: MAX_ROWS }),
+    getUsageTrend(filters, "day"),
+    typeScope.canWiden ? getAvailableDrugTypes(scope.facilityIds) : Promise.resolve([]),
     isSuper ? listFacilityOptions(null) : Promise.resolve([]),
   ]);
 
+  // Checkbox list: the three medicine categories always, plus whatever else the
+  // facility actually has (SUPER_ADMIN only).
+  const selectableTypes = [
+    ...PRIMARY_DRUG_TYPES,
+    ...availableTypes
+      .map((t) => t.drugType)
+      .filter((type) => !(PRIMARY_DRUG_TYPES as readonly string[]).includes(type)),
+  ];
+
+  const typesParam = typeScope.types.join(",");
   const queryParams = {
     from,
     to,
-    drugType: drugType ?? undefined,
+    types: typesParam,
     q: search ?? undefined,
     facility: requestedFacility ?? undefined,
   };
@@ -104,45 +145,62 @@ export default async function DrugUsageReportPage({
       />
 
       <Card className="mb-6 no-print">
-        <form method="get" className="grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-5">
-          <Field label="ตั้งแต่วันที่">
-            <input type="date" name="from" defaultValue={from} className={inputClass} />
-          </Field>
-          <Field label="ถึงวันที่">
-            <input type="date" name="to" defaultValue={to} className={inputClass} />
-          </Field>
-          <Field label="ประเภทยา">
-            <select name="drugType" defaultValue={drugType ?? ""} className={inputClass}>
-              <option value="">ทุกประเภท</option>
-              {drugTypes.map((t) => (
-                <option key={t.drugType} value={t.drugType}>
-                  {drugTypeLabel(t.drugType)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="ค้นหายา">
-            <input
-              type="search"
-              name="q"
-              defaultValue={search ?? ""}
-              placeholder="รหัสยา หรือ ชื่อยา"
-              className={inputClass}
-            />
-          </Field>
-          {isSuper ? (
-            <Field label="สถานบริการ">
-              <select name="facility" defaultValue={requestedFacility ?? ""} className={inputClass}>
-                <option value="">ทุกสถานบริการ</option>
-                {facilityOptions.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.code} · {f.name}
-                  </option>
-                ))}
-              </select>
+        <form method="get" className="space-y-4 p-5">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="ตั้งแต่วันที่">
+              <input type="date" name="from" defaultValue={from} className={inputClass} />
             </Field>
-          ) : null}
-          <div className="flex items-end gap-2">
+            <Field label="ถึงวันที่">
+              <input type="date" name="to" defaultValue={to} className={inputClass} />
+            </Field>
+            {isSuper ? (
+              <Field label="สถานบริการ">
+                <select name="facility" defaultValue={requestedFacility ?? ""} className={inputClass}>
+                  <option value="">ทุกสถานบริการ</option>
+                  {facilityOptions.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.code} · {f.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
+          </div>
+
+          <fieldset>
+            <legend className="mb-2 text-xs font-medium text-muted">
+              หมวดยา
+              {typeScope.canWiden
+                ? " (ค่าเริ่มต้นคือ ยาแผนปัจจุบัน วัคซีน และยาสมุนไพร — ติ๊กเพิ่มเพื่อดูหมวดอื่น)"
+                : " (บัญชีของคุณดูได้เฉพาะยา 3 หมวดนี้)"}
+            </legend>
+            <div className="flex flex-wrap gap-3">
+              {selectableTypes.map((type) => {
+                const checked = typeScope.types.includes(type);
+                const isPrimary = (PRIMARY_DRUG_TYPES as readonly string[]).includes(type);
+                return (
+                  <label
+                    key={type}
+                    className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-sm ${
+                      checked ? "border-brand-500 bg-brand-50 text-brand-700" : "border-line text-muted"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      name="types"
+                      value={type}
+                      defaultChecked={checked}
+                      className="size-3.5 accent-[color:var(--color-brand-600)]"
+                    />
+                    {drugTypeLabel(type)}
+                    {!isPrimary ? <span className="text-xs opacity-70">(ไม่ใช่ยา)</span> : null}
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+
+          <div className="flex gap-2">
             <Button type="submit">ค้นหา</Button>
             <Link
               href="/reports/drug-usage"
@@ -158,8 +216,50 @@ export default async function DrugUsageReportPage({
         <StatCard label="รายการจ่ายยา" value={summary.dispensingRows} unit="รายการ" />
         <StatCard label="จำนวนรายการยา" value={summary.distinctDrugs} unit="รายการ" />
         <StatCard label="ปริมาณรวม" value={summary.totalQuantity} unit="หน่วย" />
-        <StatCard label="ประเภทของยา" value={summary.distinctDrugTypes} unit="ประเภท" />
+        <StatCard label="หมวดยาที่แสดง" value={byType.length} unit="หมวด" />
       </div>
+
+      <Card
+        title="สรุปตามหมวดยา"
+        description="แยกตาม cdrug.drugtype เพื่อไม่ให้ปริมาณของแต่ละหมวดปนกัน"
+        className="mt-6"
+      >
+        <DataTable
+          rowKey={(row) => row.drugType ?? "unknown"}
+          rows={byType}
+          emptyTitle="ไม่มีข้อมูลในช่วงเวลาที่เลือก"
+          columns={[
+            {
+              key: "type",
+              header: "หมวดยา",
+              render: (row) => (
+                <>
+                  <span className="font-medium text-ink">{drugTypeLabel(row.drugType)}</span>
+                  <span className="block text-xs text-muted">รหัส {row.drugType ?? "-"}</span>
+                </>
+              ),
+            },
+            {
+              key: "drugs",
+              header: "จำนวนรายการยา",
+              align: "right",
+              render: (row) => formatNumber(row.distinctDrugs),
+            },
+            {
+              key: "rows",
+              header: "ครั้งที่จ่าย",
+              align: "right",
+              render: (row) => formatNumber(row.dispensingRows),
+            },
+            {
+              key: "qty",
+              header: "ปริมาณรวม",
+              align: "right",
+              render: (row) => formatNumber(row.totalQuantity),
+            },
+          ]}
+        />
+      </Card>
 
       <Card title="แนวโน้มการจ่ายยา" className="mt-6">
         <div className="p-4">
@@ -173,72 +273,19 @@ export default async function DrugUsageReportPage({
 
       <Card
         title="ปริมาณการจ่ายยารายรายการ"
-        description={`ช่วงข้อมูล ${from} ถึง ${to}`}
+        description={`ช่วงข้อมูล ${from} ถึง ${to} · แยกตามหมวดยา เรียงตามชื่อยา · พิมพ์ค้นหาแล้วกรองทันที`}
         className="mt-6"
       >
-        <DataTable
-          rowKey={(row) => row.drugCode}
+        <DrugUsageTable
           rows={table.rows}
-          emptyTitle="ไม่พบข้อมูลการจ่ายยา"
-          emptyDescription="ลองปรับช่วงวันที่ หรือรอให้ Agent ซิงก์ข้อมูลรอบถัดไป"
-          columns={[
-            {
-              key: "index",
-              header: "ลำดับ",
-              width: "72px",
-              render: (_row, i) => (
-                <span className="text-xs text-muted numeric">{(page - 1) * PAGE_SIZE + i + 1}</span>
-              ),
-            },
-            {
-              key: "code",
-              header: "รหัสยา",
-              render: (row) => <span className="numeric text-xs text-muted">{row.drugCode}</span>,
-            },
-            {
-              key: "name",
-              header: "ชื่อยา",
-              render: (row) => (
-                <Link
-                  href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}?from=${from}&to=${to}${
-                    requestedFacility ? `&facility=${requestedFacility}` : ""
-                  }`}
-                  className="font-medium text-ink hover:text-brand-700 hover:underline"
-                >
-                  {row.drugName}
-                </Link>
-              ),
-            },
-            {
-              key: "type",
-              header: "ประเภท",
-              render: (row) => <span className="text-xs text-muted">{drugTypeLabel(row.drugType)}</span>,
-            },
-            {
-              key: "rows",
-              header: "ครั้งที่จ่าย",
-              align: "right",
-              render: (row) => formatNumber(row.dispensingRows),
-            },
-            {
-              key: "qty",
-              header: "จำนวนจ่าย",
-              align: "right",
-              render: (row) => formatNumber(row.totalQuantity),
-            },
-            {
-              key: "unit",
-              header: "หน่วย",
-              render: (row) => <span className="text-xs text-muted">{row.unit ?? "-"}</span>,
-            },
-          ]}
-        />
-        <Pagination
-          page={page}
-          pageSize={PAGE_SIZE}
-          total={table.total}
-          basePath="/reports/drug-usage"
-          params={queryParams}
+          initialQuery={search ?? ""}
+          linkParams={new URLSearchParams(
+            Object.entries({
+              from,
+              to,
+              ...(requestedFacility ? { facility: requestedFacility } : {}),
+            }),
+          ).toString()}
         />
       </Card>
     </>

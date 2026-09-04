@@ -19,6 +19,7 @@ interface UsageRow extends RowDataPacket {
   drugtype: string | null;
   quantity: number | string | null;
   unit: string | null;
+  unitcode: string | null;
   clinic: string | null;
   usagedate: string;
 }
@@ -33,7 +34,18 @@ export class UsageExtractor {
   private buildQuery(): string {
     const m = this.mapping;
     const dateExpr = m.dateFromVisit ? "v.visitdate" : `vd.${m.dateColumn}`;
-    const unitExpr = m.unitColumn ? `c.${m.unitColumn}` : "NULL";
+    const unitCodeExpr = m.unitColumn ? `c.${m.unitColumn}` : "NULL";
+    // cdrug.unitsell holds a code (e.g. 027); the readable name lives in
+    // cdrugunitsell. Fall back to the code when the lookup is unavailable.
+    const unitNameExpr = m.unitColumn
+      ? m.hasUnitLookup
+        ? `COALESCE(us.unitsellname, c.${m.unitColumn})`
+        : `c.${m.unitColumn}`
+      : "NULL";
+    const unitJoin =
+      m.unitColumn && m.hasUnitLookup
+        ? `LEFT JOIN cdrugunitsell us ON us.unitsellcode = c.${m.unitColumn}`
+        : "";
     const typeExpr = m.hasDrugType ? "c.drugtype" : "NULL";
     const clinicExpr = m.hasClinic ? "vd.clinic" : "NULL";
 
@@ -44,7 +56,8 @@ export class UsageExtractor {
         c.drugname            AS drugname,
         ${typeExpr}           AS drugtype,
         vd.${m.quantityColumn} AS quantity,
-        ${unitExpr}           AS unit,
+        ${unitNameExpr}       AS unit,
+        ${unitCodeExpr}       AS unitcode,
         ${clinicExpr}         AS clinic,
         DATE_FORMAT(${dateExpr}, '%Y-%m-%d') AS usagedate
       FROM visitdrug vd
@@ -52,6 +65,7 @@ export class UsageExtractor {
         ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
       LEFT JOIN cdrug c
         ON c.drugcode = vd.drugcode
+      ${unitJoin}
       WHERE vd.pcucode = ?
         AND ${dateExpr} >= ?
         AND ${dateExpr} <= ?
@@ -93,6 +107,7 @@ export class UsageExtractor {
         drugType: row.drugtype ? String(row.drugtype).trim() : null,
         quantity: row.quantity === null ? 0 : Number(row.quantity),
         unit: row.unit ? String(row.unit).trim() : null,
+        unitCode: row.unitcode ? String(row.unitcode).trim() : null,
         clinic: row.clinic ? String(row.clinic).trim() : null,
         usageDate: String(row.usagedate),
       }));
@@ -105,6 +120,12 @@ export class UsageExtractor {
   /** Drug master rows referenced by the window, so names stay in sync. */
   async fetchDrugMaster(limit = 2000): Promise<DrugMasterRecord[]> {
     const m = this.mapping;
+    const sellName = m.hasUnitLookup ? "us.unitsellname" : "NULL";
+    const usageName = m.hasUnitLookup ? "uu.unitsellname" : "NULL";
+    const unitJoins = m.hasUnitLookup
+      ? `LEFT JOIN cdrugunitsell us ON us.unitsellcode = c.unitsell
+         LEFT JOIN cdrugunitsell uu ON uu.unitsellcode = c.unitusage`
+      : "";
     const rows = await this.db.query<
       RowDataPacket & {
         drugcode: string;
@@ -114,20 +135,25 @@ export class UsageExtractor {
         drugtypesub: string | null;
         drugflag: string | null;
         unitsell: string | null;
+        unitsellname: string | null;
         unitusage: string | null;
+        unitusagename: string | null;
       }
     >(
       `SELECT
-         drugcode                                  AS drugcode,
-         drugname                                  AS drugname,
-         ${m.hasGenericName ? "druggenericname" : "NULL"} AS genericname,
-         ${m.hasDrugType ? "drugtype" : "NULL"}    AS drugtype,
-         drugtypesub                               AS drugtypesub,
-         drugflag                                  AS drugflag,
-         unitsell                                  AS unitsell,
-         unitusage                                 AS unitusage
-       FROM cdrug
-       ORDER BY drugcode
+         c.drugcode                                  AS drugcode,
+         c.drugname                                  AS drugname,
+         ${m.hasGenericName ? "c.druggenericname" : "NULL"} AS genericname,
+         ${m.hasDrugType ? "c.drugtype" : "NULL"}    AS drugtype,
+         c.drugtypesub                               AS drugtypesub,
+         c.drugflag                                  AS drugflag,
+         c.unitsell                                  AS unitsell,
+         ${sellName}                                 AS unitsellname,
+         c.unitusage                                 AS unitusage,
+         ${usageName}                                AS unitusagename
+       FROM cdrug c
+       ${unitJoins}
+       ORDER BY c.drugcode
        LIMIT ?`,
       [limit],
     );
@@ -140,7 +166,9 @@ export class UsageExtractor {
       drugTypeSub: row.drugtypesub ? String(row.drugtypesub).trim() : null,
       drugFlag: row.drugflag ? String(row.drugflag).trim() : null,
       unitSell: row.unitsell ? String(row.unitsell).trim() : null,
+      unitSellName: row.unitsellname ? String(row.unitsellname).trim() : null,
       unitUsage: row.unitusage ? String(row.unitusage).trim() : null,
+      unitUsageName: row.unitusagename ? String(row.unitusagename).trim() : null,
     }));
   }
 

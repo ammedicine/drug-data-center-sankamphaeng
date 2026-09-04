@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/session";
@@ -25,7 +26,14 @@ export default async function LoginPage() {
           <LoginForm />
         </div>
 
-        <p className="mt-6 text-center text-xs text-muted">
+        <p className="mt-6 text-center text-sm text-muted">
+          ยังไม่มีบัญชี?{" "}
+          <Link href="/register" className="font-medium text-brand-700 hover:underline">
+            สมัครสมาชิก
+          </Link>
+        </p>
+
+        <p className="mt-3 text-center text-xs text-muted">
           ระบบนี้สำหรับเจ้าหน้าที่ที่ได้รับอนุญาตเท่านั้น การเข้าใช้งานถูกบันทึกไว้
         </p>
       </div>
