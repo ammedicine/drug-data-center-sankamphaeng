@@ -1,4 +1,4 @@
-import { DataTable } from "@/components/ui/data-table";
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import { Card, PageHeader, StatusBadge, relativeTime } from "@/components/ui/primitives";
 import { canManageSystem, requireAllFacilityViewer } from "@/lib/auth/rbac";
 import { listFacilities } from "@/lib/services/facilities";
@@ -21,13 +21,15 @@ export default async function FacilitiesPage() {
       />
 
       {canManage ? (
-        <Card className="mb-6" title="เพิ่มสถานบริการใหม่">
-          <div className="p-5">
-            <CollapsibleForm label="+ เพิ่มสถานบริการ">
-              <FacilityForm />
-            </CollapsibleForm>
-          </div>
-        </Card>
+        <div className="mb-5">
+          <CollapsibleForm label="เพิ่มสถานบริการ">
+            <Card className="mt-3">
+              <div className="p-5">
+                <FacilityForm />
+              </div>
+            </Card>
+          </CollapsibleForm>
+        </div>
       ) : null}
 
       <Card title={`สถานบริการทั้งหมด (${rows.length})`}>
@@ -43,9 +45,9 @@ export default async function FacilitiesPage() {
               render: (row) => (
                 <>
                   <span className="font-medium text-ink">{row.name}</span>
-                  <span className="block text-xs text-muted">
+                  <CellMeta>
                     {row.code} · pcucode {row.jhcisPcucode}
-                  </span>
+                  </CellMeta>
                 </>
               ),
             },

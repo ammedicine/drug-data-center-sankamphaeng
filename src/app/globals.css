@@ -1,50 +1,121 @@
 @import "tailwindcss";
 
 /*
- * Design tokens - "Modern Healthcare Enterprise SaaS".
- * Calm slate surfaces, a single teal accent for actions, semantic status colors.
+ * Design tokens - Contemporary healthcare operations workspace.
+ *
+ * The interface is mostly neutral on purpose. The brand colour marks four
+ * things and nothing else: the primary action, the selected item, focus, and a
+ * link that leads somewhere. Everything else earns hierarchy from spacing,
+ * weight and alignment, which is what keeps a dense operational screen legible.
  */
 @theme {
-  --color-canvas: #f6f8fa;
+  /* surfaces: canvas -> surface -> raised, three levels and no more */
+  --color-canvas: #f5f7f8;
   --color-surface: #ffffff;
-  --color-line: #e3e8ee;
-  --color-ink: #10202e;
-  --color-muted: #5b6b7c;
+  --color-raised: #f9fafb;
 
-  --color-brand-50: #eefcfa;
-  --color-brand-100: #d3f5f0;
-  --color-brand-500: #0f9d8f;
-  --color-brand-600: #0b8377;
-  --color-brand-700: #0a6a61;
+  /* institutional navigation shell */
+  --color-shell: #17252f;
+  --color-shell-hover: #1e313d;
+  --color-shell-line: #2b3d4a;
+  --color-shell-text: #cdd8de;
+  --color-shell-muted: #8ba0ad;
 
-  --color-ok: #157f4b;
-  --color-ok-bg: #e7f6ee;
-  --color-warn: #97650a;
-  --color-warn-bg: #fdf3dd;
-  --color-danger: #b3261e;
-  --color-danger-bg: #fdeceb;
-  --color-info: #1d4ed8;
-  --color-info-bg: #e8effd;
+  /* text */
+  --color-ink: #17252f;
+  --color-ink-soft: #3d5361;
+  --color-muted: #64798a;
 
-  --font-sans: "IBM Plex Sans Thai", "Noto Sans Thai", ui-sans-serif, system-ui, -apple-system,
-    "Segoe UI", sans-serif;
+  /* lines: two weights - hairline inside components, line between them */
+  --color-line: #dfe5e9;
+  --color-hairline: #eaeef1;
+
+  /* healthcare accent, used sparingly */
+  --color-brand: #087a70;
+  --color-brand-hover: #066258;
+  --color-brand-ink: #04443e;
+  --color-brand-soft: #e6f2f0;
+  --color-brand-line: #b7d9d4;
+
+  /* semantic, muted enough to sit in a table without shouting */
+  --color-ok: #15734a;
+  --color-ok-soft: #e7f4ec;
+  --color-warn: #8a5a08;
+  --color-warn-soft: #fdf1dc;
+  --color-danger: #a92720;
+  --color-danger-soft: #fbeae9;
+  --color-info: #1b4fa8;
+  --color-info-soft: #e9eff9;
+
+  --radius-control: 6px;
+  --radius-panel: 10px;
+
+  --font-sans: var(--font-thai), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-html,
+/*
+ * Fluid but bounded type. Thai needs a touch more line-height than Latin at the
+ * same size, so body text sits at 1.6 rather than the Tailwind default.
+ */
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   background: var(--color-canvas);
   color: var(--color-ink);
   font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* Tabular figures keep quantity columns aligned across rows. */
-.numeric {
+/* Numbers must line up in every table, KPI and chart axis. */
+.numeric,
+table td,
+table th {
   font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* One focus treatment for the whole application. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Thai wraps badly on narrow columns without this. */
+:where(h1, h2, h3, p, td, th, label, span) {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @media print {
   .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: #ffffff;
+  }
+
+  /* Printed reports should not waste ink on chrome. */
+  [data-app-shell] {
+    display: block !important;
+  }
+
+  [data-app-nav] {
     display: none !important;
   }
 }

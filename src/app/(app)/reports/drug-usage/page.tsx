@@ -1,15 +1,16 @@
 import Link from "next/link";
+import { Download } from "lucide-react";
 
 import { TrendChart } from "@/components/ui/charts";
-import { DataTable } from "@/components/ui/data-table";
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import { DrugUsageTable } from "@/components/ui/drug-usage-table";
+import { FilterBar, FilterChip, FilterField } from "@/components/ui/filter-bar";
 import {
-  Button,
   Card,
   ErrorState,
-  Field,
   PageHeader,
   StatCard,
+  buttonClass,
   formatNumber,
   inputClass,
 } from "@/components/ui/primitives";
@@ -145,92 +146,72 @@ export default async function DrugUsageReportPage({
             href={`/api/reports/drug-usage/export?${new URLSearchParams(
               Object.entries(queryParams).filter(([, v]) => v) as [string, string][],
             ).toString()}`}
-            className="inline-flex items-center rounded-lg border border-line bg-surface px-4 py-2 text-sm font-medium hover:bg-canvas"
+            className={buttonClass("secondary", "sm")}
           >
+            <Download aria-hidden className="size-4" />
             ส่งออก CSV
           </Link>
         }
       />
 
-      <Card className="mb-6 no-print">
-        <form method="get" className="space-y-4 p-5">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Field label="ปีงบประมาณ" hint="เลือกแล้วกดค้นหา จะใช้ช่วง 1 ต.ค. - 30 ก.ย.">
-              <select name="fy" defaultValue="" className={inputClass}>
-                <option value="">— กำหนดวันที่เอง —</option>
-                {recentFiscalYears(5).map((year) => (
-                  <option key={year.year} value={year.year}>
-                    {year.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="ตั้งแต่วันที่">
-              <input type="date" name="from" defaultValue={from} className={inputClass} />
-            </Field>
-            <Field label="ถึงวันที่">
-              <input type="date" name="to" defaultValue={to} className={inputClass} />
-            </Field>
-            {isSuper ? (
-              <Field label="สถานบริการ">
-                <select name="facility" defaultValue={requestedFacility ?? ""} className={inputClass}>
-                  <option value="">ทุกสถานบริการ</option>
-                  {facilityOptions.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.code} · {f.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            ) : null}
+      <FilterBar
+        resetHref="/reports/drug-usage"
+        className="mb-5"
+        note={
+          typeScope.canWiden
+            ? "ค่าเริ่มต้นแสดงเฉพาะ ยาแผนปัจจุบัน วัคซีน และยาสมุนไพร"
+            : "บัญชีของคุณดูได้เฉพาะยา 3 หมวดนี้"
+        }
+      >
+        <FilterField label="ปีงบประมาณ" hint="เลือกแล้วกดค้นหา จะใช้ช่วง 1 ต.ค. - 30 ก.ย.">
+          <select name="fy" defaultValue="" className={inputClass}>
+            <option value="">กำหนดวันที่เอง</option>
+            {recentFiscalYears(5).map((year) => (
+              <option key={year.year} value={year.year}>
+                {year.label}
+              </option>
+            ))}
+          </select>
+        </FilterField>
+        <FilterField label="ตั้งแต่วันที่">
+          <input type="date" name="from" defaultValue={from} className={inputClass} />
+        </FilterField>
+        <FilterField label="ถึงวันที่">
+          <input type="date" name="to" defaultValue={to} className={inputClass} />
+        </FilterField>
+        {isSuper ? (
+          <FilterField label="สถานบริการ" className="min-w-[220px] flex-1">
+            <select name="facility" defaultValue={requestedFacility ?? ""} className={inputClass}>
+              <option value="">ทุกสถานบริการ</option>
+              {facilityOptions.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.code} · {f.name}
+                </option>
+              ))}
+            </select>
+          </FilterField>
+        ) : null}
+
+        <fieldset className="w-full">
+          <legend className="mb-1.5 text-xs font-medium text-muted">หมวดยา</legend>
+          <div className="flex flex-wrap gap-2">
+            {selectableTypes.map((type) => (
+              <FilterChip
+                key={type}
+                name="types"
+                value={type}
+                label={drugTypeLabel(type)}
+                suffix={
+                  (PRIMARY_DRUG_TYPES as readonly string[]).includes(type) ? undefined : "ไม่ใช่ยา"
+                }
+                defaultChecked={typeScope.types.includes(type)}
+              />
+            ))}
           </div>
+        </fieldset>
+      </FilterBar>
 
-          <fieldset>
-            <legend className="mb-2 text-xs font-medium text-muted">
-              หมวดยา
-              {typeScope.canWiden
-                ? " (ค่าเริ่มต้นคือ ยาแผนปัจจุบัน วัคซีน และยาสมุนไพร — ติ๊กเพิ่มเพื่อดูหมวดอื่น)"
-                : " (บัญชีของคุณดูได้เฉพาะยา 3 หมวดนี้)"}
-            </legend>
-            <div className="flex flex-wrap gap-3">
-              {selectableTypes.map((type) => {
-                const checked = typeScope.types.includes(type);
-                const isPrimary = (PRIMARY_DRUG_TYPES as readonly string[]).includes(type);
-                return (
-                  <label
-                    key={type}
-                    className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-sm ${
-                      checked ? "border-brand-500 bg-brand-50 text-brand-700" : "border-line text-muted"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      name="types"
-                      value={type}
-                      defaultChecked={checked}
-                      className="size-3.5 accent-[color:var(--color-brand-600)]"
-                    />
-                    {drugTypeLabel(type)}
-                    {!isPrimary ? <span className="text-xs opacity-70">(ไม่ใช่ยา)</span> : null}
-                  </label>
-                );
-              })}
-            </div>
-          </fieldset>
-
-          <div className="flex gap-2">
-            <Button type="submit">ค้นหา</Button>
-            <Link
-              href="/reports/drug-usage"
-              className="rounded-lg border border-line px-4 py-2 text-sm hover:bg-canvas"
-            >
-              ล้าง
-            </Link>
-          </div>
-        </form>
-      </Card>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="รายการจ่ายยา" value={summary.dispensingRows} unit="รายการ" />
         <StatCard label="จำนวนรายการยา" value={summary.distinctDrugs} unit="รายการ" />
         <StatCard label="ปริมาณรวม" value={summary.totalQuantity} unit="หน่วย" />
@@ -240,7 +221,7 @@ export default async function DrugUsageReportPage({
       <Card
         title="สรุปตามหมวดยา"
         description="แยกตาม cdrug.drugtype เพื่อไม่ให้ปริมาณของแต่ละหมวดปนกัน"
-        className="mt-6"
+        className="mt-5"
       >
         <DataTable
           rowKey={(row) => row.drugType ?? "unknown"}
@@ -253,7 +234,7 @@ export default async function DrugUsageReportPage({
               render: (row) => (
                 <>
                   <span className="font-medium text-ink">{drugTypeLabel(row.drugType)}</span>
-                  <span className="block text-xs text-muted">รหัส {row.drugType ?? "-"}</span>
+                  <CellMeta>รหัส {row.drugType ?? "-"}</CellMeta>
                 </>
               ),
             },
@@ -279,7 +260,7 @@ export default async function DrugUsageReportPage({
         />
       </Card>
 
-      <Card title="แนวโน้มการจ่ายยา" className="mt-6">
+      <Card title="แนวโน้มการจ่ายยา" className="mt-5">
         <div className="p-4">
           {trend.length ? (
             <TrendChart data={trend} />
@@ -292,7 +273,7 @@ export default async function DrugUsageReportPage({
       <Card
         title="ปริมาณการจ่ายยารายรายการ"
         description={`ช่วงข้อมูล ${from} ถึง ${to} · แยกตามหมวดยา เรียงตามชื่อยา · พิมพ์ค้นหาแล้วกรองทันที`}
-        className="mt-6"
+        className="mt-5"
       >
         <DrugUsageTable
           rows={table.rows}

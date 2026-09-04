@@ -1,4 +1,6 @@
-import { DataTable } from "@/components/ui/data-table";
+import { Activity, Building2, Server, TriangleAlert, WifiOff } from "lucide-react";
+
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
   Card,
   PageHeader,
@@ -38,15 +40,25 @@ export default async function MonitoringPage() {
         subtitle={`Agent ถือว่าออฟไลน์เมื่อไม่มี heartbeat เกิน ${HEARTBEAT_TIMEOUT_MINUTES} นาที`}
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-        <StatCard label="สถานบริการ" value={fleet.facilities} />
-        <StatCard label="Agent ทั้งหมด" value={fleet.agentsTotal} />
-        <StatCard label="ออนไลน์" value={fleet.online} tone="ok" />
-        <StatCard label="ออฟไลน์" value={fleet.offline} tone={fleet.offline ? "warn" : "default"} />
-        <StatCard label="ซิงก์ล้มเหลว 24 ชม." value={fleet.failedBatches24h} tone={fleet.failedBatches24h ? "danger" : "default"} />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <StatCard label="สถานบริการ" value={fleet.facilities} icon={Building2} />
+        <StatCard label="Agent ทั้งหมด" value={fleet.agentsTotal} icon={Server} />
+        <StatCard label="ออนไลน์" value={fleet.online} tone="ok" icon={Activity} />
+        <StatCard
+          label="ออฟไลน์"
+          value={fleet.offline}
+          tone={fleet.offline ? "warn" : "default"}
+          icon={WifiOff}
+        />
+        <StatCard
+          label="ซิงก์ล้มเหลว 24 ชม."
+          value={fleet.failedBatches24h}
+          tone={fleet.failedBatches24h ? "danger" : "default"}
+          icon={TriangleAlert}
+        />
       </div>
 
-      <Card className="my-6" title="Agent ที่ต้องตรวจสอบ" description="ออฟไลน์หรือมีข้อผิดพลาด">
+      <Card className="my-5" title="Agent ที่ต้องตรวจสอบ" description="ออฟไลน์หรือมีข้อผิดพลาด">
         <DataTable
           rowKey={(row) => row.id}
           rows={stale}
@@ -58,9 +70,9 @@ export default async function MonitoringPage() {
               render: (row) => (
                 <>
                   <span className="font-medium text-ink">{row.name}</span>
-                  <span className="block text-xs text-muted">
+                  <CellMeta>
                     {row.facilityCode} · {row.facilityName}
-                  </span>
+                  </CellMeta>
                 </>
               ),
             },
@@ -87,7 +99,7 @@ export default async function MonitoringPage() {
         />
       </Card>
 
-      <div className="space-y-6">
+      <div className="space-y-5">
         <SyncHistoryCard batches={failed} title="รอบที่ล้มเหลว" showTechnicalError />
         <SyncHistoryCard batches={recent} title="รอบล่าสุดทั้งหมด" showTechnicalError />
       </div>

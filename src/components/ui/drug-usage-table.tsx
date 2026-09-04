@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { Search } from "lucide-react";
 import { useDeferredValue, useMemo, useState } from "react";
 
-import { formatNumber, inputClass } from "@/components/ui/primitives";
+import { EmptyState, formatNumber, inputClass } from "@/components/ui/primitives";
 import { drugTypeLabel } from "@/lib/shared/drug-types";
 
 export interface DrugUsageTableRow {
@@ -130,7 +131,7 @@ export function DrugUsageTable({
 
   return (
     <div>
-      <div className="flex flex-wrap gap-2 border-b border-line px-5 pt-4 no-print">
+      <div className="flex flex-wrap gap-1.5 border-b border-hairline px-4 pt-3 no-print">
         {(
             [
               ["all", "ทั้งหมด"],
@@ -145,10 +146,10 @@ export function DrugUsageTable({
               setStatus(key);
               setPage(1);
             }}
-            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors duration-150 ${
               status === key
-                ? "border-brand-500 bg-brand-50 text-brand-700"
-                : "border-line text-muted hover:bg-canvas"
+                ? "border-brand-line bg-brand-soft text-brand-ink"
+                : "border-line text-muted hover:bg-raised"
             }`}
           >
             {label} ({formatNumber(counts[key])})
@@ -156,26 +157,32 @@ export function DrugUsageTable({
         ))}
       </div>
 
-      <div className="flex flex-wrap items-end gap-3 border-b border-line px-5 py-4 no-print">
-        <label className="min-w-[240px] flex-1">
-          <span className="mb-1.5 block text-xs font-medium text-muted">
+      <div className="flex flex-wrap items-end gap-3 border-b border-hairline px-4 py-3 no-print">
+        <label className="min-w-[220px] flex-1">
+          <span className="mb-1 block text-xs font-medium text-muted">
             ค้นหาชื่อยา / รหัสยา (พิมพ์แล้วกรองทันที)
           </span>
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setPage(1);
-            }}
-            placeholder="เช่น พารา, amlo, P189"
-            className={inputClass}
-            autoComplete="off"
-          />
+          <span className="relative block">
+            <Search
+              aria-hidden
+              className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted"
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              placeholder="เช่น พารา, amlo, P189"
+              className={`${inputClass} pl-8`}
+              autoComplete="off"
+            />
+          </span>
         </label>
 
         <label>
-          <span className="mb-1.5 block text-xs font-medium text-muted">เรียงลำดับ</span>
+          <span className="mb-1 block text-xs font-medium text-muted">เรียงลำดับ</span>
           <select
             value={sort}
             onChange={(event) => {
@@ -191,21 +198,23 @@ export function DrugUsageTable({
           </select>
         </label>
 
-        <p className="pb-2 text-xs text-muted">
+        <p className="pb-2.5 text-xs text-muted">
           พบ {formatNumber(filtered.length)} รายการ
           {query ? ` จากทั้งหมด ${formatNumber(rows.length)}` : ""}
         </p>
       </div>
 
       {visible.length === 0 ? (
-        <p className="px-5 py-16 text-center text-sm text-muted">
-          ไม่พบยาที่ตรงกับ &ldquo;{query}&rdquo;
-        </p>
+        <EmptyState
+          icon={Search}
+          title={`ไม่พบยาที่ตรงกับ "${query}"`}
+          description="ลองพิมพ์เพียงบางส่วนของชื่อยา หรือเปลี่ยนหมวด/สถานะรหัสด้านบน"
+        />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-line bg-canvas/60">
+          <table className="w-full min-w-[960px] border-collapse text-[13.5px]">
+            <thead className="sticky top-0 z-10 bg-raised">
+              <tr className="border-b border-line">
                 {[
                   "ลำดับ",
                   "หมวดยา",
@@ -220,7 +229,7 @@ export function DrugUsageTable({
                   <th
                     key={header}
                     scope="col"
-                    className={`whitespace-nowrap px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted ${
+                    className={`whitespace-nowrap px-4 py-2.5 text-[12.5px] font-semibold text-muted ${
                       index === 6 || index === 7 ? "text-right" : "text-left"
                     }`}
                   >
@@ -233,43 +242,47 @@ export function DrugUsageTable({
               {visible.map((row, index) => (
                 <tr
                   key={`${row.drugType ?? "x"}-${row.drugCode}`}
-                  className="border-b border-line/70 last:border-0 hover:bg-canvas/60"
+                  className="border-b border-hairline transition-colors duration-150 last:border-0 hover:bg-raised"
                 >
-                  <td className="px-4 py-3 text-xs text-muted numeric">
+                  <td className="px-4 py-2.5 text-xs text-muted numeric">
                     {(currentPage - 1) * PAGE_SIZE + index + 1}
                   </td>
-                  <td className="px-4 py-3">
-                    <span className="inline-flex rounded-full bg-canvas px-2 py-0.5 text-xs text-muted">
+                  <td className="px-4 py-2.5">
+                    <span className="inline-flex whitespace-nowrap rounded-full bg-raised px-2 py-0.5 text-xs text-muted">
                       {drugTypeLabel(row.drugType)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 numeric text-xs text-muted">{row.drugCode}</td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-2.5 numeric text-xs text-muted">{row.drugCode}</td>
+                  <td className="px-4 py-2.5">
                     <Link
                       href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}?${linkParams}`}
-                      className="font-medium text-ink hover:text-brand-700 hover:underline"
+                      className="font-medium text-ink transition-colors duration-150 hover:text-brand"
                     >
                       {row.drugName}
                     </Link>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-2.5">
                     <span
-                      className={`inline-flex rounded-full px-2 py-0.5 text-xs ${
-                        row.drugFlag === "2" ? "bg-warn-bg text-warn" : "bg-ok-bg text-ok"
+                      className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${
+                        row.drugFlag === "2" ? "bg-warn-soft text-warn" : "bg-ok-soft text-ok"
                       }`}
                     >
                       {row.drugFlag === "2" ? "ปิดใช้งาน" : "เปิดใช้งาน"}
                     </span>
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-xs text-muted numeric">
+                  <td className="whitespace-nowrap px-4 py-2.5 text-xs text-muted numeric">
                     {row.firstUsageDate ?? "-"}
                     {row.lastUsageDate && row.lastUsageDate !== row.firstUsageDate
                       ? ` – ${row.lastUsageDate}`
                       : ""}
                   </td>
-                  <td className="px-4 py-3 text-right numeric">{formatNumber(row.dispensingRows)}</td>
-                  <td className="px-4 py-3 text-right numeric">{formatNumber(row.totalQuantity)}</td>
-                  <td className="px-4 py-3 text-xs text-muted">{row.unit ?? "-"}</td>
+                  <td className="px-4 py-2.5 text-right numeric">
+                    {formatNumber(row.dispensingRows)}
+                  </td>
+                  <td className="px-4 py-2.5 text-right numeric">
+                    {formatNumber(row.totalQuantity)}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-muted">{row.unit ?? "-"}</td>
                 </tr>
               ))}
             </tbody>
@@ -278,7 +291,7 @@ export function DrugUsageTable({
       )}
 
       {totalPages > 1 ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3 no-print">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-hairline px-4 py-2.5 no-print">
           <p className="text-xs text-muted">
             แสดง {formatNumber((currentPage - 1) * PAGE_SIZE + 1)}-
             {formatNumber(Math.min(currentPage * PAGE_SIZE, filtered.length))} จาก{" "}
@@ -289,7 +302,7 @@ export function DrugUsageTable({
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={currentPage === 1}
-              className="rounded-lg border border-line px-3 py-1.5 text-xs disabled:opacity-40"
+              className="rounded-[6px] border border-line px-2.5 py-1 text-xs transition-colors duration-150 hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent"
             >
               ก่อนหน้า
             </button>
@@ -300,7 +313,7 @@ export function DrugUsageTable({
               type="button"
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={currentPage === totalPages}
-              className="rounded-lg border border-line px-3 py-1.5 text-xs disabled:opacity-40"
+              className="rounded-[6px] border border-line px-2.5 py-1 text-xs transition-colors duration-150 hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent"
             >
               ถัดไป
             </button>

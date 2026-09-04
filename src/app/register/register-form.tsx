@@ -23,8 +23,8 @@ export function RegisterForm() {
   if (state.success) {
     return (
       <div className="space-y-4 text-center">
-        <p className="rounded-lg bg-ok-bg px-4 py-3 text-sm text-ok">{state.success}</p>
-        <Link href="/login" className="inline-block text-sm font-medium text-brand-700 hover:underline">
+        <p className="rounded-lg bg-ok-soft px-4 py-3 text-sm text-ok">{state.success}</p>
+        <Link href="/login" className="inline-block text-sm font-medium text-brand hover:underline">
           ไปหน้าเข้าสู่ระบบ
         </Link>
       </div>
@@ -34,7 +34,7 @@ export function RegisterForm() {
   return (
     <form action={formAction} className="space-y-4">
       {state.error ? (
-        <p role="alert" className="rounded-lg bg-danger-bg px-3 py-2 text-xs text-danger">
+        <p role="alert" className="rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">
           {state.error}
         </p>
       ) : null}

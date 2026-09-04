@@ -1,10 +1,13 @@
 import Link from "next/link";
 
+import { Boxes, ListChecks, Pill, Server } from "lucide-react";
+
 import { RankingChart, TrendChart } from "@/components/ui/charts";
-import { DataTable } from "@/components/ui/data-table";
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
   Card,
   PageHeader,
+  Section,
   StatCard,
   StatusBadge,
   formatNumber,
@@ -76,37 +79,49 @@ export default async function DashboardPage({
         subtitle={`${fiscal.label} · ข้อมูล ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบัน วัคซีน และยาสมุนไพร`}
       />
 
-      <Card className="mb-6 no-print">
+      <div className="mb-5 rounded-[10px] border border-line bg-surface no-print">
         <DateRangeFilter from={range.from} to={range.to} fiscal={fiscal} basePath="/dashboard" />
-      </Card>
+      </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="รายการจ่ายยา" value={summary.dispensingRows} unit="รายการ" />
-        <StatCard label="จำนวนรายการยา" value={summary.distinctDrugs} unit="รายการ" />
-        <StatCard label="ปริมาณรวม" value={summary.totalQuantity} unit="หน่วย" />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="รายการจ่ายยา"
+          value={summary.dispensingRows}
+          unit="รายการ"
+          icon={ListChecks}
+        />
+        <StatCard label="จำนวนรายการยา" value={summary.distinctDrugs} unit="รายการ" icon={Pill} />
+        <StatCard label="ปริมาณรวม" value={summary.totalQuantity} unit="หน่วย" icon={Boxes} />
         <StatCard
           label="Agent ออนไลน์"
           value={`${fleet.online}/${fleet.agentsTotal}`}
           tone={fleet.offline > 0 ? "warn" : "ok"}
+          icon={Server}
+          accent
           hint={
             fleet.lastSyncAt ? `ซิงก์ล่าสุด ${relativeTime(fleet.lastSyncAt)}` : "ยังไม่เคยซิงก์"
           }
         />
       </div>
 
-      <div className="mt-6 grid gap-4 sm:grid-cols-3">
-        {byType.map((row) => (
-          <StatCard
-            key={row.drugType ?? "unknown"}
-            label={drugTypeLabel(row.drugType)}
-            value={row.totalQuantity}
-            unit="หน่วย"
-            hint={`${row.distinctDrugs.toLocaleString("th-TH")} รายการยา · จ่าย ${row.dispensingRows.toLocaleString("th-TH")} ครั้ง`}
-          />
-        ))}
-      </div>
+      <Section
+        title="แยกตามหมวดยา"
+        description="ยาแผนปัจจุบัน วัคซีน และยาสมุนไพร ในช่วงเวลาที่เลือก"
+      >
+        <div className="grid gap-3 sm:grid-cols-3">
+          {byType.map((row) => (
+            <StatCard
+              key={row.drugType ?? "unknown"}
+              label={drugTypeLabel(row.drugType)}
+              value={row.totalQuantity}
+              unit="หน่วย"
+              hint={`${row.distinctDrugs.toLocaleString("th-TH")} รายการยา · จ่าย ${row.dispensingRows.toLocaleString("th-TH")} ครั้ง`}
+            />
+          ))}
+        </div>
+      </Section>
 
-      <div className="mt-6 grid gap-6 xl:grid-cols-3">
+      <div className="mt-8 grid gap-5 xl:grid-cols-3">
         <Card
           title="แนวโน้มปริมาณการจ่ายยา"
           description="รวมทุกประเภทยา รายวัน"
@@ -137,12 +152,15 @@ export default async function DashboardPage({
         </Card>
       </div>
 
-      <div className="mt-6 grid gap-6 xl:grid-cols-2">
+      <div className="mt-5 grid gap-5 xl:grid-cols-2">
         <Card
           title="ยาที่มีการจ่ายสูงสุด"
           description="เรียงตามปริมาณรวม"
           actions={
-            <Link href="/reports/drug-usage" className="text-xs font-medium text-brand-700 hover:underline">
+            <Link
+              href="/reports/drug-usage"
+              className="text-[13px] font-medium text-brand transition-colors duration-150 hover:text-brand-hover"
+            >
               ดูรายงานทั้งหมด
             </Link>
           }
@@ -157,13 +175,15 @@ export default async function DashboardPage({
                 key: "drug",
                 header: "ยา",
                 render: (row) => (
-                  <Link
-                    href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}`}
-                    className="font-medium text-ink hover:text-brand-700 hover:underline"
-                  >
+                  <>
+                    <Link
+                      href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}`}
+                      className="font-medium text-ink transition-colors duration-150 hover:text-brand"
+                    >
                     {row.drugName}
-                    <span className="block text-xs font-normal text-muted">{row.drugCode}</span>
                   </Link>
+                    <CellMeta>{row.drugCode}</CellMeta>
+                  </>
                 ),
               },
               {
@@ -199,7 +219,7 @@ export default async function DashboardPage({
                   render: (row) => (
                     <>
                       <span className="font-medium text-ink">{row.facilityName}</span>
-                      <span className="block text-xs text-muted">{row.facilityCode}</span>
+                      <CellMeta>{row.facilityCode}</CellMeta>
                     </>
                   ),
                 },
@@ -232,7 +252,7 @@ export default async function DashboardPage({
                   render: (row) => (
                     <>
                       <span className="font-medium text-ink">{row.name}</span>
-                      <span className="block text-xs text-muted">{row.hostname ?? "-"}</span>
+                      <CellMeta>{row.hostname ?? "-"}</CellMeta>
                     </>
                   ),
                 },

@@ -1,4 +1,4 @@
-import { DataTable } from "@/components/ui/data-table";
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
   Card,
   PageHeader,
@@ -9,6 +9,7 @@ import {
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
+import { Building2, RefreshCcw, Server, TriangleAlert } from "lucide-react";
 import { canTriggerSync, isSuperAdmin, requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
 
 import { SyncNowForm, VerifyDataForm } from "../admin/forms";
@@ -41,24 +42,39 @@ export default async function SyncPage() {
         subtitle="ข้อมูลถูกดึงจาก JHCIS โดย Agent ที่ติดตั้งในเครือข่ายของสถานบริการ และส่งออกทาง HTTPS เท่านั้น"
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Agent ออนไลน์" value={`${fleet.online}/${fleet.agentsTotal}`} tone={fleet.offline ? "warn" : "ok"} />
-        <StatCard label="ซิงก์ล่าสุด" value={relativeTime(fleet.lastSyncAt)} />
-        <StatCard label="ซิงก์ล้มเหลว 24 ชม." value={fleet.failedBatches24h} tone={fleet.failedBatches24h ? "danger" : "default"} />
-        <StatCard label="สถานบริการในสิทธิ์" value={isSuperAdmin(user) ? fleet.facilities : 1} />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Agent ออนไลน์"
+          value={`${fleet.online}/${fleet.agentsTotal}`}
+          tone={fleet.offline ? "warn" : "ok"}
+          icon={Server}
+          accent
+        />
+        <StatCard label="ซิงก์ล่าสุด" value={relativeTime(fleet.lastSyncAt)} icon={RefreshCcw} />
+        <StatCard
+          label="ซิงก์ล้มเหลว 24 ชม."
+          value={fleet.failedBatches24h}
+          tone={fleet.failedBatches24h ? "danger" : "default"}
+          icon={TriangleAlert}
+        />
+        <StatCard
+          label="สถานบริการในสิทธิ์"
+          value={isSuperAdmin(user) ? fleet.facilities : 1}
+          icon={Building2}
+        />
       </div>
 
       {running.length ? (
         <Card
-          className="mt-6"
+          className="mt-5"
           title="กำลังนำเข้าข้อมูล"
           description="ความคืบหน้าเทียบกับจำนวนรายการทั้งหมดที่ต้องนำเข้าในรอบนี้"
         >
           <div className="space-y-4 p-5">
             {running.map((batch) => (
               <div key={batch.batchRef}>
-                <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-sm font-medium text-ink">
+                <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-[13.5px] font-medium text-ink">
                     {batch.facilityCode} · {batch.agentName}
                     <span className="ml-2 text-xs font-normal text-muted">{batch.batchRef}</span>
                   </span>
@@ -69,14 +85,14 @@ export default async function SyncPage() {
                   </span>
                 </div>
                 <div
-                  className="h-2 w-full overflow-hidden rounded-full bg-canvas"
+                  className="h-1.5 w-full overflow-hidden rounded-full bg-raised"
                   role="progressbar"
                   aria-valuenow={Math.round(batch.progress * 100)}
                   aria-valuemin={0}
                   aria-valuemax={100}
                 >
                   <div
-                    className="h-full rounded-full bg-brand-600 transition-all"
+                    className="h-full rounded-full bg-brand transition-[width] duration-300"
                     style={{ width: `${Math.max(2, Math.round(batch.progress * 100))}%` }}
                   />
                 </div>
@@ -86,7 +102,7 @@ export default async function SyncPage() {
         </Card>
       ) : null}
 
-      <Card className="my-6" title="Agent ของสถานบริการ">
+      <Card className="my-5" title="Agent ของสถานบริการ">
         <DataTable
           rowKey={(row) => row.id}
           rows={agentRows}
@@ -99,7 +115,7 @@ export default async function SyncPage() {
               render: (row) => (
                 <>
                   <span className="font-medium text-ink">{row.name}</span>
-                  <span className="block text-xs text-muted">{row.hostname ?? "-"}</span>
+                  <CellMeta>{row.hostname ?? "-"}</CellMeta>
                 </>
               ),
             },

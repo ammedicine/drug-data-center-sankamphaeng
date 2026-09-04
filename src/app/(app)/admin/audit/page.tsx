@@ -1,4 +1,4 @@
-import { DataTable } from "@/components/ui/data-table";
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import { Card, PageHeader, formatDateTime } from "@/components/ui/primitives";
 import { requireAllFacilityViewer } from "@/lib/auth/rbac";
 import { listAuditLogs } from "@/lib/services/facilities";
@@ -33,12 +33,20 @@ export default async function AuditPage() {
               header: "ผู้กระทำ",
               render: (row) => (
                 <>
-                  <span className="text-sm text-ink">{row.actorLabel ?? "-"}</span>
-                  <span className="block text-xs text-muted">{row.actorType}</span>
+                  <span className="text-[13.5px] text-ink">{row.actorLabel ?? "-"}</span>
+                  <CellMeta>{row.actorType}</CellMeta>
                 </>
               ),
             },
-            { key: "action", header: "การกระทำ", render: (row) => <code className="text-xs">{row.action}</code> },
+            {
+              key: "action",
+              header: "การกระทำ",
+              render: (row) => (
+                <code className="rounded bg-raised px-1.5 py-0.5 text-xs text-ink-soft">
+                  {row.action}
+                </code>
+              ),
+            },
             {
               key: "resource",
               header: "ทรัพยากร",

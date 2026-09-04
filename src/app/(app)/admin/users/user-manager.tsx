@@ -1,9 +1,17 @@
 "use client";
 
 import { useActionState, useEffect, useMemo, useState } from "react";
+import { Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { useFormStatus } from "react-dom";
 
-import { Button, Field, formatDateTime, inputClass } from "@/components/ui/primitives";
+import {
+  Button,
+  EmptyState,
+  Field,
+  Notice as Callout,
+  formatDateTime,
+  inputClass,
+} from "@/components/ui/primitives";
 
 import {
   createUserAction,
@@ -59,13 +67,16 @@ function StatusPill({ user }: { user: ManagedUser }) {
   const status = statusOf(user);
   const style =
     status === "active"
-      ? "bg-ok-bg text-ok"
+      ? "bg-ok-soft text-ok"
       : status === "pending"
-        ? "bg-warn-bg text-warn"
-        : "bg-[#eef1f4] text-muted";
+        ? "bg-warn-soft text-warn"
+        : "bg-raised text-muted";
   const label = status === "active" ? "ใช้งาน" : status === "pending" ? "รออนุมัติ" : "ปิดใช้งาน";
   return (
-    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${style}`}>
+    <span
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${style}`}
+    >
+      <span className="size-1.5 rounded-full bg-current" aria-hidden />
       {label}
     </span>
   );
@@ -106,16 +117,7 @@ function useCloseOnSuccess(state: ActionState, onClose: () => void): void {
 
 function Notice({ state }: { state: ActionState }) {
   if (!state.error && !state.success) return null;
-  return (
-    <p
-      role="status"
-      className={`rounded-lg px-3 py-2 text-xs ${
-        state.error ? "bg-danger-bg text-danger" : "bg-ok-bg text-ok"
-      }`}
-    >
-      {state.error ?? state.success}
-    </p>
-  );
+  return <Callout tone={state.error ? "danger" : "ok"}>{state.error ?? state.success}</Callout>;
 }
 
 /** Small dialog used for both editing and deleting, so the table stays readable. */
@@ -132,26 +134,26 @@ function Modal({
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 py-10"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/40 p-4 py-10"
       role="dialog"
       aria-modal="true"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-2xl rounded-xl border border-line bg-surface shadow-lg">
-        <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
+      <div className="w-full max-w-2xl rounded-[10px] border border-line bg-surface shadow-[0_8px_24px_rgba(23,37,47,0.12)]">
+        <div className="flex items-start justify-between gap-4 border-b border-hairline px-5 py-3.5">
           <div>
-            <h2 className="text-sm font-semibold text-ink">{title}</h2>
-            {description ? <p className="mt-0.5 text-xs text-muted">{description}</p> : null}
+            <h2 className="text-[15px] font-semibold text-ink">{title}</h2>
+            {description ? <p className="mt-0.5 text-[13px] text-muted">{description}</p> : null}
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg px-2 py-1 text-sm text-muted hover:bg-canvas"
+            className="rounded-[6px] p-1 text-muted transition-colors duration-150 hover:bg-raised hover:text-ink"
             aria-label="ปิด"
           >
-            ✕
+            <X aria-hidden className="size-4" />
           </button>
         </div>
         <div className="p-5">{children}</div>
@@ -299,7 +301,7 @@ function DeleteUserModal({ user, onClose }: { user: ManagedUser; onClose: () => 
       <form action={action} className="space-y-4">
         <input type="hidden" name="userId" value={user.id} />
         <Notice state={state} />
-        <div className="rounded-lg bg-danger-bg px-4 py-3 text-xs text-danger">
+        <div className="rounded-[6px] bg-danger-soft px-4 py-3 text-[13px] text-danger">
           หากต้องการระงับการเข้าใช้ชั่วคราว แนะนำให้กด &ldquo;ปิดใช้งาน&rdquo; แทนการลบ
           เพราะยังตรวจสอบย้อนหลังได้ง่ายกว่า
         </div>
@@ -439,17 +441,17 @@ export function UserManager({
   }, [users, tab, query, roleFilter, facilityFilter]);
 
   return (
-    <div className="rounded-xl border border-line bg-surface shadow-[0_1px_2px_rgba(16,32,46,0.04)]">
-      <div className="flex flex-wrap items-center gap-2 border-b border-line px-5 pt-4">
+    <div className="rounded-[10px] border border-line bg-surface">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-hairline px-4 pt-3">
         {TABS.map(([key, label]) => (
           <button
             key={key}
             type="button"
             onClick={() => setTab(key)}
-            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors duration-150 ${
               tab === key
-                ? "border-brand-500 bg-brand-50 text-brand-700"
-                : "border-line text-muted hover:bg-canvas"
+                ? "border-brand-line bg-brand-soft text-brand-ink"
+                : "border-line text-muted hover:bg-raised"
             }`}
           >
             {label} ({counts[key]})
@@ -460,30 +462,36 @@ export function UserManager({
         ))}
 
         {canManage ? (
-          <div className="ml-auto pb-3">
-            <Button onClick={() => setCreating(true)} size="sm">
-              + เพิ่มผู้ใช้
+          <div className="ml-auto pb-2.5">
+            <Button onClick={() => setCreating(true)} size="sm" icon={Plus}>
+              เพิ่มผู้ใช้
             </Button>
           </div>
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-end gap-3 border-b border-line px-5 py-4">
+      <div className="flex flex-wrap items-end gap-3 border-b border-hairline px-4 py-3">
         <label className="min-w-[220px] flex-1">
-          <span className="mb-1.5 block text-xs font-medium text-muted">
+          <span className="mb-1 block text-xs font-medium text-muted">
             ค้นหา ชื่อ / user id / อีเมล / ตำแหน่ง
           </span>
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="พิมพ์เพื่อกรองทันที"
-            className={inputClass}
-            autoComplete="off"
-          />
+          <span className="relative block">
+            <Search
+              aria-hidden
+              className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted"
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="พิมพ์เพื่อกรองทันที"
+              className={`${inputClass} pl-8`}
+              autoComplete="off"
+            />
+          </span>
         </label>
         <label>
-          <span className="mb-1.5 block text-xs font-medium text-muted">บทบาท</span>
+          <span className="mb-1 block text-xs font-medium text-muted">บทบาท</span>
           <select
             value={roleFilter}
             onChange={(event) => setRoleFilter(event.target.value)}
@@ -499,7 +507,7 @@ export function UserManager({
         </label>
         {facilities.length > 1 ? (
           <label>
-            <span className="mb-1.5 block text-xs font-medium text-muted">สถานบริการ</span>
+            <span className="mb-1 block text-xs font-medium text-muted">สถานบริการ</span>
             <select
               value={facilityFilter}
               onChange={(event) => setFacilityFilter(event.target.value)}
@@ -514,21 +522,34 @@ export function UserManager({
             </select>
           </label>
         ) : null}
-        <p className="pb-2 text-xs text-muted">แสดง {visible.length} คน</p>
+        <p className="pb-2.5 text-xs text-muted">แสดง {visible.length} คน</p>
       </div>
 
       {visible.length === 0 ? (
-        <p className="px-5 py-16 text-center text-sm text-muted">ไม่พบผู้ใช้ตามเงื่อนไขที่เลือก</p>
+        <EmptyState
+          icon={Search}
+          title="ไม่พบผู้ใช้ตามเงื่อนไขที่เลือก"
+          description="ลองล้างคำค้น หรือเปลี่ยนแท็บสถานะด้านบน"
+        />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[860px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-line bg-canvas/60">
-                {["ผู้ใช้", "บทบาท", "สถานบริการ", "สถานะ", "เข้าใช้ล่าสุด", ""].map((header) => (
+          <table className="w-full min-w-[860px] border-collapse text-[13.5px]">
+            <thead className="sticky top-0 z-10 bg-raised">
+              <tr className="border-b border-line">
+                {(
+                  [
+                    ["ผู้ใช้", ""],
+                    ["บทบาท", ""],
+                    ["สถานบริการ", "hidden md:table-cell"],
+                    ["สถานะ", ""],
+                    ["เข้าใช้ล่าสุด", "hidden lg:table-cell"],
+                    ["จัดการ", "sr-only"],
+                  ] as Array<[string, string]>
+                ).map(([header, hide]) => (
                   <th
                     key={header}
                     scope="col"
-                    className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted"
+                    className={`whitespace-nowrap px-4 py-2.5 text-left text-[12.5px] font-semibold text-muted ${hide}`}
                   >
                     {header}
                   </th>
@@ -541,13 +562,13 @@ export function UserManager({
                 return (
                   <tr
                     key={user.id}
-                    className="border-b border-line/70 last:border-0 hover:bg-canvas/60"
+                    className="border-b border-hairline transition-colors duration-150 last:border-0 hover:bg-raised"
                   >
                     <td className="px-4 py-3">
                       <span className="font-medium text-ink">
                         {user.fullName}
                         {isSelf ? (
-                          <span className="ml-2 rounded bg-brand-50 px-1.5 py-0.5 text-xs font-normal text-brand-700">
+                          <span className="ml-2 rounded bg-brand-soft px-1.5 py-0.5 text-xs font-normal text-brand-ink">
                             บัญชีของคุณ
                           </span>
                         ) : null}
@@ -557,27 +578,39 @@ export function UserManager({
                         {user.position ?? user.email}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-xs">{ROLE_LABELS[user.role] ?? user.role}</td>
-                    <td className="px-4 py-3 text-xs text-muted">
+                    <td className="px-4 py-2.5 text-[13px]">
+                      {ROLE_LABELS[user.role] ?? user.role}
+                    </td>
+                    <td className="hidden px-4 py-2.5 text-[13px] text-muted md:table-cell">
                       {user.facilityName ?? "ทุกสถานบริการ"}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-2.5">
                       <StatusPill user={user} />
                     </td>
-                    <td className="px-4 py-3 text-xs text-muted">
+                    <td className="hidden px-4 py-2.5 text-xs text-muted lg:table-cell">
                       {formatDateTime(user.lastLoginAt)}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-2.5">
                       {canManage && !isSelf ? (
                         <div className="flex flex-wrap items-center justify-end gap-2">
                           <ToggleForm
                             user={user}
                             canApproveRegistration={canApproveRegistration}
                           />
-                          <Button variant="secondary" size="sm" onClick={() => setEditing(user)}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            icon={Pencil}
+                            onClick={() => setEditing(user)}
+                          >
                             แก้ไข
                           </Button>
-                          <Button variant="ghost" size="sm" onClick={() => setDeleting(user)}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            icon={Trash2}
+                            onClick={() => setDeleting(user)}
+                          >
                             ลบ
                           </Button>
                         </div>

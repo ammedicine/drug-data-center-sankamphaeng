@@ -1,4 +1,4 @@
-import { DataTable } from "@/components/ui/data-table";
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
   Card,
   StatusBadge,
@@ -41,10 +41,10 @@ export function SyncHistoryCard({
             header: "รอบการซิงก์",
             render: (row) => (
               <>
-                <span className="numeric text-sm text-ink">{row.batchRef}</span>
-                <span className="block text-xs text-muted">
+                <span className="numeric text-[13.5px] text-ink">{row.batchRef}</span>
+                <CellMeta>
                   {MODE_LABELS[row.mode] ?? row.mode} · {row.agentName}
-                </span>
+                </CellMeta>
               </>
             ),
           },
@@ -54,17 +54,21 @@ export function SyncHistoryCard({
                   key: "facility",
                   header: "สถานบริการ",
                   render: (row: SyncBatchRow) => (
-                    <span className="text-xs text-muted">
+                    <span className="text-[13px] text-muted">
                       {row.facilityCode} · {row.facilityName}
                     </span>
                   ),
+                  hideBelow: "md" as const,
                 },
               ]
             : []),
           {
             key: "started",
             header: "เริ่ม",
-            render: (row) => <span className="text-xs text-muted">{formatDateTime(row.startedAt)}</span>,
+            render: (row) => (
+              <span className="text-[13px] text-muted">{formatDateTime(row.startedAt)}</span>
+            ),
+            hideBelow: "sm",
           },
           {
             key: "read",
@@ -96,7 +100,10 @@ export function SyncHistoryCard({
               <>
                 <StatusBadge status={row.status} />
                 {showTechnicalError && row.errorMessage ? (
-                  <span className="mt-1 block max-w-[280px] truncate text-xs text-danger" title={row.errorMessage}>
+                  <span
+                    className="mt-1 block max-w-[280px] truncate text-xs text-danger"
+                    title={row.errorMessage}
+                  >
                     {row.errorMessage}
                   </span>
                 ) : null}

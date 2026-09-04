@@ -1,9 +1,10 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import { ChevronUp, Plus } from "lucide-react";
 import { useFormStatus } from "react-dom";
 
-import { Button, Field, inputClass } from "@/components/ui/primitives";
+import { Button, Field, Notice, inputClass } from "@/components/ui/primitives";
 
 import {
   createAgentAction,
@@ -21,16 +22,7 @@ import {
 function Feedback({ state }: { state: ActionState }) {
   if (!state.error && !state.success) return null;
   return (
-    <p
-      role="status"
-      className={
-        state.error
-          ? "rounded-lg bg-danger-bg px-3 py-2 text-xs text-danger"
-          : "rounded-lg bg-ok-bg px-3 py-2 text-xs text-ok"
-      }
-    >
-      {state.error ?? state.success}
-    </p>
+    <Notice tone={state.error ? "danger" : "ok"}>{state.error ?? state.success}</Notice>
   );
 }
 
@@ -47,18 +39,18 @@ function Submit({ label, variant = "primary" }: { label: string; variant?: "prim
 function TokenPanel({ state }: { state: ActionState }) {
   if (!state.enrollmentToken) return null;
   return (
-    <div className="rounded-lg border border-brand-500/30 bg-brand-50 p-4">
-      <p className="text-xs font-semibold text-brand-700">
+    <div className="rounded-[8px] border border-brand-line bg-brand-soft p-4">
+      <p className="text-xs font-semibold text-brand-ink">
         Enrollment token (แสดงครั้งเดียว - หมดอายุ{" "}
         {state.enrollmentExpiresAt
           ? new Date(state.enrollmentExpiresAt).toLocaleString("th-TH")
           : "-"}
         )
       </p>
-      <code className="mt-2 block break-all rounded bg-surface px-3 py-2 text-xs text-ink">
+      <code className="mt-2 block break-all rounded-[6px] border border-brand-line bg-surface px-3 py-2 text-xs text-ink">
         {state.enrollmentToken}
       </code>
-      <p className="mt-2 text-xs text-brand-700">
+      <p className="mt-2 text-xs text-brand-ink">
         นำไปกรอกในคำสั่ง <code>agent enroll</code> ที่เครื่องของ รพ.สต. ห้ามส่งผ่านช่องทางสาธารณะ
       </p>
     </div>
@@ -75,10 +67,16 @@ export function CollapsibleForm({
   const [open, setOpen] = useState(false);
   return (
     <div>
-      <Button variant="secondary" size="sm" onClick={() => setOpen((v) => !v)}>
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        icon={open ? ChevronUp : Plus}
+      >
         {open ? "ปิดฟอร์ม" : label}
       </Button>
-      {open ? <div className="mt-4">{children}</div> : null}
+      {open ? children : null}
     </div>
   );
 }

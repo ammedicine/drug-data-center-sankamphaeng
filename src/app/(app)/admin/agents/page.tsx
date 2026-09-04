@@ -1,4 +1,6 @@
-import { DataTable } from "@/components/ui/data-table";
+import { Server, TriangleAlert, Wifi, WifiOff } from "lucide-react";
+
+import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
   Card,
   PageHeader,
@@ -38,31 +40,39 @@ export default async function AgentsPage() {
         subtitle="Agent คือโปรแกรมที่ติดตั้งในเครื่องที่เข้าถึง JHCISDB ของแต่ละ รพ.สต. และส่งข้อมูลออกทาง HTTPS เท่านั้น"
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Agent ทั้งหมด" value={fleet.agentsTotal} />
-        <StatCard label="ออนไลน์" value={fleet.online} tone="ok" />
-        <StatCard label="ออฟไลน์" value={fleet.offline} tone={fleet.offline ? "warn" : "default"} />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Agent ทั้งหมด" value={fleet.agentsTotal} icon={Server} />
+        <StatCard label="ออนไลน์" value={fleet.online} tone="ok" icon={Wifi} />
+        <StatCard
+          label="ออฟไลน์"
+          value={fleet.offline}
+          tone={fleet.offline ? "warn" : "default"}
+          icon={WifiOff}
+        />
         <StatCard
           label="ซิงก์ล้มเหลว 24 ชม."
           value={fleet.failedBatches24h}
           tone={fleet.failedBatches24h ? "danger" : "default"}
+          icon={TriangleAlert}
         />
       </div>
 
       {canManage ? (
-        <Card className="my-6" title="ลงทะเบียน Agent ใหม่">
-          <div className="p-5">
-            {facilities.length ? (
-              <CollapsibleForm label="+ สร้าง Agent">
-                <AgentForm facilities={facilities} />
-              </CollapsibleForm>
-            ) : (
-              <p className="text-sm text-muted">กรุณาเพิ่มสถานบริการก่อนสร้าง Agent</p>
-            )}
-          </div>
-        </Card>
+        <div className="my-5">
+          {facilities.length ? (
+            <CollapsibleForm label="ลงทะเบียน Agent ใหม่">
+              <Card className="mt-3">
+                <div className="p-5">
+                  <AgentForm facilities={facilities} />
+                </div>
+              </Card>
+            </CollapsibleForm>
+          ) : (
+            <p className="text-[13px] text-muted">กรุณาเพิ่มสถานบริการก่อนสร้าง Agent</p>
+          )}
+        </div>
       ) : (
-        <div className="my-6" />
+        <div className="my-5" />
       )}
 
       <Card title={`Agent ทั้งหมด (${rows.length})`}>
@@ -78,9 +88,9 @@ export default async function AgentsPage() {
               render: (row) => (
                 <>
                   <span className="font-medium text-ink">{row.name}</span>
-                  <span className="block text-xs text-muted">
+                  <CellMeta>
                     {row.facilityCode} · {row.facilityName}
-                  </span>
+                  </CellMeta>
                 </>
               ),
             },
@@ -88,9 +98,9 @@ export default async function AgentsPage() {
               key: "host",
               header: "เครื่อง / เวอร์ชัน",
               render: (row) => (
-                <span className="text-xs text-muted">
+                <span className="text-[13px] text-muted">
                   {row.hostname ?? "-"}
-                  <span className="block">
+                  <span className="mt-0.5 block text-xs">
                     agent {row.version ?? "-"} · JHCIS {row.jhcisVersion ?? "-"}
                   </span>
                 </span>
@@ -112,9 +122,9 @@ export default async function AgentsPage() {
               key: "sync",
               header: "ซิงก์สำเร็จล่าสุด",
               render: (row) => (
-                <span className="text-xs text-muted">
+                <span className="text-[13px] text-muted">
                   {formatDateTime(row.lastSuccessfulSyncAt)}
-                  <span className="block">
+                  <span className="mt-0.5 block text-xs">
                     สำเร็จ {row.syncCount} · ล้มเหลว {row.failedCount}
                   </span>
                 </span>

@@ -4,7 +4,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -13,12 +12,33 @@ import {
   YAxis,
 } from "recharts";
 
-const AXIS = { stroke: "#5b6b7c", fontSize: 11 };
-const GRID = "#e3e8ee";
-const SERIES = ["#0f9d8f", "#1d4ed8", "#97650a", "#b3261e", "#5b6b7c"];
+/**
+ * Charts support the tables; they never carry information the table does not.
+ * One series means one colour - a ranking of ten drugs is still one measure, so
+ * it stays one colour rather than becoming a rainbow.
+ */
+const INK = "#17252f";
+const MUTED = "#64798a";
+const GRID = "#eaeef1";
+const SERIES = "#087a70";
+
+const AXIS = { stroke: MUTED, fontSize: 12 } as const;
+
+const TOOLTIP_STYLE = {
+  borderRadius: 8,
+  border: "1px solid #dfe5e9",
+  fontSize: 12.5,
+  color: INK,
+  padding: "6px 10px",
+  boxShadow: "0 2px 8px rgba(23,37,47,0.08)",
+} as const;
 
 function formatCompact(value: number): string {
   return value.toLocaleString("th-TH", { notation: "compact", maximumFractionDigits: 1 });
+}
+
+function formatFull(value: number): string {
+  return value.toLocaleString("th-TH");
 }
 
 /** Usage over time (PROJECT_SPEC section 17 - Usage Trend). */
@@ -32,26 +52,35 @@ export function TrendChart({
   return (
     <div style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
           <CartesianGrid stroke={GRID} vertical={false} />
-          <XAxis dataKey="period" tick={AXIS} tickLine={false} axisLine={{ stroke: GRID }} minTickGap={24} />
-          <YAxis tick={AXIS} tickLine={false} axisLine={false} tickFormatter={formatCompact} width={52} />
+          <XAxis
+            dataKey="period"
+            tick={AXIS}
+            tickLine={false}
+            axisLine={{ stroke: GRID }}
+            minTickGap={28}
+            tickMargin={8}
+          />
+          <YAxis
+            tick={AXIS}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={formatCompact}
+            width={48}
+          />
           <Tooltip
-            formatter={(value: number) => [value.toLocaleString("th-TH"), "ปริมาณจ่าย"]}
-            contentStyle={{
-              borderRadius: 10,
-              border: "1px solid #e3e8ee",
-              fontSize: 12,
-              boxShadow: "0 4px 12px rgba(16,32,46,0.08)",
-            }}
+            formatter={(value: number) => [formatFull(value), "ปริมาณจ่าย"]}
+            contentStyle={TOOLTIP_STYLE}
+            cursor={{ stroke: MUTED, strokeDasharray: "3 3" }}
           />
           <Line
             type="monotone"
             dataKey="totalQuantity"
-            stroke={SERIES[0]}
-            strokeWidth={2}
+            stroke={SERIES}
+            strokeWidth={1.75}
             dot={false}
-            activeDot={{ r: 4 }}
+            activeDot={{ r: 3.5, strokeWidth: 0 }}
           />
         </LineChart>
       </ResponsiveContainer>
@@ -59,7 +88,7 @@ export function TrendChart({
   );
 }
 
-/** Horizontal ranking chart (Top used drugs / facility comparison). */
+/** Horizontal ranking (top used drugs / facility comparison). */
 export function RankingChart({
   data,
   height = 300,
@@ -70,26 +99,29 @@ export function RankingChart({
   return (
     <div style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
+        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
           <CartesianGrid stroke={GRID} horizontal={false} />
-          <XAxis type="number" tick={AXIS} tickLine={false} axisLine={false} tickFormatter={formatCompact} />
+          <XAxis
+            type="number"
+            tick={AXIS}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={formatCompact}
+          />
           <YAxis
             type="category"
             dataKey="label"
-            tick={AXIS}
+            tick={{ ...AXIS, fontSize: 11.5 }}
             tickLine={false}
             axisLine={{ stroke: GRID }}
-            width={150}
+            width={148}
           />
           <Tooltip
-            formatter={(value: number) => [value.toLocaleString("th-TH"), "ปริมาณจ่าย"]}
-            contentStyle={{ borderRadius: 10, border: "1px solid #e3e8ee", fontSize: 12 }}
+            formatter={(value: number) => [formatFull(value), "ปริมาณจ่าย"]}
+            contentStyle={TOOLTIP_STYLE}
+            cursor={{ fill: "rgba(8,122,112,0.06)" }}
           />
-          <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={16}>
-            {data.map((_, index) => (
-              <Cell key={index} fill={SERIES[index % SERIES.length]} />
-            ))}
-          </Bar>
+          <Bar dataKey="value" fill={SERIES} radius={[0, 3, 3, 0]} barSize={13} />
         </BarChart>
       </ResponsiveContainer>
     </div>

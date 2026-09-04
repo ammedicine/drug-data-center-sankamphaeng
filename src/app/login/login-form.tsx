@@ -22,7 +22,7 @@ export function LoginForm() {
   return (
     <form action={formAction} className="space-y-4">
       {state.error ? (
-        <p role="alert" className="rounded-lg bg-danger-bg px-3 py-2 text-xs text-danger">
+        <p role="alert" className="rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger">
           {state.error}
         </p>
       ) : null}
