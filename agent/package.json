@@ -1,0 +1,27 @@
+{
+  "name": "sdc-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local JHCIS agent for the Sankamphaeng drug data center",
+  "type": "commonjs",
+  "main": "dist/agent/src/cli.js",
+  "bin": { "sdc-agent": "dist/agent/src/cli.js" },
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "doctor": "tsx src/cli.ts doctor",
+    "enroll": "tsx src/cli.ts enroll",
+    "sync": "tsx src/cli.ts sync",
+    "start": "tsx src/cli.ts run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "mysql2": "^3.11.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
