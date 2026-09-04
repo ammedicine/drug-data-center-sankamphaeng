@@ -8,6 +8,7 @@ import { verifyPassword } from "@/lib/auth/password";
 import { clearSessionCookie, setSessionCookie } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import { users } from "@/lib/db/schema";
+import { LOGIN_RULE, clearRateLimit, rateLimit } from "@/lib/security/rate-limit";
 import { clientIp, writeAudit } from "@/lib/services/audit";
 
 export interface LoginState {
@@ -30,6 +31,25 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
 
   if (!identifier || !password) {
     return { error: "กรุณากรอกชื่อผู้ใช้และรหัสผ่าน" };
+  }
+
+  // Two counters: one stops an attacker hammering a single account, the other
+  // stops one source spraying many accounts.
+  const perAccount = rateLimit(`login:user:${identifier}`, LOGIN_RULE);
+  const perIp = rateLimit(`login:ip:${ip ?? "unknown"}`, LOGIN_RULE);
+  if (!perAccount.allowed || !perIp.allowed) {
+    const wait = Math.max(perAccount.retryAfterSeconds, perIp.retryAfterSeconds);
+    await writeAudit({
+      actorType: "USER",
+      actorLabel: identifier,
+      action: "LOGIN_FAILED",
+      resource: "session",
+      ip,
+      metadata: { reason: "rate_limited" },
+    });
+    return {
+      error: `พยายามเข้าสู่ระบบบ่อยเกินไป กรุณารออีก ${Math.ceil(wait / 60)} นาที`,
+    };
   }
 
   const [user] = await db
@@ -76,6 +96,9 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
     });
     return { error: "บัญชีนี้ยังไม่ได้รับอนุมัติ หรือถูกปิดใช้งาน กรุณาติดต่อผู้ดูแลระบบ" };
   }
+
+  clearRateLimit(`login:user:${identifier}`);
+  clearRateLimit(`login:ip:${ip ?? "unknown"}`);
 
   await setSessionCookie({
     userId: user.id,

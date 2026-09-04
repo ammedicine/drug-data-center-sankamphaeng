@@ -22,3 +22,6 @@ agent/build/
 agent/installer/output/
 __pycache__/
 *.pyc
+
+# Vercel env file (real secrets)
+.env.vercel

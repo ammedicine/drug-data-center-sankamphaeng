@@ -8,6 +8,8 @@ export type AuditAction =
   | "USER_CREATE"
   | "USER_UPDATE"
   | "USER_DISABLE"
+  | "USER_DELETE"
+  | "USER_PASSWORD_RESET"
   | "FACILITY_CREATE"
   | "FACILITY_UPDATE"
   | "FACILITY_DISABLE"

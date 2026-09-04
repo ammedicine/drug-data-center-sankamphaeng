@@ -1,13 +1,19 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 
 import { issueEnrollmentToken } from "@/lib/agent-auth/enrollment";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
-import { canManageFacility, canTriggerSync, isSuperAdmin } from "@/lib/auth/rbac";
+import {
+  canApproveRegistration,
+  canManageFacility,
+  canManageUsers,
+  canTriggerSync,
+  isSuperAdmin,
+} from "@/lib/auth/rbac";
 import { db } from "@/lib/db";
 import { agentCredentials, agents, facilities, users } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
@@ -385,6 +391,203 @@ export async function createUserAction(
   return { success: `สร้างผู้ใช้ ${email} เรียบร้อย` };
 }
 
+/**
+ * Shared guard for acting on another account.
+ *
+ * A FACILITY_ADMIN manages only its own facility and never a district-wide
+ * role; nobody edits their own row through this path, because the dangerous
+ * fields (role, facility, active) would let an account widen its own access.
+ */
+async function loadManageableUser(
+  actor: Awaited<ReturnType<typeof requireApiUser>>,
+  userId: string,
+  options: { allowSelf?: boolean } = {},
+) {
+  const [target] = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      username: users.username,
+      fullName: users.fullName,
+      position: users.position,
+      role: users.role,
+      facilityId: users.facilityId,
+      isActive: users.isActive,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  if (!target) return { ok: false, error: "ไม่พบผู้ใช้" } as const;
+  if (!options.allowSelf && target.id === actor.userId) {
+    return { ok: false, error: "ไม่สามารถแก้ไขบัญชีของตนเองจากหน้านี้" } as const;
+  }
+  if (!isSuperAdmin(actor)) {
+    if (
+      target.role === "SUPER_ADMIN" ||
+      target.role === "ADMIN" ||
+      target.facilityId !== actor.facilityId
+    ) {
+      return { ok: false, error: "ไม่มีสิทธิ์จัดการผู้ใช้รายนี้" } as const;
+    }
+  }
+  return { ok: true, target } as const;
+}
+
+/** Edits an existing account, optionally setting a new password. */
+export async function updateUserAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const actor = await requireApiUser();
+  if (!canManageUsers(actor)) return fail("ไม่มีสิทธิ์จัดการผู้ใช้");
+
+  const userId = String(formData.get("userId") ?? "");
+  const found = await loadManageableUser(actor, userId);
+  if (!found.ok) return fail(found.error);
+  const target = found.target;
+
+  const fullName = String(formData.get("fullName") ?? "").trim();
+  const position = String(formData.get("position") ?? "").trim() || null;
+  const email = String(formData.get("email") ?? "")
+    .trim()
+    .toLowerCase();
+  const username = String(formData.get("username") ?? "")
+    .trim()
+    .toLowerCase();
+  const role = String(formData.get("role") ?? target.role);
+  const facilityId = String(formData.get("facilityId") ?? "") || null;
+  const password = String(formData.get("password") ?? "");
+
+  if (!fullName) return fail("กรุณากรอกชื่อ-นามสกุล");
+  if (!email) return fail("กรุณากรอกอีเมล");
+  if (username && !/^[a-z0-9._-]{4,60}$/.test(username)) {
+    return fail("ชื่อผู้ใช้ต้องยาว 4-60 ตัว ใช้ได้เฉพาะ a-z 0-9 . _ -");
+  }
+
+  const districtWide = role === "SUPER_ADMIN" || role === "ADMIN";
+  if (!isSuperAdmin(actor)) {
+    if (districtWide) return fail("ไม่มีสิทธิ์ตั้งบทบาทระดับอำเภอ");
+    if (facilityId !== actor.facilityId) return fail("ย้ายผู้ใช้ออกนอกสถานบริการของตนไม่ได้");
+  }
+  if (!districtWide && !facilityId) return fail("กรุณาเลือกสถานบริการ");
+
+  // Demoting the last super admin would lock everyone out of administration.
+  if (target.role === "SUPER_ADMIN" && role !== "SUPER_ADMIN") {
+    const [{ remaining }] = await db
+      .select({ remaining: sql<number>`COUNT(*)` })
+      .from(users)
+      .where(and(eq(users.role, "SUPER_ADMIN"), eq(users.isActive, true)));
+    if (Number(remaining) <= 1) return fail("ต้องมีผู้ดูแลระบบส่วนกลางอย่างน้อย 1 คน");
+  }
+
+  let passwordHash: string | undefined;
+  if (password) {
+    const weak = validatePasswordStrength(password);
+    if (weak) return fail(weak);
+    passwordHash = await hashPassword(password);
+  }
+
+  try {
+    await db
+      .update(users)
+      .set({
+        fullName,
+        position,
+        email,
+        username: username || null,
+        role: role as "SUPER_ADMIN" | "ADMIN" | "FACILITY_ADMIN" | "USER",
+        facilityId: districtWide ? null : facilityId,
+        ...(passwordHash
+          ? // a new password must invalidate sessions issued with the old one
+            { passwordHash, sessionEpoch: Date.now() % 1_000_000 }
+          : {}),
+      })
+      .where(eq(users.id, userId));
+  } catch {
+    return fail("อีเมลหรือชื่อผู้ใช้นี้ถูกใช้แล้ว");
+  }
+
+  const ip = clientIp(await headers());
+  await writeAudit({
+    actorType: "USER",
+    actorId: actor.userId,
+    actorLabel: actor.email,
+    action: "USER_UPDATE",
+    resource: "user",
+    resourceId: userId,
+    facilityId: districtWide ? null : facilityId,
+    ip,
+    metadata: { email, role, renamed: fullName !== target.fullName },
+  });
+  if (passwordHash) {
+    await writeAudit({
+      actorType: "USER",
+      actorId: actor.userId,
+      actorLabel: actor.email,
+      action: "USER_PASSWORD_RESET",
+      resource: "user",
+      resourceId: userId,
+      facilityId: districtWide ? null : facilityId,
+      ip,
+    });
+  }
+
+  revalidatePath("/admin/users");
+  return {
+    success: passwordHash
+      ? `บันทึกข้อมูล ${fullName} และตั้งรหัสผ่านใหม่แล้ว (ผู้ใช้ต้องเข้าสู่ระบบใหม่)`
+      : `บันทึกข้อมูล ${fullName} เรียบร้อย`,
+  };
+}
+
+/** Removes an account for good. Requires typing the username to confirm. */
+export async function deleteUserAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const actor = await requireApiUser();
+  if (!canManageUsers(actor)) return fail("ไม่มีสิทธิ์จัดการผู้ใช้");
+
+  const userId = String(formData.get("userId") ?? "");
+  const confirmation = String(formData.get("confirm") ?? "").trim();
+
+  const found = await loadManageableUser(actor, userId);
+  if (!found.ok) return fail(found.error);
+  const target = found.target;
+
+  const expected = target.username || target.email;
+  if (confirmation !== expected) {
+    return fail(`พิมพ์ "${expected}" เพื่อยืนยันการลบ`);
+  }
+
+  if (target.role === "SUPER_ADMIN") {
+    const [{ remaining }] = await db
+      .select({ remaining: sql<number>`COUNT(*)` })
+      .from(users)
+      .where(eq(users.role, "SUPER_ADMIN"));
+    if (Number(remaining) <= 1) return fail("ลบผู้ดูแลระบบส่วนกลางคนสุดท้ายไม่ได้");
+  }
+
+  await db.delete(users).where(eq(users.id, userId));
+
+  await writeAudit({
+    actorType: "USER",
+    actorId: actor.userId,
+    actorLabel: actor.email,
+    action: "USER_DELETE",
+    resource: "user",
+    resourceId: userId,
+    facilityId: target.facilityId,
+    ip: clientIp(await headers()),
+    // keep who was removed: the row itself is gone from users
+    metadata: { email: target.email, username: target.username, role: target.role },
+  });
+
+  revalidatePath("/admin/users");
+  return { success: `ลบผู้ใช้ ${expected} แล้ว` };
+}
+
 export async function toggleUserAction(
   _prev: ActionState,
   formData: FormData,
@@ -394,12 +597,24 @@ export async function toggleUserAction(
   const nextActive = String(formData.get("isActive") ?? "") === "true";
 
   const [target] = await db
-    .select({ id: users.id, facilityId: users.facilityId, email: users.email, role: users.role })
+    .select({
+      id: users.id,
+      facilityId: users.facilityId,
+      email: users.email,
+      role: users.role,
+      approvedAt: users.approvedAt,
+    })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
   if (!target) return fail("ไม่พบผู้ใช้");
   if (target.id === actor.userId) return fail("ไม่สามารถปิดใช้งานบัญชีของตนเองได้");
+
+  // A self-registered account has never been approved by anyone; letting it in
+  // is a central decision, because the applicant chose which facility to claim.
+  if (nextActive && !target.approvedAt && !canApproveRegistration(actor)) {
+    return fail("บัญชีที่สมัครเข้ามาเอง ต้องให้ผู้ดูแลระบบส่วนกลางเป็นผู้อนุมัติ");
+  }
   if (!isSuperAdmin(actor)) {
     if (
       target.role === "SUPER_ADMIN" ||

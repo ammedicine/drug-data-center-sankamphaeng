@@ -7,6 +7,7 @@ import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { db } from "@/lib/db";
 import { facilities, users } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
+import { REGISTER_RULE, rateLimit } from "@/lib/security/rate-limit";
 import { clientIp, writeAudit } from "@/lib/services/audit";
 
 export interface RegisterState {
@@ -24,8 +25,9 @@ const USERNAME_RE = /^[a-zA-Z0-9._-]{4,60}$/;
  *
  * A new account is created INACTIVE on purpose: registration is open to anyone
  * who can reach the site, so letting it grant immediate access to a facility's
- * data would be the same as having no facility isolation at all. A SUPER_ADMIN
- * (or the facility's own admin) approves it in /admin/users.
+ * data would be the same as having no facility isolation at all. Only a
+ * SUPER_ADMIN may approve it (in /admin/users) - the applicant picks the
+ * facility code themselves, and verifying that claim is a central job.
  */
 export async function registerAction(
   _prev: RegisterState,
@@ -43,6 +45,14 @@ export async function registerAction(
   const email = String(formData.get("email") ?? "")
     .trim()
     .toLowerCase();
+
+  const ip = clientIp(await headers());
+  // Registration creates rows (and possibly a facility) without a login, so it
+  // is the easiest endpoint to abuse.
+  const limit = rateLimit(`register:${ip ?? "unknown"}`, REGISTER_RULE);
+  if (!limit.allowed) {
+    return { error: "สมัครสมาชิกบ่อยเกินไป กรุณาลองใหม่ในภายหลัง" };
+  }
 
   if (!fullName) return { error: "กรุณากรอกชื่อ-นามสกุล" };
   if (!position) return { error: "กรุณากรอกตำแหน่ง" };
@@ -113,13 +123,13 @@ export async function registerAction(
     resource: "user",
     resourceId: userId,
     facilityId,
-    ip: clientIp(await headers()),
+    ip,
     metadata: { self_registered: true, pcucode, position },
   });
 
   return {
     success: `สมัครสมาชิกเรียบร้อย บัญชี "${username}" ผูกกับสถานบริการ ${
       facility?.name ?? facilityName
-    } (${pcucode}) — รอผู้ดูแลระบบอนุมัติก่อนจึงจะเข้าใช้งานได้`,
+    } (${pcucode}) — รอผู้ดูแลระบบส่วนกลางอนุมัติก่อนจึงจะเข้าใช้งานได้`,
   };
 }

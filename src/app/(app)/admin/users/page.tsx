@@ -1,6 +1,6 @@
-import { DataTable } from "@/components/ui/data-table";
-import { Card, PageHeader, StatusBadge, formatDateTime } from "@/components/ui/primitives";
+import { Card, ErrorState, PageHeader, StatCard } from "@/components/ui/primitives";
 import {
+  canApproveRegistration,
   canManageUsers,
   canViewAllFacilities,
   isSuperAdmin,
@@ -8,27 +8,20 @@ import {
   resolveFacilityScope,
 } from "@/lib/auth/rbac";
 import { listFacilityOptions, listUsers } from "@/lib/services/facilities";
-import { ErrorState } from "@/components/ui/primitives";
 
-import { CollapsibleForm, UserForm, UserToggleForm } from "../forms";
+import { UserManager, type ManagedUser } from "./user-manager";
 
-export const metadata = { title: "จัดการผู้ใช้" };
+export const metadata = { title: "ผู้ใช้งานระบบ" };
 export const dynamic = "force-dynamic";
-
-const ROLE_LABELS: Record<string, string> = {
-  SUPER_ADMIN: "ผู้ดูแลระบบส่วนกลาง",
-  ADMIN: "แอดมิน (ดูทุกสถานบริการ)",
-  FACILITY_ADMIN: "ผู้ดูแลสถานบริการ",
-  USER: "ผู้ใช้งาน",
-};
 
 export default async function UsersPage() {
   const user = await requireUser();
   const canManage = canManageUsers(user);
+
   if (!canManage && !canViewAllFacilities(user)) {
     return (
       <>
-        <PageHeader title="จัดการผู้ใช้" />
+        <PageHeader title="ผู้ใช้งานระบบ" />
         <ErrorState title="ไม่มีสิทธิ์เข้าถึงหน้านี้" />
       </>
     );
@@ -39,142 +32,67 @@ export default async function UsersPage() {
     listUsers(scope.facilityIds),
     listFacilityOptions(scope.facilityIds),
   ]);
-  // self-registered and never approved: these are the ones an admin must act on
-  const pending = rows.filter((row) => !row.isActive && !row.approvedAt);
+
+  // Dates cross the server/client boundary as strings so the table can format
+  // them without shipping Date objects through serialisation.
+  const users: ManagedUser[] = rows.map((row) => ({
+    id: row.id,
+    username: row.username,
+    position: row.position,
+    email: row.email,
+    fullName: row.fullName,
+    role: row.role,
+    facilityId: row.facilityId,
+    facilityName: row.facilityName,
+    isActive: row.isActive,
+    approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
+    createdAt: row.createdAt.toISOString(),
+    lastLoginAt: row.lastLoginAt ? row.lastLoginAt.toISOString() : null,
+  }));
+
+  const pending = users.filter((row) => !row.isActive && !row.approvedAt).length;
+  const active = users.filter((row) => row.isActive).length;
 
   return (
     <>
       <PageHeader
-        title="จัดการผู้ใช้"
+        title="ผู้ใช้งานระบบ"
         subtitle={
           isSuperAdmin(user)
-            ? "ผู้ใช้ทั้งหมดในระบบ"
-            : "ผู้ใช้ภายในสถานบริการของคุณเท่านั้น"
+            ? "อนุมัติผู้สมัครใหม่ แก้ไขข้อมูล เปลี่ยนบทบาท ตั้งรหัสผ่านใหม่ และลบบัญชี"
+            : "ผู้ใช้ภายในสถานบริการของคุณ (การอนุมัติผู้สมัครใหม่เป็นสิทธิ์ของผู้ดูแลระบบส่วนกลาง)"
         }
       />
 
-      {canManage ? (
-        <Card className="mb-6" title="เพิ่มผู้ใช้">
-          <div className="p-5">
-            <CollapsibleForm label="+ เพิ่มผู้ใช้">
-              <UserForm facilities={facilities} allowSuperAdmin={isSuperAdmin(user)} />
-            </CollapsibleForm>
-          </div>
-        </Card>
-      ) : null}
-
-      {pending.length ? (
-        <Card
-          className="mb-6"
-          title={`รออนุมัติ (${pending.length})`}
-          description="บัญชีที่สมัครเข้ามาเอง ยังเข้าใช้งานไม่ได้จนกว่าจะได้รับอนุมัติ"
-        >
-          <DataTable
-            rowKey={(row) => row.id}
-            rows={pending}
-            emptyTitle="ไม่มีบัญชีรออนุมัติ"
-            columns={[
-              {
-                key: "user",
-                header: "ผู้สมัคร",
-                render: (row) => (
-                  <>
-                    <span className="font-medium text-ink">{row.fullName}</span>
-                    <span className="block text-xs text-muted">
-                      {row.username ?? row.email} · {row.position ?? "-"}
-                    </span>
-                  </>
-                ),
-              },
-              {
-                key: "facility",
-                header: "สถานบริการที่ขอเข้าถึง",
-                render: (row) => (
-                  <span className="text-xs text-muted">{row.facilityName ?? "-"}</span>
-                ),
-              },
-              {
-                key: "created",
-                header: "สมัครเมื่อ",
-                render: (row) => (
-                  <span className="text-xs text-muted">{formatDateTime(row.createdAt)}</span>
-                ),
-              },
-              {
-                key: "actions",
-                header: "",
-                align: "right",
-                render: (row) =>
-                  canManage ? <UserToggleForm userId={row.id} isActive={false} pending /> : null,
-              },
-            ]}
-          />
-        </Card>
-      ) : null}
-
-      <Card title={`ผู้ใช้ทั้งหมด (${rows.length})`}>
-        <DataTable
-          rowKey={(row) => row.id}
-          rows={rows}
-          emptyTitle="ยังไม่มีผู้ใช้"
-          columns={[
-            {
-              key: "user",
-              header: "ผู้ใช้",
-              render: (row) => (
-                <>
-                  <span className="font-medium text-ink">{row.fullName}</span>
-                  <span className="block text-xs text-muted">
-                    {row.username ? `${row.username} · ` : ""}
-                    {row.position ?? row.email}
-                  </span>
-                </>
-              ),
-            },
-            {
-              key: "role",
-              header: "บทบาท",
-              render: (row) => <span className="text-xs">{ROLE_LABELS[row.role] ?? row.role}</span>,
-            },
-            {
-              key: "facility",
-              header: "สถานบริการ",
-              render: (row) => (
-                <span className="text-xs text-muted">{row.facilityName ?? "ทุกสถานบริการ"}</span>
-              ),
-            },
-            {
-              key: "login",
-              header: "เข้าใช้ล่าสุด",
-              render: (row) => (
-                <span className="text-xs text-muted">{formatDateTime(row.lastLoginAt)}</span>
-              ),
-            },
-            {
-              key: "status",
-              header: "สถานะ",
-              render: (row) => (
-                <StatusBadge
-                  status={row.isActive ? "ACTIVE" : row.approvedAt ? "INACTIVE" : "PENDING"}
-                />
-              ),
-            },
-            {
-              key: "actions",
-              header: "",
-              align: "right",
-              render: (row) =>
-                canManage ? (
-                  <UserToggleForm
-                    userId={row.id}
-                    isActive={row.isActive}
-                    pending={!row.isActive && !row.approvedAt}
-                  />
-                ) : null,
-            },
-          ]}
+      <div className="mb-6 grid gap-4 sm:grid-cols-3">
+        <StatCard label="ผู้ใช้ทั้งหมด" value={users.length} unit="บัญชี" />
+        <StatCard label="ใช้งานอยู่" value={active} unit="บัญชี" tone="ok" />
+        <StatCard
+          label="รออนุมัติ"
+          value={pending}
+          unit="บัญชี"
+          tone={pending ? "warn" : "default"}
+          hint={pending ? "ผู้ดูแลระบบส่วนกลางเป็นผู้อนุมัติ" : undefined}
         />
-      </Card>
+      </div>
+
+      {pending > 0 && !canApproveRegistration(user) ? (
+        <Card className="mb-6">
+          <p className="px-5 py-4 text-sm text-warn">
+            มีผู้สมัคร {pending} รายรออนุมัติ — บัญชีที่สมัครเข้ามาเองต้องให้ผู้ดูแลระบบส่วนกลางตรวจสอบ
+            รหัสสถานบริการก่อนเปิดใช้งาน
+          </p>
+        </Card>
+      ) : null}
+
+      <UserManager
+        users={users}
+        facilities={facilities}
+        allowDistrictRoles={isSuperAdmin(user)}
+        canManage={canManage}
+        canApproveRegistration={canApproveRegistration(user)}
+        currentUserId={user.userId}
+      />
     </>
   );
 }

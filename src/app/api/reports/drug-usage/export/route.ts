@@ -7,6 +7,7 @@ import {
   resolveFacilityScope,
   UnauthorizedError,
 } from "@/lib/auth/rbac";
+import { EXPORT_RULE, rateLimit } from "@/lib/security/rate-limit";
 import { clientIp, writeAudit } from "@/lib/services/audit";
 import { getUsageByDrug } from "@/lib/services/reports";
 import { drugTypeLabel } from "@/lib/shared/canonical";
@@ -28,6 +29,17 @@ function csvCell(value: string | number | null): string {
 export async function GET(req: NextRequest) {
   try {
     const user = await requireApiUser();
+
+    // An export is the cheapest way to pull a lot of data out at once, so it is
+    // capped per account as well as logged.
+    const limit = rateLimit(`export:${user.userId}`, EXPORT_RULE);
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { error: "ส่งออกข้อมูลบ่อยเกินไป กรุณารอสักครู่" },
+        { status: 429, headers: { "retry-after": String(limit.retryAfterSeconds) } },
+      );
+    }
+
     const url = new URL(req.url);
 
     const today = new Date().toISOString().slice(0, 10);

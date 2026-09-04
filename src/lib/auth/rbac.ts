@@ -10,6 +10,7 @@ import { redirect } from "next/navigation";
 
 import { PRIMARY_DRUG_TYPES } from "@/lib/shared/canonical";
 
+import { checkSessionStillValid } from "./session-guard";
 import { getSession, type SessionUser } from "./session";
 
 /**
@@ -81,10 +82,16 @@ export function canManageUsers(user: SessionUser): boolean {
   return user.role === "SUPER_ADMIN" || user.role === "FACILITY_ADMIN";
 }
 
-/** May a user approve a pending registration for this facility? */
-export function canApproveUsers(user: SessionUser, facilityId: string | null): boolean {
-  if (user.role === "SUPER_ADMIN") return true;
-  return user.role === "FACILITY_ADMIN" && Boolean(facilityId) && user.facilityId === facilityId;
+/**
+ * Only SUPER_ADMIN may turn a self-registered account into a working one.
+ *
+ * Registration is open to anyone who can reach the site and the applicant picks
+ * their own รหัสสถานบริการ, so the person approving has to be able to check that
+ * claim against the district's records - which is the central administrator, not
+ * an admin of the facility being claimed.
+ */
+export function canApproveRegistration(user: SessionUser): boolean {
+  return user.role === "SUPER_ADMIN";
 }
 
 /**
@@ -103,11 +110,27 @@ export function canTriggerSync(user: SessionUser, facilityId?: string | null): b
   return !facilityId || facilityId === user.facilityId;
 }
 
-/** Page-level guard: redirects to /login instead of throwing. */
+/**
+ * Page-level guard: redirects to /login instead of throwing.
+ *
+ * The signed token is not trusted on its own - the account is re-checked
+ * against the database, so disabling someone, resetting their password or
+ * changing their role takes effect within seconds rather than when their token
+ * happens to expire. The role and facility are taken from the database too, so
+ * a token issued before a demotion cannot keep the old privileges.
+ */
 export async function requireUser(): Promise<SessionUser> {
   const session = await getSession();
   if (!session) redirect("/login");
-  return session;
+
+  const check = await checkSessionStillValid(session);
+  if (!check.valid) redirect("/login?reason=session-ended");
+
+  return {
+    ...session,
+    role: (check.current?.role ?? session.role) as SessionUser["role"],
+    facilityId: check.current?.facilityId ?? session.facilityId,
+  };
 }
 
 export async function requireSuperAdmin(): Promise<SessionUser> {
@@ -127,7 +150,15 @@ export async function requireAllFacilityViewer(): Promise<SessionUser> {
 export async function requireApiUser(): Promise<SessionUser> {
   const session = await getSession();
   if (!session) throw new UnauthorizedError();
-  return session;
+
+  const check = await checkSessionStillValid(session);
+  if (!check.valid) throw new UnauthorizedError("เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่");
+
+  return {
+    ...session,
+    role: (check.current?.role ?? session.role) as SessionUser["role"],
+    facilityId: check.current?.facilityId ?? session.facilityId,
+  };
 }
 
 /**

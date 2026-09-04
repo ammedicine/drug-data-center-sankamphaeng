@@ -35,7 +35,20 @@ SEED_ADMIN_EMAIL=admin@example.org SEED_ADMIN_PASSWORD='<strong-password>' npm r
 | `AGENT_SIGNATURE_MAX_SKEW_SECONDS` | ค่าเริ่มต้น 300 |
 | `DATABASE_POOL_SIZE` | ค่าเริ่มต้น 5 (serverless ควรน้อย) |
 
-สร้างค่าสุ่ม: `openssl rand -base64 48`
+สร้างไฟล์ค่าพร้อมวางลง Vercel ได้ด้วย:
+
+```bash
+npm run env:vercel     # เขียน .env.vercel (gitignored) จากค่าที่ใช้งานอยู่จริง
+```
+
+แล้วนำเนื้อหาไปวางที่ Vercel → Settings → Environment Variables (เลือกทั้ง Production และ Preview)
+แม่แบบที่ commit ไว้คือ `.env.vercel.example`
+
+**ข้อควรระวัง:** `AGENT_SIGNING_SECRET` ต้องเป็นค่าเดียวกับที่ใช้ตอน Agent ลงทะเบียน
+ถ้าเปลี่ยน Agent ทุกเครื่องจะส่งข้อมูลไม่ได้และต้อง enroll ใหม่ ส่วน `AUTH_SECRET` เปลี่ยนได้
+(ผลคือทุกคนต้องเข้าสู่ระบบใหม่)
+
+สร้างค่าสุ่มเอง: `openssl rand -base64 48`
 
 **ห้าม** ใส่ค่าจริงลง `.env.example` หรือ commit `.env`
 

@@ -99,7 +99,9 @@ export function RegisterForm() {
       </div>
 
       <p className="rounded-lg bg-canvas px-3 py-2 text-xs text-muted">
-        บัญชีใหม่จะเห็นข้อมูลเฉพาะสถานบริการที่ระบุเท่านั้น และต้องรอผู้ดูแลระบบอนุมัติก่อนเข้าใช้งาน
+        บัญชีใหม่จะเห็นข้อมูลเฉพาะสถานบริการที่ระบุเท่านั้น และต้องรอ
+        <strong className="font-medium"> ผู้ดูแลระบบส่วนกลาง </strong>
+        อนุมัติก่อนจึงจะเข้าใช้งานได้
       </p>
 
       <SubmitButton />
