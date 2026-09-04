@@ -13,9 +13,14 @@ export interface DrugUsageTableRow {
   unit: string | null;
   totalQuantity: number;
   dispensingRows: number;
+  drugFlag: string | null;
+  firstUsageDate: string | null;
+  lastUsageDate: string | null;
 }
 
 type SortKey = "name" | "quantity" | "rows" | "code";
+/** JHCIS cdrug.drugflag: "1" still orderable, "2" switched off */
+type StatusKey = "all" | "active" | "inactive";
 
 const PAGE_SIZE = 25;
 
@@ -75,15 +80,32 @@ export function DrugUsageTable({
 }) {
   const [query, setQuery] = useState(initialQuery);
   const [sort, setSort] = useState<SortKey>("name");
+  const [status, setStatus] = useState<StatusKey>("all");
   const [page, setPage] = useState(1);
 
   // Keeps typing responsive on large lists: the input updates immediately and
   // the filtered list catches up on the next render pass.
   const deferredQuery = useDeferredValue(query);
 
+  const counts = useMemo(
+    () => ({
+      all: rows.length,
+      active: rows.filter((row) => row.drugFlag !== "2").length,
+      inactive: rows.filter((row) => row.drugFlag === "2").length,
+    }),
+    [rows],
+  );
+
   const filtered = useMemo(() => {
     const needle = normalize(deferredQuery.trim());
     const scored = rows
+      .filter((row) =>
+        status === "all"
+          ? true
+          : status === "inactive"
+            ? row.drugFlag === "2"
+            : row.drugFlag !== "2",
+      )
       .map((row) => ({ row, score: score(row, needle) }))
       .filter((item) => item.score > 0);
 
@@ -100,7 +122,7 @@ export function DrugUsageTable({
     });
 
     return scored.map((item) => item.row);
-  }, [rows, deferredQuery, sort]);
+  }, [rows, deferredQuery, sort, status]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -108,6 +130,32 @@ export function DrugUsageTable({
 
   return (
     <div>
+      <div className="flex flex-wrap gap-2 border-b border-line px-5 pt-4 no-print">
+        {(
+            [
+              ["all", "ทั้งหมด"],
+              ["active", "รหัสที่เปิดใช้งาน"],
+              ["inactive", "รหัสที่ปิดใช้งานแล้ว"],
+            ] as Array<[StatusKey, string]>
+          ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => {
+              setStatus(key);
+              setPage(1);
+            }}
+            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+              status === key
+                ? "border-brand-500 bg-brand-50 text-brand-700"
+                : "border-line text-muted hover:bg-canvas"
+            }`}
+          >
+            {label} ({formatNumber(counts[key])})
+          </button>
+        ))}
+      </div>
+
       <div className="flex flex-wrap items-end gap-3 border-b border-line px-5 py-4 no-print">
         <label className="min-w-[240px] flex-1">
           <span className="mb-1.5 block text-xs font-medium text-muted">
@@ -155,22 +203,30 @@ export function DrugUsageTable({
         </p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] border-collapse text-sm">
+          <table className="w-full min-w-[960px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-line bg-canvas/60">
-                {["ลำดับ", "หมวดยา", "รหัสยา", "ชื่อยา", "ครั้งที่จ่าย", "จำนวนจ่าย", "หน่วย"].map(
-                  (header, index) => (
-                    <th
-                      key={header}
-                      scope="col"
-                      className={`whitespace-nowrap px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted ${
-                        index === 4 || index === 5 ? "text-right" : "text-left"
-                      }`}
-                    >
-                      {header}
-                    </th>
-                  ),
-                )}
+                {[
+                  "ลำดับ",
+                  "หมวดยา",
+                  "รหัสยา",
+                  "ชื่อยา",
+                  "สถานะรหัส",
+                  "ช่วงที่มีการจ่าย",
+                  "ครั้งที่จ่าย",
+                  "จำนวนจ่าย",
+                  "หน่วย",
+                ].map((header, index) => (
+                  <th
+                    key={header}
+                    scope="col"
+                    className={`whitespace-nowrap px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted ${
+                      index === 6 || index === 7 ? "text-right" : "text-left"
+                    }`}
+                  >
+                    {header}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -195,6 +251,21 @@ export function DrugUsageTable({
                     >
                       {row.drugName}
                     </Link>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-xs ${
+                        row.drugFlag === "2" ? "bg-warn-bg text-warn" : "bg-ok-bg text-ok"
+                      }`}
+                    >
+                      {row.drugFlag === "2" ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-xs text-muted numeric">
+                    {row.firstUsageDate ?? "-"}
+                    {row.lastUsageDate && row.lastUsageDate !== row.firstUsageDate
+                      ? ` – ${row.lastUsageDate}`
+                      : ""}
                   </td>
                   <td className="px-4 py-3 text-right numeric">{formatNumber(row.dispensingRows)}</td>
                   <td className="px-4 py-3 text-right numeric">{formatNumber(row.totalQuantity)}</td>

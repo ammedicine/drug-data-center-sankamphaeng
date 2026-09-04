@@ -126,6 +126,53 @@ export async function listSyncBatches(
     .limit(limit);
 }
 
+export interface RunningBatch {
+  agentId: string;
+  agentName: string;
+  facilityCode: string;
+  facilityName: string;
+  batchRef: string;
+  startedAt: Date;
+  recordsRead: number;
+  recordsAccepted: number;
+  recordsRejected: number;
+  /** 0-1; falls back to 0 when the agent has not reported a total yet */
+  progress: number;
+}
+
+/** Batches still in flight, for the progress bars on /sync and /admin/monitoring. */
+export async function listRunningBatches(facilityIds: string[] | null): Promise<RunningBatch[]> {
+  const parts: SQL[] = [inArray(syncBatches.status, ["STARTED", "UPLOADING"])];
+  if (facilityIds) parts.push(inArray(syncBatches.facilityId, facilityIds));
+
+  const rows = await db
+    .select({
+      agentId: agents.id,
+      agentName: agents.name,
+      facilityCode: facilities.code,
+      facilityName: facilities.name,
+      batchRef: syncBatches.batchRef,
+      startedAt: syncBatches.startedAt,
+      recordsRead: syncBatches.recordsRead,
+      recordsAccepted: syncBatches.recordsAccepted,
+      recordsRejected: syncBatches.recordsRejected,
+    })
+    .from(syncBatches)
+    .innerJoin(agents, eq(agents.id, syncBatches.agentId))
+    .innerJoin(facilities, eq(facilities.id, syncBatches.facilityId))
+    .where(and(...parts))
+    .orderBy(desc(syncBatches.startedAt))
+    .limit(10);
+
+  return rows.map((row) => ({
+    ...row,
+    progress:
+      row.recordsRead > 0
+        ? Math.min(1, (row.recordsAccepted + row.recordsRejected) / row.recordsRead)
+        : 0,
+  }));
+}
+
 export interface FleetSummary {
   facilities: number;
   agentsTotal: number;

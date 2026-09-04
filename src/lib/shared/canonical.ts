@@ -174,6 +174,8 @@ export interface AgentConfigResponse {
   disabled: boolean;
   /** an operator asked for an immediate sync (PROJECT_SPEC section 13) */
   syncRequested: boolean;
+  /** an operator asked for a full month-by-month reconciliation */
+  verifyRequested: boolean;
 }
 
 export interface SyncStartRequest {

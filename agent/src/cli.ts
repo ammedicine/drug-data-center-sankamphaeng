@@ -15,9 +15,12 @@ import {
   dataDir,
   installationId,
   loadCredential,
+  loadSettings,
   loadState,
   machineHostname,
   saveCredential,
+  saveSettings,
+  writeStatus,
 } from "./config";
 import { CentralClient } from "./central/client";
 import { JhcisConnection } from "./jhcis/connection";
@@ -211,77 +214,200 @@ async function sync(): Promise<void> {
   }
 }
 
+/** Compares JHCIS with the central database and re-sends whatever is missing. */
+async function verify(): Promise<void> {
+  const runner = new SyncRunner();
+  const result = await runner.verify({
+    from: arg("from") ?? null,
+    to: arg("to") ?? null,
+    repair: !has("check-only"),
+  });
+
+  console.log(`ตรวจสอบ ${result.checked} เดือน`);
+  if (!result.mismatched.length) {
+    console.log("ข้อมูลครบถ้วน ตรงกับ JHCIS ทุกเดือน");
+    return;
+  }
+  console.log(`พบเดือนที่ข้อมูลไม่ตรงกัน ${result.mismatched.length} เดือน:`);
+  for (const row of result.mismatched.slice(0, 24)) {
+    console.log(`  ${row.month}  JHCIS ${row.jhcis}  ศูนย์กลาง ${row.central}`);
+  }
+  if (has("check-only")) {
+    console.log("(โหมดตรวจอย่างเดียว ไม่ได้ส่งข้อมูลซ้ำ)");
+    return;
+  }
+
+  console.log(`ส่งข้อมูลซ่อมแล้ว ${result.repaired} รายการ`);
+  if (result.unresolved.length) {
+    console.log(
+      `
+ยังไม่ตรงกัน ${result.unresolved.length} เดือน - เป็นแถวที่ข้อมูลต้นทางไม่ผ่านการตรวจสอบ` +
+        " (ดูเหตุผลรายแถวได้ที่หน้าเว็บ หัวข้อประวัติการซิงก์)",
+    );
+    for (const row of result.unresolved) {
+      console.log(`  ${row.month}  JHCIS ${row.jhcis}  ศูนย์กลาง ${row.central}`);
+    }
+  }
+}
+
 async function retry(): Promise<void> {
   const queue = new OfflineQueue(dataDir());
+  const runner = new SyncRunner();
+
   const moved = queue.requeueFailed();
-  const result = await new SyncRunner().flushQueue();
+  const result = await runner.flushQueue();
   console.log(
     `นำกลับเข้าคิว ${moved} chunk · บันทึกสำเร็จ ${result.accepted} · ปฏิเสธ ${result.rejected} · ค้าง ${result.remaining}`,
   );
+
+  // Anything that failed permanently is usually a chunk whose batch the server
+  // has already closed; move it to a fresh batch rather than leaving it parked.
+  const recovery = await runner.recoverOrphanChunks();
+  if (recovery.recovered) {
+    console.log(`กู้ข้อมูลที่ค้าง ${recovery.recovered} รายการ ผ่านรอบใหม่ ${recovery.batchRef}`);
+  }
 }
 
-/** Long-running mode used by the Windows service wrapper. */
+/**
+ * Long-running mode: heartbeat, scheduled sync, and "Sync Now" requests that
+ * arrive on the heartbeat response. The desktop app runs this as a child
+ * process; it can also be run headless as a Windows service.
+ *
+ * Scheduling comes from data/settings.json (owned by the operator through the
+ * desktop app) and falls back to the interval the central server approved.
+ */
 async function run(): Promise<void> {
   const runner = new SyncRunner();
   const credential = loadCredential();
   if (!credential) throw new Error("ยังไม่ได้ลงทะเบียน Agent (sdc-agent enroll)");
 
-  const heartbeatMs = 5 * 60_000;
-  const syncMs = Math.max(15, credential.syncIntervalMinutes) * 60_000;
   let stopping = false;
+  let running = false;
+  /** clock times already fired today, so a daily time runs once per day */
+  const firedToday = new Set<string>();
+  let lastIntervalRun = 0;
 
   const shutdown = () => {
     stopping = true;
     log.info("agent stopping");
+    writeStatus({ phase: "idle", message: "หยุดทำงานแล้ว" });
     setTimeout(() => process.exit(0), 500);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  log.info("agent started", {
-    facility: credential.facilityCode,
-    syncIntervalMinutes: credential.syncIntervalMinutes,
-  });
-
-  const safeHeartbeat = async (status: "ONLINE" | "SYNCING" | "ERROR", error?: string) => {
+  const safeHeartbeat = async (state: "ONLINE" | "SYNCING" | "ERROR", error?: string) => {
     try {
-      return await runner.heartbeat(status, error);
+      const config = await runner.heartbeat(state, error);
+      writeStatus({ centralConnected: true });
+      return config;
     } catch (heartbeatError) {
-      log.warn("heartbeat failed", {
-        error: heartbeatError instanceof Error ? heartbeatError.message : String(heartbeatError),
-      });
+      const message =
+        heartbeatError instanceof Error ? heartbeatError.message : String(heartbeatError);
+      log.warn("heartbeat failed", { error: message });
+      writeStatus({ centralConnected: false, lastError: message });
       return null;
     }
   };
 
-  await safeHeartbeat("ONLINE");
-
-  // A "Sync Now" pressed in the web app arrives as a flag on the heartbeat
-  // response - the central server has no way to call into this LAN.
-  setInterval(() => {
-    void safeHeartbeat("ONLINE").then((config) => {
-      if (config?.syncRequested) {
-        log.info("manual sync requested by an operator");
-        void runOnce();
-      }
-    });
-  }, heartbeatMs);
-
-  const runOnce = async () => {
-    if (stopping) return;
+  const runOnce = async (reason: string) => {
+    if (stopping || running) return;
+    running = true;
     try {
+      log.info("sync triggered", { reason });
       await safeHeartbeat("SYNCING");
       const result = await runner.run({ mode: "INCREMENTAL" });
       await safeHeartbeat(result.pendingChunks ? "ERROR" : "ONLINE");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log.error("scheduled sync failed", { error: message });
+      // A failed run must not stop the agent: the queue keeps whatever was read
+      // and the next tick (or a manual retry) picks up from there.
+      writeStatus({ phase: "error", lastError: message, message: "ซิงก์ไม่สำเร็จ" });
       await safeHeartbeat("ERROR", message);
+    } finally {
+      running = false;
     }
   };
 
-  await runOnce();
-  setInterval(() => void runOnce(), syncMs);
+  const settings = loadSettings();
+  log.info("agent started", {
+    facility: credential.facilityCode,
+    autoSyncEnabled: settings.autoSyncEnabled,
+    syncIntervalMinutes: settings.syncIntervalMinutes,
+    dailyTimes: settings.dailyTimes,
+  });
+  writeStatus({ phase: "idle", message: "พร้อมทำงาน", lastError: null });
+
+  await safeHeartbeat("ONLINE");
+  if (settings.autoSyncEnabled && settings.syncIntervalMinutes > 0) {
+    await runOnce("startup");
+  }
+
+  // One ticker drives everything so settings changes take effect without a
+  // restart: the file is re-read on every tick.
+  const TICK_MS = 30_000;
+  let lastHeartbeat = Date.now();
+
+  setInterval(() => {
+    void (async () => {
+      if (stopping) return;
+      const current = loadSettings();
+      const now = new Date();
+
+      const heartbeatDue =
+        Date.now() - lastHeartbeat >= Math.max(1, current.heartbeatMinutes) * 60_000;
+      if (heartbeatDue) {
+        lastHeartbeat = Date.now();
+        const config = await safeHeartbeat(running ? "SYNCING" : "ONLINE");
+        // "Sync Now" pressed in the web app: central cannot reach into this
+        // LAN, so the request rides back on the heartbeat response.
+        // "ตรวจสอบความครบถ้วน" is a heavier request than a plain sync: it
+        // reconciles every month with JHCIS and re-sends only what is missing.
+        if (config?.verifyRequested) {
+          running = true;
+          try {
+            log.info("verify requested by an operator");
+            await runner.verify({});
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            log.error("verify failed", { error: message });
+            writeStatus({ phase: "error", lastError: message });
+          } finally {
+            running = false;
+          }
+          return;
+        }
+        if (config?.syncRequested) {
+          await runOnce("central request");
+          return;
+        }
+      }
+
+      if (!current.autoSyncEnabled) return;
+
+      const clock = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      const dayKey = now.toISOString().slice(0, 10);
+      for (const time of current.dailyTimes) {
+        const marker = `${dayKey} ${time}`;
+        if (time === clock && !firedToday.has(marker)) {
+          firedToday.add(marker);
+          await runOnce(`daily ${time}`);
+          return;
+        }
+      }
+
+      if (current.syncIntervalMinutes > 0) {
+        const dueAt = lastIntervalRun + current.syncIntervalMinutes * 60_000;
+        if (Date.now() >= dueAt) {
+          lastIntervalRun = Date.now();
+          await runOnce(`every ${current.syncIntervalMinutes} minutes`);
+        }
+      }
+    })();
+  }, TICK_MS);
+
+  lastIntervalRun = Date.now();
 }
 
 function status(): void {
@@ -299,6 +425,26 @@ function status(): void {
   console.log(`คิวค้างส่ง     : ${queue.count("PENDING")} chunk (ล้มเหลว ${queue.count("FAILED")})`);
 }
 
+/** Prints or updates data/settings.json; used by the desktop app. */
+function settings(): void {
+  const patch: Record<string, unknown> = {};
+  const interval = arg("interval");
+  const times = arg("times");
+  const auto = arg("auto");
+
+  if (interval && interval !== "true") patch.syncIntervalMinutes = Number(interval);
+  if (times && times !== "true") {
+    patch.dailyTimes = times
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^\d{2}:\d{2}$/.test(item));
+  }
+  if (auto) patch.autoSyncEnabled = auto !== "false";
+
+  const result = Object.keys(patch).length ? saveSettings(patch) : loadSettings();
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
   switch (command) {
@@ -311,10 +457,14 @@ async function main(): Promise<void> {
       return sync();
     case "retry":
       return retry();
+    case "verify":
+      return verify();
     case "run":
       return run();
     case "status":
       return status();
+    case "settings":
+      return settings();
     default:
       console.log(
         [
@@ -324,8 +474,12 @@ async function main(): Promise<void> {
           "  enroll --token <TOKEN> [--url]  ลงทะเบียนกับ Central",
           "  sync [--mode INITIAL|INCREMENTAL|MANUAL_RANGE] [--from YYYY-MM-DD] [--to YYYY-MM-DD]",
           "  retry                           ส่งข้อมูลที่ค้างในคิวใหม่",
+          "  verify [--from] [--to] [--check-only]",
+          "                                  ตรวจความครบถ้วนรายเดือนกับศูนย์กลาง แล้วซ่อมส่วนที่ขาด",
           "  run                             ทำงานต่อเนื่อง (สำหรับ Windows Service)",
           "  status                          สรุปสถานะในเครื่อง",
+          "  settings [--interval N] [--times 08:00,16:00] [--auto true|false]",
+          "                                  ดู/ตั้งค่าตารางการซิงก์ในเครื่อง",
         ].join("\n"),
       );
   }

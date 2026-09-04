@@ -77,6 +77,11 @@ export interface UsageByDrugRow {
   unit: string | null;
   totalQuantity: number;
   dispensingRows: number;
+  /** cdrug.drugflag: "1" active, "2" discontinued in JHCIS */
+  drugFlag: string | null;
+  /** first and last time this code was actually dispensed in the window */
+  firstUsageDate: string | null;
+  lastUsageDate: string | null;
 }
 
 export async function getUsageByDrug(
@@ -111,8 +116,17 @@ export async function getUsageByDrug(
       unit: sql<string | null>`MAX(${drugUsage.unit})`,
       totalQuantity,
       dispensingRows,
+      // A code can be switched off in JHCIS long after it was last dispensed,
+      // so the flag comes from the master while the dates come from the facts.
+      drugFlag: sql<string | null>`MAX(${drugs.drugFlag})`,
+      firstUsageDate: sql<string | null>`DATE_FORMAT(MIN(${drugUsage.usageDate}), '%Y-%m-%d')`,
+      lastUsageDate: sql<string | null>`DATE_FORMAT(MAX(${drugUsage.usageDate}), '%Y-%m-%d')`,
     })
     .from(drugUsage)
+    .leftJoin(
+      drugs,
+      and(eq(drugs.facilityId, drugUsage.facilityId), eq(drugs.drugCode, drugUsage.drugCode)),
+    )
     .where(where)
     .groupBy(drugUsage.drugCode, drugUsage.drugType)
     .orderBy(...orderBy)
@@ -132,6 +146,9 @@ export async function getUsageByDrug(
       unit: r.unit,
       totalQuantity: Number(r.totalQuantity ?? 0),
       dispensingRows: Number(r.dispensingRows ?? 0),
+      drugFlag: r.drugFlag ?? null,
+      firstUsageDate: r.firstUsageDate ?? null,
+      lastUsageDate: r.lastUsageDate ?? null,
     })),
     total: Number(countRow?.total ?? 0),
   };

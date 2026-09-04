@@ -87,8 +87,20 @@ export function canApproveUsers(user: SessionUser, facilityId: string | null): b
   return user.role === "FACILITY_ADMIN" && Boolean(facilityId) && user.facilityId === facilityId;
 }
 
-export function canTriggerSync(user: SessionUser): boolean {
-  return user.role === "SUPER_ADMIN" || user.role === "FACILITY_ADMIN";
+/**
+ * Who may ask an agent to pull fresh data.
+ *
+ * Anyone bound to a facility may refresh their own facility - it only makes the
+ * agent read its own JHCIS sooner, and waiting for the next scheduled run is a
+ * poor reason to keep staff from up-to-date numbers. ADMIN is excluded because
+ * it is a read-only district-wide role and would be acting on other people's
+ * facilities.
+ */
+export function canTriggerSync(user: SessionUser, facilityId?: string | null): boolean {
+  if (user.role === "SUPER_ADMIN") return true;
+  if (user.role === "ADMIN") return false;
+  if (!user.facilityId) return false;
+  return !facilityId || facilityId === user.facilityId;
 }
 
 /** Page-level guard: redirects to /login instead of throwing. */

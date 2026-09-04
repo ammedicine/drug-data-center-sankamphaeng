@@ -281,6 +281,28 @@ export class UsageExtractor {
     }));
   }
 
+  /**
+   * Rows per month as JHCIS sees them. Compared against the same tally from the
+   * central database to find windows that were never delivered in full.
+   */
+  async monthlyTally(
+    pcucode: string,
+    from: string,
+    to: string,
+  ): Promise<Array<{ month: string; rows: number }>> {
+    const dateExpr = this.dateExpr();
+    const rows = await this.db.query<RowDataPacket & { month: string; rows: number }>(
+      `SELECT DATE_FORMAT(${dateExpr}, '%Y-%m') AS month, COUNT(*) AS rows
+         FROM visitdrug vd
+         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+        WHERE vd.pcucode = ? AND ${dateExpr} >= ? AND ${dateExpr} <= ?
+        GROUP BY month
+        ORDER BY month`,
+      [pcucode, from, to],
+    );
+    return rows.map((row) => ({ month: String(row.month), rows: Number(row.rows) }));
+  }
+
   /** Newest dispensing date available locally - the upper bound for a sync. */
   async maxUsageDate(pcucode: string): Promise<string | null> {
     const row = await this.db.queryOne<RowDataPacket & { d: string | null }>(

@@ -12,9 +12,16 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/**
+ * Deliberately permissive: the row-level rules live in ingestUsageRecords so a
+ * single malformed row is rejected on its own with a reason an operator can
+ * read. Enforcing them here would fail the whole 500-row request instead - JHCIS
+ * really does contain rows with an empty drugcode, and one of them must not
+ * take 499 good rows down with it (JHCIS_INTEGRATION section 23).
+ */
 const usageRecord = z.object({
   visitNo: z.number().int(),
-  drugCode: z.string().min(1).max(24),
+  drugCode: z.string().max(24),
   drugName: z.string().max(255).nullable(),
   drugType: z.string().max(2).nullable(),
   quantity: z.number(),
@@ -22,11 +29,11 @@ const usageRecord = z.object({
   unitCode: z.string().max(15).nullable().optional().default(null),
   clinic: z.string().max(5).nullable(),
   visitMissing: z.boolean().optional().default(false),
-  usageDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  usageDate: z.string().max(10),
 });
 
 const drugRecord = z.object({
-  drugCode: z.string().min(1).max(24),
+  drugCode: z.string().max(24),
   drugName: z.string().max(255),
   genericName: z.string().max(220).nullable(),
   drugType: z.string().max(2).nullable(),

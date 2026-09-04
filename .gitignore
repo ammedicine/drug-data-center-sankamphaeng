@@ -15,3 +15,10 @@ agent/data/
 agent/logs/
 agent/agent.config.json
 coverage/
+
+# GUI build artefacts
+agent/gui/.venv/
+agent/build/
+agent/installer/output/
+__pycache__/
+*.pyc

@@ -26,6 +26,21 @@ JHCISDB (LAN, read-only) → Local Agent (outbound only) → HTTPS + HMAC
 
 ห้าม: Browser→JHCISDB, Central→JHCISDB, inbound port เข้า รพ.สต.
 
+## 1.5 หน้าโปรแกรมของ Agent (Windows)
+
+```
+agent/gui/sdc_agent_gui.py   หน้าจอ CustomTkinter + ไอคอนถาดระบบ (pystray)
+agent/gui/smoke_test.py      ทดสอบตรรกะโดยไม่เปิดหน้าต่าง (ใช้ตอน desktop ล็อก/CI)
+agent/installer/build.ps1    bundle agent -> node runtime -> PyInstaller -> Inno Setup
+agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, ProgramData, uninstall)
+```
+
+- หน้าจอ **ไม่มีตรรกะดึงข้อมูล** เป็นแค่ตัวสั่งงาน `agent` (Node) และอ่านไฟล์สถานะ
+- ไฟล์ที่เป็นสะพานระหว่างสองฝั่ง: `data/settings.json` (ตารางเวลา) กับ `data/status.json`
+  (เฟส/ความคืบหน้า เขียนแบบ temp+rename ทุกครั้ง)
+- เครื่องปลายทางไม่ต้องมี Node/Python เพราะตัวติดตั้งแนบ `node.exe` + `agent.js` + exe ของหน้าจอ
+- **เครื่องนี้ยังไม่ได้ติดตั้ง Inno Setup** (ISCC.exe) จึงยัง build ตัวติดตั้งจริงไม่ได้
+
 ## 2. โครงสร้าง repo (คุมให้อยู่แค่นี้)
 
 ```
@@ -103,6 +118,13 @@ cdrug 7,410 / visitdrug 265,787 / visit 130,422 / pcucode เดียว = `059
 - `agent doctor` แสดงหัวข้อ "ความครบถ้วนของข้อมูล visitdrug" ให้เห็นตัวเลขนี้ทุกครั้ง
 - **หลักการ: ยึด `visitdrug` เป็นตัวตั้ง ส่วน `visit` เป็นแค่ตัวให้วันที่ ห้ามใช้เป็นตัวกรองทิ้งแถว**
 
+### การตรวจสอบและซ่อมข้อมูลเอง (`agent verify`)
+- เทียบจำนวนแถว **รายเดือน** ระหว่าง JHCIS กับ Central (`POST /api/agent/sync/audit`)
+- เดือนไหนไม่ตรง -> ซิงก์ใหม่เฉพาะเดือนนั้น แล้ว **ตรวจซ้ำอีกรอบ**
+- เดือนที่ยังไม่ตรงหลังซ่อม = แถวที่ต้นทางไม่ผ่าน validation (เช่น drugcode ว่าง) จะรายงานไว้ ไม่วนซ้ำ
+- สั่งจากหน้าเว็บได้ด้วยปุ่ม "ตรวจสอบความครบถ้วน" (ธง `agents.verify_requested_at` -> heartbeat)
+- ชุดข้อมูลที่ค้างเพราะ batch เดิมถูกปิดไปแล้ว จะถูกย้ายไป batch ใหม่อัตโนมัติ (`recoverOrphanChunks`)
+
 ### การแบ่งหน้าดึงข้อมูล (สำคัญต่อความครบและความเร็ว)
 - คีย์เรียงที่ใช้คือ `(visitdate, visitno, drugcode)` ซึ่ง **unique** เพราะ PK ของ visitdrug คือ
   `(pcucode, visitno, drugcode)` -> ต่อให้ตารางเรียงมั่วก็ไม่มีแถวข้ามหรือซ้ำ
@@ -164,6 +186,20 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 - [x] PHASE 11 — security checklist + unit test 20 ข้อ (docs/SECURITY.md)
 - [x] PHASE 12 — เชื่อม TiDB Cloud จริงแล้ว (migrate + seed + sync + รายงาน ผ่านครบวง)
       เหลือ deploy ขึ้น Vercel
+
+### ผลทดสอบกับของจริง (2026-09-04, รอบเต็ม)
+- sync ทั้งฐาน: **265,786 / 265,787 แถว** เข้า TiDB (ขาด 1 แถวที่ `drugcode` ว่าง ซึ่งถูกปฏิเสธ
+  พร้อมเหตุผลใน `sync_rejects` ตามที่ควรเป็น)
+- ตรวจยาเทียบทีละตัว: P1 (0.1% TA LOTION) ปีงบ 2569 = 60 ครั้ง / 70 ขวด **ตรงกับ JHCIS เป๊ะ**
+- `agent verify` เทียบ 202 เดือน เจอไม่ตรง 2 เดือน ซ่อมสำเร็จ 1 เดือน อีกเดือนรายงานว่าซ่อมไม่ได้
+  (เป็นแถว drugcode ว่าง)
+
+### บั๊กสำคัญที่เจอรอบนี้และแก้แล้ว
+1. **INNER JOIN visit ทำให้ 18 แถวหายเงียบ** -> เปลี่ยนเป็น LEFT JOIN + ธง `visit_missing`
+2. **LIMIT/OFFSET ทำให้ full sync ช้ามาก** -> เปลี่ยนเป็น keyset ไล่ `visit` ผ่าน index `vs_date`
+3. **zod ที่ route ตีตกทั้งชุด 500 แถว เพราะ drugcode ว่าง 1 แถว** -> ย้ายกฎรายแถวไปที่ service
+   (route ตรวจแค่รูปร่าง) ตาม JHCIS_INTEGRATION §23 "record เดียวผิดต้องไม่ล้มทั้ง batch"
+4. **chunk ที่ batch ถูกปิดแล้วค้างถาวรใน failed/** -> ย้ายไป batch ใหม่อัตโนมัติ
 
 ### ผลทดสอบกับของจริง (2026-09-04)
 - TiDB Cloud `sankamphaeng_drug` (TiDB v8.5.3 serverless) — 15 ตาราง, migration 0000-0002

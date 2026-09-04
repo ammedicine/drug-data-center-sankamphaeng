@@ -11,6 +11,7 @@ import {
   createUserAction,
   reissueEnrollmentTokenAction,
   requestSyncAction,
+  requestVerifyAction,
   revokeAgentAction,
   toggleFacilityAction,
   toggleUserAction,
@@ -211,6 +212,19 @@ export function SyncNowForm({ agentId }: { agentId: string }) {
       <form action={action}>
         <input type="hidden" name="agentId" value={agentId} />
         <Submit label="สั่งซิงก์เดี๋ยวนี้" />
+      </form>
+      <Feedback state={state} />
+    </div>
+  );
+}
+
+export function VerifyDataForm({ agentId }: { agentId: string }) {
+  const [state, action] = useActionState<ActionState, FormData>(requestVerifyAction, {});
+  return (
+    <div className="space-y-2">
+      <form action={action}>
+        <input type="hidden" name="agentId" value={agentId} />
+        <Submit label="ตรวจสอบความครบถ้วน" />
       </form>
       <Feedback state={state} />
     </div>

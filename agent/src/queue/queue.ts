@@ -107,6 +107,23 @@ export class OfflineQueue {
     if (permanent && target !== chunk.file) rmSync(chunk.file, { force: true });
   }
 
+  /**
+   * Re-files a chunk under a different batch.
+   *
+   * A chunk whose batch the server has already closed can never be delivered
+   * as it stands, and its rows would sit in failed/ forever. Re-homing keeps
+   * the data and lets a fresh batch carry it.
+   */
+  rehome(chunk: QueuedChunk, batchRef: string, sequence: number): string {
+    const target = this.pathFor("PENDING", batchRef, sequence);
+    const temp = `${target}.tmp`;
+    const { file: _file, ...payload } = chunk;
+    writeFileSync(temp, JSON.stringify({ ...payload, batchRef, sequence, attempts: 0 }), "utf8");
+    renameSync(temp, target);
+    rmSync(chunk.file, { force: true });
+    return target;
+  }
+
   /** Moves parked chunks back into the pending queue (sdc-agent retry). */
   requeueFailed(): number {
     const failed = this.list("FAILED");

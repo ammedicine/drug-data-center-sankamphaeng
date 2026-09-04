@@ -1,0 +1,1 @@
+ALTER TABLE `agents` ADD `verify_requested_at` datetime;

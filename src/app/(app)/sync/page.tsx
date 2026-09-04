@@ -5,13 +5,19 @@ import {
   StatCard,
   StatusBadge,
   formatDateTime,
+  formatNumber,
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
 import { canTriggerSync, isSuperAdmin, requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
 
-import { SyncNowForm } from "../admin/forms";
-import { getFleetSummary, listAgents, listSyncBatches } from "@/lib/services/monitoring";
+import { SyncNowForm, VerifyDataForm } from "../admin/forms";
+import {
+  getFleetSummary,
+  listAgents,
+  listRunningBatches,
+  listSyncBatches,
+} from "@/lib/services/monitoring";
 
 export const metadata = { title: "สถานะการซิงก์" };
 export const dynamic = "force-dynamic";
@@ -21,10 +27,11 @@ export default async function SyncPage() {
   const scope = resolveFacilityScope(user);
   const canSeeTechnical = user.role !== "USER";
 
-  const [agentRows, batches, fleet] = await Promise.all([
+  const [agentRows, batches, fleet, running] = await Promise.all([
     listAgents(scope.facilityIds),
     listSyncBatches(scope.facilityIds, 50),
     getFleetSummary(scope.facilityIds),
+    listRunningBatches(scope.facilityIds),
   ]);
 
   return (
@@ -40,6 +47,44 @@ export default async function SyncPage() {
         <StatCard label="ซิงก์ล้มเหลว 24 ชม." value={fleet.failedBatches24h} tone={fleet.failedBatches24h ? "danger" : "default"} />
         <StatCard label="สถานบริการในสิทธิ์" value={isSuperAdmin(user) ? fleet.facilities : 1} />
       </div>
+
+      {running.length ? (
+        <Card
+          className="mt-6"
+          title="กำลังนำเข้าข้อมูล"
+          description="ความคืบหน้าเทียบกับจำนวนรายการทั้งหมดที่ต้องนำเข้าในรอบนี้"
+        >
+          <div className="space-y-4 p-5">
+            {running.map((batch) => (
+              <div key={batch.batchRef}>
+                <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-sm font-medium text-ink">
+                    {batch.facilityCode} · {batch.agentName}
+                    <span className="ml-2 text-xs font-normal text-muted">{batch.batchRef}</span>
+                  </span>
+                  <span className="numeric text-xs text-muted">
+                    {formatNumber(batch.recordsAccepted + batch.recordsRejected)} /{" "}
+                    {formatNumber(batch.recordsRead)} รายการ (
+                    {Math.round(batch.progress * 100)}%)
+                  </span>
+                </div>
+                <div
+                  className="h-2 w-full overflow-hidden rounded-full bg-canvas"
+                  role="progressbar"
+                  aria-valuenow={Math.round(batch.progress * 100)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="h-full rounded-full bg-brand-600 transition-all"
+                    style={{ width: `${Math.max(2, Math.round(batch.progress * 100))}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       <Card className="my-6" title="Agent ของสถานบริการ">
         <DataTable
@@ -81,7 +126,12 @@ export default async function SyncPage() {
                     header: "",
                     align: "right" as const,
                     render: (row: (typeof agentRows)[number]) =>
-                      row.status !== "DISABLED" ? <SyncNowForm agentId={row.id} /> : null,
+                      row.status !== "DISABLED" ? (
+                        <div className="flex flex-col items-end gap-2">
+                          <SyncNowForm agentId={row.id} />
+                          <VerifyDataForm agentId={row.id} />
+                        </div>
+                      ) : null,
                   },
                 ]
               : []),

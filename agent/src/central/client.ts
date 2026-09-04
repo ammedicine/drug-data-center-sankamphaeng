@@ -154,6 +154,15 @@ export class CentralClient {
     return this.request("POST", "/api/agent/sync/upload", body);
   }
 
+  /** Asks central how many rows it holds per month, to find gaps. */
+  audit(body: {
+    pcucode: string;
+    from: string;
+    to: string;
+  }): Promise<{ months: Array<{ month: string; rows: number }> }> {
+    return this.request("POST", "/api/agent/sync/audit", body);
+  }
+
   completeSync(body: {
     batchRef: string;
     status: "COMPLETED" | "FAILED" | "ABORTED";

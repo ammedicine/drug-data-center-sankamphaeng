@@ -145,6 +145,8 @@ export const agents = mysqlTable(
     failedCount: int("failed_count").notNull().default(0),
     /** set by an operator pressing "Sync Now"; the agent picks it up on its next heartbeat */
     syncRequestedAt: datetime("sync_requested_at"),
+    /** same, but asks the agent to reconcile every month against JHCIS */
+    verifyRequestedAt: datetime("verify_requested_at"),
     enrolledAt: datetime("enrolled_at"),
     revokedAt: datetime("revoked_at"),
     createdAt,

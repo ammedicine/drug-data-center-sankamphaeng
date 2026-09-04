@@ -51,6 +51,7 @@ export interface AuthenticatedAgent {
   lastSyncedVisitDate: string | null;
   disabled: boolean;
   syncRequested: boolean;
+  verifyRequested: boolean;
 }
 
 function maxSkewSeconds(): number {
@@ -99,6 +100,7 @@ export async function authenticateAgent(
       reprocessDays: agents.reprocessDays,
       lastSyncedVisitDate: agents.lastSyncedVisitDate,
       syncRequestedAt: agents.syncRequestedAt,
+      verifyRequestedAt: agents.verifyRequestedAt,
       lastSyncAt: agents.lastSyncAt,
       facilityId: facilities.id,
       facilityCode: facilities.code,
@@ -162,6 +164,10 @@ export async function authenticateAgent(
     syncRequested: Boolean(
       row.syncRequestedAt &&
         (!row.lastSyncAt || row.syncRequestedAt.getTime() > row.lastSyncAt.getTime()),
+    ),
+    verifyRequested: Boolean(
+      row.verifyRequestedAt &&
+        (!row.lastSyncAt || row.verifyRequestedAt.getTime() > row.lastSyncAt.getTime()),
     ),
   };
 }

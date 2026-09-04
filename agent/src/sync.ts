@@ -11,8 +11,10 @@ import {
   AGENT_VERSION,
   dataDir,
   loadState,
+  loadStatus,
   requireCredential,
   saveState,
+  writeStatus,
   type AgentCredentialFile,
 } from "./config";
 import { CentralApiError, CentralClient, withRetry } from "./central/client";
@@ -27,6 +29,8 @@ export type SyncMode = "INITIAL" | "INCREMENTAL" | "MANUAL_RANGE" | "RETRY";
 const EXTRACT_PAGE_SIZE = 500;
 /** Kept in step with the server's UPLOAD_CHUNK_SIZE. */
 const DEFAULT_CHUNK_SIZE = 500;
+/** Upload once this many chunks are waiting, so progress is visible early. */
+const UPLOAD_EVERY_CHUNKS = 10;
 
 export interface SyncOptions {
   mode: SyncMode;
@@ -119,6 +123,12 @@ export class SyncRunner {
         );
         accepted += result.accepted;
         rejected += result.rejected;
+        writeStatus({
+          phase: "uploading",
+          uploaded: loadStatus().uploaded + chunk.records.length,
+          pendingChunks: this.queue.count("PENDING"),
+          centralConnected: true,
+        });
         if (result.rejects.length) {
           log.warn("central rejected records", {
             batchRef: chunk.batchRef,
@@ -136,11 +146,69 @@ export class SyncRunner {
           permanent,
           error: message,
         });
+        writeStatus({
+          phase: "error",
+          lastError: message,
+          centralConnected: !permanent,
+          pendingChunks: this.queue.count("PENDING"),
+        });
         if (!permanent) break; // network is down - stop and retry on the next run
       }
     }
 
     return { accepted, rejected, remaining: this.queue.count("PENDING") };
+  }
+
+  /**
+   * Delivers chunks that can no longer be uploaded under their original batch
+   * (the server closed it, or it never existed) by re-filing them under a new
+   * RETRY batch. Without this, a run interrupted at the wrong moment leaves
+   * rows parked in failed/ that no amount of retrying can move.
+   */
+  async recoverOrphanChunks(): Promise<{ recovered: number; batchRef: string | null }> {
+    const stuck = this.queue.list("FAILED");
+    if (!stuck.length) return { recovered: 0, batchRef: null };
+
+    const pcucode = stuck[0].pcucode;
+    const dates = stuck
+      .flatMap((chunk) => chunk.records.map((record) => record.usageDate))
+      .filter(Boolean)
+      .sort();
+    const records = stuck.reduce((sum, chunk) => sum + chunk.records.length, 0);
+    const batchRef = nextBatchRef();
+
+    await withRetry(
+      () =>
+        this.client.startSync({
+          batchRef,
+          mode: "RETRY",
+          rangeFrom: dates[0] ?? null,
+          rangeTo: dates[dates.length - 1] ?? null,
+          pcucode,
+          recordsRead: records,
+        }),
+      { label: "recovery batch" },
+    );
+
+    let sequence = 0;
+    for (const chunk of stuck) this.queue.rehome(chunk, batchRef, ++sequence);
+
+    const flushed = await this.flushQueue();
+    await withRetry(
+      () =>
+        this.client.completeSync({
+          batchRef,
+          status: flushed.remaining === 0 ? "COMPLETED" : "FAILED",
+          recordsRead: records,
+          recordsSent: records,
+          lastVisitDate: null,
+          errorMessage: flushed.remaining ? `ยังค้าง ${flushed.remaining} ชุด` : null,
+        }),
+      { label: "recovery complete" },
+    );
+
+    log.info("recovered orphaned chunks", { batchRef, chunks: stuck.length, records });
+    return { recovered: records, batchRef };
   }
 
   async run(options: SyncOptions): Promise<SyncResult> {
@@ -172,6 +240,17 @@ export class SyncRunner {
 
       const recordsRead = await extractor.countUsage(pcucode, range.from, range.to);
       const batchRef = nextBatchRef();
+
+      writeStatus({
+        phase: "starting",
+        message: `เตรียมซิงก์ ${range.from} ถึง ${range.to}`,
+        total: recordsRead,
+        extracted: 0,
+        uploaded: 0,
+        batchRef,
+        jhcisConnected: true,
+        lastError: null,
+      });
 
       log.info("sync starting", {
         batchRef,
@@ -212,6 +291,7 @@ export class SyncRunner {
         });
         recordsSent += buffer.length;
         buffer = [];
+        writeStatus({ phase: "extracting", extracted: recordsSent, total: recordsRead });
       };
 
       for await (const page of extractor.streamUsage(
@@ -223,6 +303,14 @@ export class SyncRunner {
         for (const record of page) {
           buffer.push(record);
           if (buffer.length >= DEFAULT_CHUNK_SIZE) flushBuffer();
+        }
+
+        // Upload as we go instead of queueing the whole history first: a full
+        // sync is a quarter of a million rows, and waiting for extraction to
+        // finish would leave the operator staring at a bar that never moves -
+        // and would lose everything already read if the machine restarted.
+        if (!options.dryRun && this.queue.count("PENDING") >= UPLOAD_EVERY_CHUNKS) {
+          await this.flushQueue();
         }
       }
       flushBuffer();
@@ -294,6 +382,16 @@ export class SyncRunner {
         });
       }
 
+      writeStatus({
+        phase: complete ? "done" : "error",
+        message: complete
+          ? `ซิงก์สำเร็จ ${recordsSent.toLocaleString("th-TH")} รายการ`
+          : `ยังมี ${flushed.remaining} ชุดข้อมูลที่ส่งไม่สำเร็จ`,
+        pendingChunks: flushed.remaining,
+        lastSyncAt: new Date().toISOString(),
+        lastError: complete ? null : "อัปโหลดไม่ครบ",
+      });
+
       log.info("sync finished", {
         batchRef,
         recordsRead,
@@ -316,6 +414,112 @@ export class SyncRunner {
       };
     } finally {
       await db.close();
+    }
+  }
+
+  /**
+   * Compares JHCIS with the central database month by month and re-sends only
+   * the months that differ.
+   *
+   * Every individual batch can report success and the data still end up
+   * incomplete - an upload interrupted halfway, a PC restarted mid-run, a
+   * migration applied late. Counting both sides is the only honest way to know,
+   * and re-sending is safe because every row is keyed deterministically.
+   */
+  async verify(options: { from?: string | null; to?: string | null; repair?: boolean } = {}): Promise<{
+    checked: number;
+    mismatched: Array<{ month: string; jhcis: number; central: number }>;
+    /** months still different after a repair attempt (rows JHCIS holds but central rejects) */
+    unresolved: Array<{ month: string; jhcis: number; central: number }>;
+    repaired: number;
+  }> {
+    const db = new JhcisConnection();
+    try {
+      const { report, mapping } = await new SchemaInspector(db).inspect();
+      if (!mapping || !report.pcucode) throw new Error("อ่านโครงสร้าง JHCIS ไม่สำเร็จ");
+      const pcucode = report.pcucode;
+      if (pcucode !== this.credential.expectedPcucode) {
+        throw new Error(
+          `pcucode ของ JHCISDB (${pcucode}) ไม่ตรงกับสถานบริการที่ลงทะเบียนไว้`,
+        );
+      }
+
+      const extractor = new UsageExtractor(db, mapping);
+      const [min, max] = await Promise.all([
+        extractor.minUsageDate(pcucode),
+        extractor.maxUsageDate(pcucode),
+      ]);
+      const from = options.from ?? min ?? today();
+      const to = options.to ?? max ?? today();
+
+      writeStatus({ phase: "starting", message: `กำลังตรวจสอบความครบถ้วน ${from} ถึง ${to}` });
+
+      const [local, remote] = await Promise.all([
+        extractor.monthlyTally(pcucode, from, to),
+        withRetry(() => this.client.audit({ pcucode, from, to }), { label: "audit" }),
+      ]);
+
+      const centralByMonth = new Map(remote.months.map((row) => [row.month, row.rows]));
+      const mismatched = local
+        .map((row) => ({
+          month: row.month,
+          jhcis: row.rows,
+          central: centralByMonth.get(row.month) ?? 0,
+        }))
+        .filter((row) => row.jhcis !== row.central);
+
+      log.info("verify finished", {
+        from,
+        to,
+        months: local.length,
+        mismatched: mismatched.length,
+      });
+
+      let repaired = 0;
+      const unresolved: Array<{ month: string; jhcis: number; central: number }> = [];
+
+      if (options.repair !== false && mismatched.length) {
+        await db.close();
+        for (const gap of mismatched) {
+          const start = `${gap.month}-01`;
+          const endDate = new Date(`${gap.month}-01T00:00:00Z`);
+          endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+          endDate.setUTCDate(0);
+          const end = endDate.toISOString().slice(0, 10);
+          log.info("repairing month", { month: gap.month, jhcis: gap.jhcis, central: gap.central });
+          const result = await this.run({ mode: "MANUAL_RANGE", from: start, to: end });
+          repaired += result.recordsSent;
+        }
+
+        // Re-check once. A month that still differs cannot be fixed by sending
+        // it again - JHCIS holds rows the central server refuses (an empty
+        // drugcode, for example) - so it is reported instead of retried
+        // forever on every future run.
+        const after = await withRetry(() => this.client.audit({ pcucode, from, to }), {
+          label: "audit re-check",
+        });
+        const afterByMonth = new Map(after.months.map((row) => [row.month, row.rows]));
+        for (const gap of mismatched) {
+          const central = afterByMonth.get(gap.month) ?? 0;
+          if (central !== gap.jhcis) {
+            unresolved.push({ month: gap.month, jhcis: gap.jhcis, central });
+          }
+        }
+        if (unresolved.length) {
+          log.warn("months that could not be reconciled", { unresolved });
+        }
+      }
+
+      writeStatus({
+        phase: mismatched.length ? "done" : "done",
+        message: mismatched.length
+          ? `ซ่อมข้อมูล ${mismatched.length} เดือน (${repaired.toLocaleString("th-TH")} รายการ)`
+          : "ข้อมูลครบถ้วนตรงกับ JHCIS",
+      });
+
+      return { checked: local.length, mismatched, unresolved, repaired };
+    } finally {
+      await db.close().catch(() => undefined);
     }
   }
 

@@ -240,8 +240,6 @@ export async function requestSyncAction(
   formData: FormData,
 ): Promise<ActionState> {
   const user = await requireApiUser();
-  if (!canTriggerSync(user)) return fail("ไม่มีสิทธิ์สั่งซิงก์ข้อมูล");
-
   const agentId = String(formData.get("agentId") ?? "");
   const [agent] = await db
     .select({ id: agents.id, facilityId: agents.facilityId, name: agents.name })
@@ -249,7 +247,8 @@ export async function requestSyncAction(
     .where(eq(agents.id, agentId))
     .limit(1);
   if (!agent) return fail("ไม่พบ Agent");
-  if (!canManageFacility(user, agent.facilityId)) return fail("ไม่มีสิทธิ์สั่งซิงก์ Agent นี้");
+  // Refreshing your own facility's data is not an administrative action.
+  if (!canTriggerSync(user, agent.facilityId)) return fail("ไม่มีสิทธิ์สั่งซิงก์ Agent นี้");
 
   await db.update(agents).set({ syncRequestedAt: new Date() }).where(eq(agents.id, agentId));
 
@@ -268,6 +267,47 @@ export async function requestSyncAction(
   revalidatePath("/admin/agents");
   revalidatePath("/sync");
   return { success: `ส่งคำสั่งซิงก์ไปยัง ${agent.name} แล้ว Agent จะเริ่มภายใน 5 นาที` };
+}
+
+/**
+ * "ตรวจสอบและซ่อมข้อมูล": asks the agent to compare every month against JHCIS
+ * and re-send whatever the central database is missing. Same delivery route as
+ * Sync Now - a flag the agent reads on its next heartbeat.
+ */
+export async function requestVerifyAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  const agentId = String(formData.get("agentId") ?? "");
+
+  const [agent] = await db
+    .select({ id: agents.id, facilityId: agents.facilityId, name: agents.name })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .limit(1);
+  if (!agent) return fail("ไม่พบ Agent");
+  if (!canTriggerSync(user, agent.facilityId)) return fail("ไม่มีสิทธิ์สั่งตรวจสอบข้อมูล");
+
+  await db.update(agents).set({ verifyRequestedAt: new Date() }).where(eq(agents.id, agentId));
+
+  await writeAudit({
+    actorType: "USER",
+    actorId: user.userId,
+    actorLabel: user.email,
+    action: "SYNC_START",
+    resource: "agent",
+    resourceId: agentId,
+    facilityId: agent.facilityId,
+    ip: clientIp(await headers()),
+    metadata: { trigger: "verify" },
+  });
+
+  revalidatePath("/sync");
+  revalidatePath("/admin/agents");
+  return {
+    success: `ส่งคำสั่งตรวจสอบความครบถ้วนไปยัง ${agent.name} แล้ว ระบบจะเทียบข้อมูลรายเดือนกับ JHCIS และส่งส่วนที่ขาดเพิ่ม`,
+  };
 }
 
 /* ------------------------------------------------------------------ users */

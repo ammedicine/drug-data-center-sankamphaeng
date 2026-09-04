@@ -5,7 +5,14 @@
  * The central credential is written to agent.config.json with restrictive file
  * permissions - it is never logged and never printed after enrollment.
  */
-import { existsSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 
@@ -127,4 +134,113 @@ export function installationId(): string {
 
 export function machineHostname(): string {
   return hostname();
+}
+
+/* ------------------------------------------------------- local settings */
+
+/**
+ * Local scheduling preferences, owned by the operator through the desktop app.
+ * Central still decides what the agent may read; this only decides *when* the
+ * agent runs, so a รพ.สต. can avoid syncing during clinic rush hours.
+ */
+export interface AgentSettings {
+  autoSyncEnabled: boolean;
+  /** run every N minutes (0 = ปิด, ใช้เฉพาะเวลาที่กำหนดใน dailyTimes) */
+  syncIntervalMinutes: number;
+  /** fixed clock times to sync at, "HH:MM" 24-hour */
+  dailyTimes: string[];
+  heartbeatMinutes: number;
+  /** start the desktop app with Windows */
+  startWithWindows: boolean;
+  /** keep running in the notification area when the window is closed */
+  minimiseToTray: boolean;
+}
+
+export const DEFAULT_SETTINGS: AgentSettings = {
+  autoSyncEnabled: true,
+  syncIntervalMinutes: 60,
+  dailyTimes: [],
+  heartbeatMinutes: 5,
+  startWithWindows: true,
+  minimiseToTray: true,
+};
+
+export function settingsPath(): string {
+  return resolve(dataDir(), "settings.json");
+}
+
+export function loadSettings(): AgentSettings {
+  const path = settingsPath();
+  if (!existsSync(path)) return { ...DEFAULT_SETTINGS };
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<AgentSettings>;
+    return { ...DEFAULT_SETTINGS, ...parsed };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+export function saveSettings(settings: Partial<AgentSettings>): AgentSettings {
+  const merged = { ...loadSettings(), ...settings };
+  writeFileSync(settingsPath(), JSON.stringify(merged, null, 2), "utf8");
+  return merged;
+}
+
+/* --------------------------------------------------------- live status */
+
+/**
+ * A small file the desktop app polls for progress. It is written frequently and
+ * atomically (temp + rename) so a half-written file is never observed.
+ */
+export interface AgentStatus {
+  phase: "idle" | "starting" | "extracting" | "uploading" | "done" | "error";
+  message: string;
+  /** rows the current run expects to move, and how far it has got */
+  total: number;
+  extracted: number;
+  uploaded: number;
+  pendingChunks: number;
+  batchRef: string | null;
+  jhcisConnected: boolean | null;
+  centralConnected: boolean | null;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
+export function statusPath(): string {
+  return resolve(dataDir(), "status.json");
+}
+
+export function loadStatus(): AgentStatus {
+  const path = statusPath();
+  const empty: AgentStatus = {
+    phase: "idle",
+    message: "",
+    total: 0,
+    extracted: 0,
+    uploaded: 0,
+    pendingChunks: 0,
+    batchRef: null,
+    jhcisConnected: null,
+    centralConnected: null,
+    lastSyncAt: null,
+    lastError: null,
+    updatedAt: new Date().toISOString(),
+  };
+  if (!existsSync(path)) return empty;
+  try {
+    return { ...empty, ...(JSON.parse(readFileSync(path, "utf8")) as Partial<AgentStatus>) };
+  } catch {
+    return empty;
+  }
+}
+
+export function writeStatus(patch: Partial<AgentStatus>): AgentStatus {
+  const next: AgentStatus = { ...loadStatus(), ...patch, updatedAt: new Date().toISOString() };
+  const target = statusPath();
+  const temp = `${target}.tmp`;
+  writeFileSync(temp, JSON.stringify(next, null, 2), "utf8");
+  renameSync(temp, target);
+  return next;
 }

@@ -66,6 +66,7 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       uploadChunkSize: UPLOAD_CHUNK_SIZE,
       disabled: agent.disabled,
       syncRequested: agent.syncRequested,
+      verifyRequested: agent.verifyRequested,
     },
   });
 });

@@ -25,6 +25,7 @@ export const GET = withAgent(z.object({}).optional(), async ({ agent }) => {
     uploadChunkSize: UPLOAD_CHUNK_SIZE,
     disabled: agent.disabled,
     syncRequested: agent.syncRequested,
+    verifyRequested: agent.verifyRequested,
   };
   return NextResponse.json(config);
 });
