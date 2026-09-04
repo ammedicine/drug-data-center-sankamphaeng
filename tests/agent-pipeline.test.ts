@@ -46,6 +46,13 @@ const state = {
   heartbeats: 0,
   signatureFailures: 0,
   seenNonces: new Set<string>(),
+  auditCalls: 0,
+  /** rows the fake central "holds" per month, keyed yyyy-mm */
+  stored: new Map<string, number>(),
+  /** under-report the newest month by this many rows, to fake a silent gap */
+  hideRows: 0,
+  /** how many audit answers stay under-reported before telling the truth */
+  hideForAuditCalls: 0,
   /** flip to make every upload fail, simulating a broken link */
   failUploads: false,
 };
@@ -121,12 +128,31 @@ function startMockCentral(): Promise<string> {
               return reply(500, { error: { code: "INTERNAL_ERROR", message: "simulated outage" } });
             }
             const records = (payload.records ?? []) as DrugUsageRecord[];
+            for (const record of records) {
+              const month = record.usageDate.slice(0, 7);
+              state.stored.set(month, (state.stored.get(month) ?? 0) + 1);
+            }
             state.uploads.push({
               batchRef: String(payload.batchRef),
               records,
               drugs: ((payload.drugs ?? []) as unknown[]).length,
             });
             return reply(200, { accepted: records.length, rejected: 0, rejects: [] });
+          }
+          case "/api/agent/sync/audit": {
+            state.auditCalls += 1;
+            const months = [...state.stored.entries()]
+              .map(([month, rows]) => ({ month, rows }))
+              .sort((a, b) => a.month.localeCompare(b.month));
+
+            // The first answers under-report, so the agent believes rows went
+            // missing and has to repair; once the repair has run, the audit
+            // tells the truth again.
+            if (state.auditCalls <= state.hideForAuditCalls && state.hideRows > 0 && months.length) {
+              const target = months[months.length - 1];
+              target.rows = Math.max(0, target.rows - state.hideRows);
+            }
+            return reply(200, { facilityId: FACILITY_ID, from: payload.from, to: payload.to, months });
           }
           case "/api/agent/sync/complete":
             state.completes.push(payload);
@@ -310,6 +336,34 @@ describe.runIf(await jhcisReachable())("agent pipeline against real JHCISDB", ()
     );
     expect(again).toEqual(keys);
   });
+
+  it("counts both sides after a sync and repairs what is missing", async () => {
+    const runner = await loadRunner();
+
+    // Pretend the central database is short of rows for the last month of the
+    // window: the run must notice and re-send that month rather than reporting
+    // success.
+    state.stored.clear();
+    state.auditCalls = 0;
+    state.hideRows = 5;
+    // both the summary count and the month-by-month detail must look short,
+    // otherwise the agent finds nothing to repair
+    state.hideForAuditCalls = 2;
+    const before = state.uploads.length;
+
+    const result = await runner.run({ mode: "MANUAL_RANGE", from: RANGE.from, to: RANGE.to });
+
+    expect(result.reconciliation).not.toBeNull();
+    expect(result.reconciliation?.expected).toBe(result.recordsRead);
+    expect(result.reconciliation?.repairedMonths.length).toBeGreaterThan(0);
+    expect(result.reconciliation?.gap).toBe(0);
+    // the repair pass really did upload again
+    expect(state.uploads.length).toBeGreaterThan(before);
+    expect(state.completes.at(-1)).toMatchObject({ status: "COMPLETED" });
+
+    state.hideRows = 0;
+    state.hideForAuditCalls = 0;
+  }, 240_000);
 
   it("survives an outage: the queue holds the data and a later flush delivers it", async () => {
     const runner = await loadRunner();

@@ -206,6 +206,20 @@ async function sync(): Promise<void> {
       `${result.batchRef}: อ่าน ${result.recordsRead} · ส่ง ${result.recordsSent} · ` +
         `บันทึก ${result.accepted} · ปฏิเสธ ${result.rejected} · ค้าง ${result.pendingChunks} chunk`,
     );
+
+    const check = result.reconciliation;
+    if (check) {
+      console.log(
+        `ตรวจสอบหลังซิงก์: JHCIS ${check.expected} · ศูนย์กลาง ${check.central} · ` +
+          `ปฏิเสธ ${check.rejected} · ขาด ${check.gap}`,
+      );
+      if (check.repairedMonths.length) {
+        console.log(
+          `  ซิงก์ซ้ำอัตโนมัติ ${check.repairedMonths.length} เดือน (${check.repairedMonths.join(", ")})`,
+        );
+      }
+      console.log(check.gap === 0 ? "  ข้อมูลครบถ้วน" : "  ยังขาดข้อมูล ระบบจะพยายามใหม่รอบถัดไป");
+    }
     await runner.heartbeat(result.pendingChunks ? "ERROR" : "ONLINE");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

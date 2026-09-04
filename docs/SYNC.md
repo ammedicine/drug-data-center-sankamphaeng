@@ -56,6 +56,20 @@ Extract → Validate → Normalize → Batch → Upload → Verify → Commit
 Agent ไล่ `visit` ผ่าน index `vs_date` ครั้งละ 400 รายการแบบ keyset แล้วดึง `visitdrug`
 ของ visitno ชุดนั้นผ่าน PK — ไม่ใช้ `LIMIT/OFFSET` เพราะ offset ลึกทำให้การ sync ทั้งฐานช้ามาก
 
+## 2.3 ตรวจนับก่อนและหลังทุกครั้ง
+
+```
+นับที่ JHCIS (records_read)  ->  ซิงก์  ->  นับที่ศูนย์กลาง (audit)
+                                              |
+                                    ต่างกัน? -> ซิงก์ซ้ำเฉพาะเดือนที่ขาด -> นับใหม่
+                                              |
+                              ยังต่าง -> batch = FAILED + ไม่เลื่อน watermark
+```
+
+- ส่วนต่างที่เท่ากับจำนวนแถวที่ถูกปฏิเสธ (มีเหตุผลบันทึกใน `sync_rejects`) ไม่ถือว่าข้อมูลหาย
+- รอบซ่อมจะไม่ตรวจซ้ำอีก (`reconcile: false`) จึงไม่มีการวนไม่รู้จบ
+- ผลการตรวจแสดงใน CLI, ในโปรแกรมหน้าจอ และเก็บใน `sync_batches.error_message`
+
 ## 3. Idempotency
 
 ```

@@ -38,6 +38,25 @@ export interface SyncOptions {
   to?: string | null;
   /** extract and queue, but do not upload (used by `doctor --dry-run`) */
   dryRun?: boolean;
+  /**
+   * Count both sides afterwards and repair the difference (default true).
+   * Set false for the repair runs themselves, so they cannot recurse.
+   */
+  reconcile?: boolean;
+}
+
+/** What the after-sync count found. */
+export interface Reconciliation {
+  /** rows JHCIS holds in the window */
+  expected: number;
+  /** rows the central database holds in the same window */
+  central: number;
+  /** rows the central server refused, with a reason recorded */
+  rejected: number;
+  /** rows still unaccounted for after the repair pass */
+  gap: number;
+  repairedRows: number;
+  repairedMonths: string[];
 }
 
 export interface SyncResult {
@@ -50,6 +69,8 @@ export interface SyncResult {
   accepted: number;
   rejected: number;
   pendingChunks: number;
+  /** null when the run was a dry run or a repair pass */
+  reconciliation: Reconciliation | null;
 }
 
 function today(): string {
@@ -327,6 +348,7 @@ export class SyncRunner {
           accepted: 0,
           rejected: 0,
           pendingChunks: this.queue.count("PENDING"),
+          reconciliation: null,
         };
       }
 
@@ -357,7 +379,27 @@ export class SyncRunner {
       // 3. Upload every queued chunk (including leftovers from earlier runs).
       const flushed = await this.flushQueue();
 
-      const complete = flushed.remaining === 0;
+      // 4. Count both sides before calling the run a success.
+      //
+      // Every step so far can report success and still leave a hole: a dropped
+      // connection between chunks, a chunk the server refused for a reason the
+      // agent treated as permanent, a PC restarted mid-run. Comparing the row
+      // count JHCIS has for this window with what the central database ended up
+      // holding is the only check that actually proves nothing was lost.
+      let reconciliation: Reconciliation | null = null;
+      if (options.reconcile !== false && !options.dryRun && flushed.remaining === 0) {
+        reconciliation = await this.reconcile({
+          extractor,
+          pcucode,
+          from: range.from,
+          to: range.to,
+          expected: recordsRead,
+          rejected: flushed.rejected,
+        });
+      }
+
+      const complete =
+        flushed.remaining === 0 && (reconciliation === null || reconciliation.gap === 0);
       await withRetry(
         () =>
           this.client.completeSync({
@@ -368,7 +410,11 @@ export class SyncRunner {
             lastVisitDate: complete ? range.to : null,
             errorMessage: complete
               ? null
-              : `ยังมี ${flushed.remaining} chunk ที่อัปโหลดไม่สำเร็จ`,
+              : flushed.remaining
+                ? `ยังมี ${flushed.remaining} chunk ที่อัปโหลดไม่สำเร็จ`
+                : `ตรวจสอบหลังซิงก์: JHCIS ${reconciliation?.expected ?? 0} รายการ ` +
+                  `แต่ศูนย์กลางมี ${reconciliation?.central ?? 0} รายการ ` +
+                  `(ขาด ${reconciliation?.gap ?? 0})`,
           }),
         { label: "sync complete" },
       );
@@ -385,8 +431,10 @@ export class SyncRunner {
       writeStatus({
         phase: complete ? "done" : "error",
         message: complete
-          ? `ซิงก์สำเร็จ ${recordsSent.toLocaleString("th-TH")} รายการ`
-          : `ยังมี ${flushed.remaining} ชุดข้อมูลที่ส่งไม่สำเร็จ`,
+          ? `ซิงก์สำเร็จและตรวจสอบครบ ${recordsSent.toLocaleString("th-TH")} รายการ`
+          : flushed.remaining
+            ? `ยังมี ${flushed.remaining} ชุดข้อมูลที่ส่งไม่สำเร็จ`
+            : `ตรวจสอบแล้วยังขาด ${reconciliation?.gap ?? 0} รายการ`,
         pendingChunks: flushed.remaining,
         lastSyncAt: new Date().toISOString(),
         lastError: complete ? null : "อัปโหลดไม่ครบ",
@@ -399,6 +447,7 @@ export class SyncRunner {
         accepted: flushed.accepted,
         rejected: flushed.rejected,
         pending: flushed.remaining,
+        reconciliation,
       });
 
       return {
@@ -411,10 +460,94 @@ export class SyncRunner {
         accepted: flushed.accepted,
         rejected: flushed.rejected,
         pendingChunks: flushed.remaining,
+        reconciliation,
       };
     } finally {
       await db.close();
     }
+  }
+
+  /**
+   * Counts the window on both sides and repairs the difference once.
+   *
+   * A remaining gap that matches the rows the server rejected is not a loss -
+   * those rows exist in JHCIS but cannot be stored (an empty drugcode, for
+   * example) and their reasons are recorded in sync_rejects. Anything else is
+   * reported as a real gap so the batch is not marked successful.
+   */
+  private async reconcile(input: {
+    extractor: UsageExtractor;
+    pcucode: string;
+    from: string;
+    to: string;
+    expected: number;
+    rejected: number;
+  }): Promise<Reconciliation> {
+    const countCentral = async (): Promise<number> => {
+      const audit = await withRetry(
+        () => this.client.audit({ pcucode: input.pcucode, from: input.from, to: input.to }),
+        { label: "post-sync audit" },
+      );
+      return audit.months.reduce((sum, month) => sum + month.rows, 0);
+    };
+
+    writeStatus({ message: "กำลังตรวจสอบความครบถ้วนหลังซิงก์" });
+
+    let central = await countCentral();
+    const repairedMonths: string[] = [];
+    let repairedRows = 0;
+
+    if (central < input.expected) {
+      // Narrow the hole down to the months that actually differ, so a repair
+      // moves a few hundred rows rather than the whole window again.
+      const [localMonths, remote] = await Promise.all([
+        input.extractor.monthlyTally(input.pcucode, input.from, input.to),
+        withRetry(
+          () => this.client.audit({ pcucode: input.pcucode, from: input.from, to: input.to }),
+          { label: "post-sync audit detail" },
+        ),
+      ]);
+      const centralByMonth = new Map(remote.months.map((row) => [row.month, row.rows]));
+
+      for (const month of localMonths) {
+        if ((centralByMonth.get(month.month) ?? 0) === month.rows) continue;
+
+        const start = `${month.month}-01`;
+        const endDate = new Date(`${month.month}-01T00:00:00Z`);
+        endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+        endDate.setUTCDate(0);
+        const end = endDate.toISOString().slice(0, 10);
+
+        log.warn("gap found after sync, repairing month", {
+          month: month.month,
+          jhcis: month.rows,
+          central: centralByMonth.get(month.month) ?? 0,
+        });
+        writeStatus({ message: `พบข้อมูลขาด กำลังซิงก์ซ้ำเดือน ${month.month}` });
+
+        // reconcile:false - this repair must not start another reconcile loop.
+        const repair = await this.run({
+          mode: "MANUAL_RANGE",
+          from: start,
+          to: end,
+          reconcile: false,
+        });
+        repairedMonths.push(month.month);
+        repairedRows += repair.recordsSent;
+      }
+
+      central = await countCentral();
+    }
+
+    const gap = Math.max(0, input.expected - central - input.rejected);
+    return {
+      expected: input.expected,
+      central,
+      rejected: input.rejected,
+      gap,
+      repairedRows,
+      repairedMonths,
+    };
   }
 
   /**
