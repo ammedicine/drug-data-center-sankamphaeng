@@ -1,0 +1,116 @@
+import { DataTable } from "@/components/ui/data-table";
+import {
+  Card,
+  PageHeader,
+  StatCard,
+  StatusBadge,
+  formatDateTime,
+  relativeTime,
+} from "@/components/ui/primitives";
+import { SyncHistoryCard } from "@/components/ui/sync-history";
+import { canTriggerSync, isSuperAdmin, requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
+
+import { SyncNowForm } from "../admin/forms";
+import { getFleetSummary, listAgents, listSyncBatches } from "@/lib/services/monitoring";
+
+export const metadata = { title: "สถานะการซิงก์" };
+export const dynamic = "force-dynamic";
+
+export default async function SyncPage() {
+  const user = await requireUser();
+  const scope = resolveFacilityScope(user);
+  const canSeeTechnical = user.role !== "USER";
+
+  const [agentRows, batches, fleet] = await Promise.all([
+    listAgents(scope.facilityIds),
+    listSyncBatches(scope.facilityIds, 50),
+    getFleetSummary(scope.facilityIds),
+  ]);
+
+  return (
+    <>
+      <PageHeader
+        title="สถานะการซิงก์ข้อมูล"
+        subtitle="ข้อมูลถูกดึงจาก JHCIS โดย Agent ที่ติดตั้งในเครือข่ายของสถานบริการ และส่งออกทาง HTTPS เท่านั้น"
+      />
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Agent ออนไลน์" value={`${fleet.online}/${fleet.agentsTotal}`} tone={fleet.offline ? "warn" : "ok"} />
+        <StatCard label="ซิงก์ล่าสุด" value={relativeTime(fleet.lastSyncAt)} />
+        <StatCard label="ซิงก์ล้มเหลว 24 ชม." value={fleet.failedBatches24h} tone={fleet.failedBatches24h ? "danger" : "default"} />
+        <StatCard label="สถานบริการในสิทธิ์" value={isSuperAdmin(user) ? fleet.facilities : 1} />
+      </div>
+
+      <Card className="my-6" title="Agent ของสถานบริการ">
+        <DataTable
+          rowKey={(row) => row.id}
+          rows={agentRows}
+          emptyTitle="ยังไม่มี Agent"
+          emptyDescription="ติดต่อผู้ดูแลระบบส่วนกลางเพื่อสร้างและติดตั้ง Agent"
+          columns={[
+            {
+              key: "agent",
+              header: "Agent",
+              render: (row) => (
+                <>
+                  <span className="font-medium text-ink">{row.name}</span>
+                  <span className="block text-xs text-muted">{row.hostname ?? "-"}</span>
+                </>
+              ),
+            },
+            { key: "status", header: "สถานะ", render: (row) => <StatusBadge status={row.effectiveStatus} /> },
+            {
+              key: "heartbeat",
+              header: "Heartbeat",
+              render: (row) => <span className="text-xs text-muted">{relativeTime(row.lastHeartbeatAt)}</span>,
+            },
+            {
+              key: "sync",
+              header: "ซิงก์สำเร็จล่าสุด",
+              render: (row) => <span className="text-xs text-muted">{formatDateTime(row.lastSuccessfulSyncAt)}</span>,
+            },
+            {
+              key: "watermark",
+              header: "ข้อมูลถึงวันที่",
+              render: (row) => <span className="text-xs text-muted">{row.lastSyncedVisitDate ?? "-"}</span>,
+            },
+            ...(canTriggerSync(user)
+              ? [
+                  {
+                    key: "actions",
+                    header: "",
+                    align: "right" as const,
+                    render: (row: (typeof agentRows)[number]) =>
+                      row.status !== "DISABLED" ? <SyncNowForm agentId={row.id} /> : null,
+                  },
+                ]
+              : []),
+            {
+              key: "error",
+              header: "ปัญหาล่าสุด",
+              render: (row) =>
+                row.lastError ? (
+                  canSeeTechnical ? (
+                    <span className="block max-w-[260px] truncate text-xs text-danger" title={row.lastError}>
+                      {row.lastError}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-danger">พบปัญหา กรุณาแจ้งผู้ดูแลระบบ</span>
+                  )
+                ) : (
+                  <span className="text-xs text-muted">-</span>
+                ),
+            },
+          ]}
+        />
+      </Card>
+
+      <SyncHistoryCard
+        batches={batches}
+        showFacility={isSuperAdmin(user)}
+        showTechnicalError={canSeeTechnical}
+        description="50 รอบล่าสุด"
+      />
+    </>
+  );
+}

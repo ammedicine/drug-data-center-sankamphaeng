@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens - "Modern Healthcare Enterprise SaaS".
+ * Calm slate surfaces, a single teal accent for actions, semantic status colors.
+ */
+@theme {
+  --color-canvas: #f6f8fa;
+  --color-surface: #ffffff;
+  --color-line: #e3e8ee;
+  --color-ink: #10202e;
+  --color-muted: #5b6b7c;
+
+  --color-brand-50: #eefcfa;
+  --color-brand-100: #d3f5f0;
+  --color-brand-500: #0f9d8f;
+  --color-brand-600: #0b8377;
+  --color-brand-700: #0a6a61;
+
+  --color-ok: #157f4b;
+  --color-ok-bg: #e7f6ee;
+  --color-warn: #97650a;
+  --color-warn-bg: #fdf3dd;
+  --color-danger: #b3261e;
+  --color-danger-bg: #fdeceb;
+  --color-info: #1d4ed8;
+  --color-info-bg: #e8effd;
+
+  --font-sans: "IBM Plex Sans Thai", "Noto Sans Thai", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular figures keep quantity columns aligned across rows. */
+.numeric {
+  font-variant-numeric: tabular-nums;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
