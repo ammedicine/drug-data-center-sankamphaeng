@@ -275,22 +275,6 @@ export default async function SyncPage() {
                 <span className="text-xs text-muted">{formatDate(row.lastSyncedVisitDate)}</span>
               ),
             },
-            ...(canTriggerSync(user)
-              ? [
-                  {
-                    key: "actions",
-                    header: "",
-                    align: "right" as const,
-                    render: (row: (typeof agentRows)[number]) =>
-                      row.status !== "DISABLED" ? (
-                        <div className="flex flex-col items-end gap-2">
-                          <SyncNowForm agentId={row.id} />
-                          <VerifyDataForm agentId={row.id} />
-                        </div>
-                      ) : null,
-                  },
-                ]
-              : []),
             {
               key: "error",
               header: "ปัญหาล่าสุด",
@@ -307,6 +291,24 @@ export default async function SyncPage() {
                   <span className="text-xs text-muted">-</span>
                 ),
             },
+            // Controls sit at the end of the row, after everything being read,
+            // so the eye finishes the status before it reaches the buttons.
+            ...(canTriggerSync(user)
+              ? [
+                  {
+                    key: "actions",
+                    header: "การทำงาน",
+                    align: "right" as const,
+                    render: (row: (typeof agentRows)[number]) =>
+                      row.status !== "DISABLED" ? (
+                        <div className="ml-auto w-[186px] space-y-1.5">
+                          <SyncNowForm agentId={row.id} />
+                          <VerifyDataForm agentId={row.id} />
+                        </div>
+                      ) : null,
+                  },
+                ]
+              : []),
           ]}
         />
       </Card>

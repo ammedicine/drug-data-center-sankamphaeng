@@ -28,10 +28,25 @@ function Feedback({ state }: { state: ActionState }) {
   );
 }
 
-function Submit({ label, variant = "primary" }: { label: string; variant?: "primary" | "danger" }) {
+function Submit({
+  label,
+  variant = "primary",
+  block = false,
+}: {
+  label: string;
+  variant?: "primary" | "secondary" | "danger";
+  /** stretch to the container, so buttons stacked in a cell share one width */
+  block?: boolean;
+}) {
   const { pending } = useFormStatus();
   return (
-    <Button type="submit" variant={variant} disabled={pending} size="sm">
+    <Button
+      type="submit"
+      variant={variant}
+      disabled={pending}
+      size="sm"
+      className={block ? "w-full justify-center" : undefined}
+    >
       {pending ? "กำลังบันทึก..." : label}
     </Button>
   );
@@ -240,16 +255,14 @@ export function SyncNowForm({ agentId }: { agentId: string }) {
           </div>
         ) : null}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Submit label={pickRange ? "สั่งซิงก์ตามช่วงที่เลือก" : "สั่งซิงก์เดี๋ยวนี้"} />
-          <button
-            type="button"
-            onClick={() => setPickRange((value) => !value)}
-            className="text-xs text-brand transition-colors duration-150 hover:text-brand-hover"
-          >
-            {pickRange ? "ยกเลิกการเลือกช่วง" : "เลือกช่วงวันที่"}
-          </button>
-        </div>
+        <Submit label={pickRange ? "ซิงก์ตามช่วงที่เลือก" : "สั่งซิงก์เดี๋ยวนี้"} block />
+        <button
+          type="button"
+          onClick={() => setPickRange((value) => !value)}
+          className="w-full text-right text-[11.5px] text-muted transition-colors duration-150 hover:text-brand"
+        >
+          {pickRange ? "ยกเลิกการเลือกช่วง" : "เลือกช่วงวันที่..."}
+        </button>
       </form>
       <Feedback state={state} />
     </div>
@@ -262,7 +275,7 @@ export function VerifyDataForm({ agentId }: { agentId: string }) {
     <div className="space-y-2">
       <form action={action}>
         <input type="hidden" name="agentId" value={agentId} />
-        <Submit label="ตรวจสอบความครบถ้วน" />
+        <Submit label="ตรวจสอบความครบถ้วน" variant="secondary" block />
       </form>
       <Feedback state={state} />
     </div>
