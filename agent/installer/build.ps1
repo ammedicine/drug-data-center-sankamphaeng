@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   สร้างตัวติดตั้ง Windows ของโปรแกรมเชื่อมข้อมูล JHCIS (Agent)
 
@@ -45,19 +45,38 @@ $OutputDir = Join-Path $PSScriptRoot "output"
 function Step($message) { Write-Host "`n=== $message ===" -ForegroundColor Cyan }
 function Info($message) { Write-Host "    $message" -ForegroundColor DarkGray }
 
+# Windows PowerShell turns anything a native program writes to stderr into a
+# terminating error while ErrorActionPreference is Stop - and PyInstaller,
+# esbuild and ISCC all report progress on stderr. Exit codes are the honest
+# signal, so native calls run through this and are judged on $LASTEXITCODE.
+function Invoke-Native {
+  param([scriptblock]$Command, [string]$What)
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try { & $Command } finally { $ErrorActionPreference = $previous }
+  if ($LASTEXITCODE -ne 0) { throw "$What ล้มเหลว (exit $LASTEXITCODE)" }
+}
+
 Set-Location $AgentRoot
 New-Item -ItemType Directory -Force -Path $BuildDir, $OutputDir | Out-Null
 
 # เวอร์ชันมาจาก git tag เพื่อให้ไฟล์ที่แจก ตรงกับ commit ที่ build มันขึ้นมาเสมอ
 if (-not $Version) {
-  $described = (git describe --tags --always --dirty 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $described) {
-    # v1.0.2 -> 1.0.2 ; ถ้า tag ยังไม่มี git จะคืน short sha ซึ่งใช้เป็นเวอร์ชันไม่ได้
-    $Version = ($described -replace '^v', '')
-  }
+  # แท็กล่าสุดเท่านั้น ไม่เอา -dirty หรือจำนวน commit ต่อท้าย เพราะเวอร์ชันต้องเป็น
+  # เลขล้วนทั้งในชื่อไฟล์และใน VersionInfo ของ Windows
+  $tag = (git describe --tags --abbrev=0 2>$null)
+  if ($LASTEXITCODE -eq 0 -and $tag) { $Version = ($tag -replace '^v', '') }
   if (-not $Version -or $Version -notmatch '^\d+\.\d+') {
     Write-Warning "ไม่พบ git tag ที่เป็นเลขเวอร์ชัน - ใช้ 0.0.0-dev แทน (อย่านำไปแจกจริง)"
     $Version = "0.0.0-dev"
+  } else {
+    # เตือนถ้าไฟล์ที่กำลัง build ไม่ตรงกับ tag นั้นเป๊ะ ๆ - ตัวติดตั้งจะบอกเวอร์ชัน
+    # หนึ่ง แต่ข้างในเป็นโค้ดอีกแบบ ซึ่งตามรอยย้อนหลังไม่ได้
+    if ((git status --porcelain 2>$null)) {
+      Write-Warning "working tree มีไฟล์ที่ยังไม่ commit - ตัวติดตั้งจะไม่ตรงกับ tag $tag"
+    } elseif ((git rev-parse HEAD 2>$null) -ne (git rev-list -n 1 $tag 2>$null)) {
+      Write-Warning "HEAD ไม่ได้อยู่ที่ tag $tag - ตัวติดตั้งจะไม่ตรงกับเวอร์ชันที่ระบุ"
+    }
   }
 }
 Info "เวอร์ชันที่จะ build: $Version"
@@ -66,20 +85,21 @@ Info "เวอร์ชันที่จะ build: $Version"
 Step "1/4 รวมโค้ด agent เป็นไฟล์เดียว (esbuild)"
 if (-not (Test-Path (Join-Path $AgentRoot "node_modules"))) {
   Info "ติดตั้ง dependencies..."
-  npm install --no-audit --no-fund
+  Invoke-Native { npm install --no-audit --no-fund } "npm install"
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $BuildDir "app") | Out-Null
 # mysql2 ships optional native-looking requires that esbuild must not follow;
 # bundling everything else keeps the payload to a single file.
-npx --yes esbuild@0.24.0 src/cli.ts `
-  --bundle `
-  --platform=node `
-  --target=node18 `
-  --format=cjs `
-  --outfile="$BuildDir\app\agent.js" `
-  --external:better-sqlite3 `
-  --log-level=warning
-if ($LASTEXITCODE -ne 0) { throw "esbuild ล้มเหลว" }
+Invoke-Native {
+  npx --yes esbuild@0.24.0 src/cli.ts `
+    --bundle `
+    --platform=node `
+    --target=node18 `
+    --format=cjs `
+    --outfile="$BuildDir\app\agent.js" `
+    --external:better-sqlite3 `
+    --log-level=warning
+} "esbuild"
 Info "ได้ไฟล์ $BuildDir\app\agent.js"
 
 # 2 ------------------------------------------------------------ node runtime
@@ -109,20 +129,23 @@ $Venv = Join-Path $AgentRoot "gui\.venv"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
   Info "สร้าง virtual environment..."
-  python -m venv $Venv
+  Invoke-Native { python -m venv $Venv } "python -m venv"
 }
-& $VenvPython -m pip install --quiet --disable-pip-version-check -r (Join-Path $AgentRoot "gui\requirements.txt")
+Invoke-Native {
+  & $VenvPython -m pip install --quiet --disable-pip-version-check -r (Join-Path $AgentRoot "gui\requirements.txt")
+} "pip install"
 
 $customtkinterPath = & $VenvPython -c "import customtkinter, os; print(os.path.dirname(customtkinter.__file__))"
-& $VenvPython -m PyInstaller `
-  --noconfirm --clean --windowed --onefile `
-  --name SDCAgent `
-  --distpath (Join-Path $BuildDir "gui") `
-  --workpath (Join-Path $BuildDir "pyinstaller") `
-  --specpath (Join-Path $BuildDir "pyinstaller") `
-  --add-data "$customtkinterPath;customtkinter" `
-  (Join-Path $AgentRoot "gui\sdc_agent_gui.py")
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller ล้มเหลว" }
+Invoke-Native {
+  & $VenvPython -m PyInstaller `
+    --noconfirm --clean --windowed --onefile `
+    --name SDCAgent `
+    --distpath (Join-Path $BuildDir "gui") `
+    --workpath (Join-Path $BuildDir "pyinstaller") `
+    --specpath (Join-Path $BuildDir "pyinstaller") `
+    --add-data "$customtkinterPath;customtkinter" `
+    (Join-Path $AgentRoot "gui\sdc_agent_gui.py")
+} "PyInstaller"
 Info "ได้ $BuildDir\gui\SDCAgent.exe"
 
 # 4 -------------------------------------------------------------- installer
@@ -144,8 +167,9 @@ if (-not $Iscc) {
   return
 }
 
-& $Iscc "/DAppVersion=$Version" (Join-Path $PSScriptRoot "sdc-agent.iss")
-if ($LASTEXITCODE -ne 0) { throw "Inno Setup ล้มเหลว" }
+Invoke-Native {
+  & $Iscc "/DAppVersion=$Version" (Join-Path $PSScriptRoot "sdc-agent.iss")
+} "Inno Setup"
 
 $setup = Join-Path $OutputDir "SDCAgent-Setup-$Version.exe"
 Write-Host "`nเสร็จแล้ว: $setup" -ForegroundColor Green
@@ -153,5 +177,5 @@ if (Test-Path $setup) {
   $sha = (Get-FileHash $setup -Algorithm SHA256).Hash
   Info "SHA-256: $sha"
   Info "ขั้นถัดไป - เผยแพร่ให้เว็บดึงไปแจก:"
-  Info "  gh release create v$Version `"$setup`" --title `"Agent v$Version`" --notes `"SHA-256: $sha`""
+  Info ('  gh release create v' + $Version + ' ' + $setup + ' --title ' + $Version + ' --notes SHA-256:' + $sha)
 }

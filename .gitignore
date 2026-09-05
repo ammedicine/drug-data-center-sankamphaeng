@@ -25,3 +25,8 @@ __pycache__/
 
 # Vercel env file (real secrets)
 .env.vercel
+
+# ผลลัพธ์การ build ตัวติดตั้ง (แจกผ่าน GitHub Release ไม่เก็บใน git)
+agent/build/
+agent/installer/output/
+agent/gui/.venv/

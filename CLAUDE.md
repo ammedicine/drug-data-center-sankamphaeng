@@ -39,7 +39,20 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
 - ไฟล์ที่เป็นสะพานระหว่างสองฝั่ง: `data/settings.json` (ตารางเวลา) กับ `data/status.json`
   (เฟส/ความคืบหน้า เขียนแบบ temp+rename ทุกครั้ง)
 - เครื่องปลายทางไม่ต้องมี Node/Python เพราะตัวติดตั้งแนบ `node.exe` + `agent.js` + exe ของหน้าจอ
-- **เครื่องนี้ยังไม่ได้ติดตั้ง Inno Setup** (ISCC.exe) จึงยัง build ตัวติดตั้งจริงไม่ได้
+- Inno Setup 6 ติดตั้งแล้วที่ `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`
+  **build ตัวติดตั้งจริงได้แล้ว** (ทดสอบครั้งแรกสำเร็จ 2026-09-05 = `SDCAgent-Setup-1.0.1.exe` 38.6 MB)
+- ผลลัพธ์ build อยู่ที่ `agent/build/` (ชิ้นส่วน) และ `agent/installer/output/` (ตัวติดตั้ง) — gitignore แล้ว
+
+### บทเรียนจากการ build ครั้งแรก (อย่าให้เกิดซ้ำ)
+1. **`.ps1` และ `.iss` ต้องเป็น UTF-8 *มี BOM*** — Windows PowerShell 5.1 อ่านไฟล์ที่ไม่มี BOM
+   เป็น ANSI ทำให้ข้อความไทยเพี้ยนจนวงคำพูดพัง (`The string is missing the terminator`)
+2. **stderr ของ native tool ≠ error** — PyInstaller/esbuild/ISCC พิมพ์ progress ทาง stderr
+   พอ `$ErrorActionPreference = "Stop"` จะกลายเป็น NativeCommandError ทั้งที่ exit code = 0
+   ใช้ helper `Invoke-Native { } "ชื่อ"` ที่ตัดสินจาก `$LASTEXITCODE` เท่านั้น
+3. **เวอร์ชันต้องใช้ `git describe --tags --abbrev=0`** ไม่ใช่ `--dirty` เพราะได้ `1.0.1-dirty`
+   ซึ่งใช้เป็น VersionInfo ของ Windows ไม่ได้ (script เตือนแทนถ้า tree ไม่ตรง tag)
+4. **`{commonstartup}` ไม่ใช่ `{userstartup}`** — ตัวติดตั้งรันด้วยสิทธิ์ผู้ดูแล ถ้าใช้ per-user
+   ทางลัดจะไปอยู่ Startup ของบัญชีผู้ดูแล เจ้าหน้าที่ล็อกอินแล้วโปรแกรมไม่เปิดเอง
 
 ### การแจกตัวติดตั้ง (repo เป็น private ตั้งแต่ 2026-09-05)
 - โค้ดปิดหมด แต่ผู้ใช้/คนภายนอกโหลดตัวติดตั้งได้ที่ **`/download/agent`** (ไม่ต้องล็อกอิน)

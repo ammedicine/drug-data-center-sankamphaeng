@@ -1,4 +1,4 @@
-; ตัวติดตั้งโปรแกรมเชื่อมข้อมูล JHCIS - ศูนย์ข้อมูลการใช้ยา อำเภอสันกำแพง
+﻿; ตัวติดตั้งโปรแกรมเชื่อมข้อมูล JHCIS - ศูนย์ข้อมูลการใช้ยา อำเภอสันกำแพง
 ; ประกอบไฟล์ที่ build.ps1 เตรียมไว้ใน ..\build
 
 #define AppName "โปรแกรมเชื่อมข้อมูล JHCIS"
@@ -66,7 +66,10 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{group}\ถอนการติดตั้ง"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 ; --tray: เริ่มพร้อม Windows แบบย่อลงถาดระบบ ไม่รบกวนหน้าจอเจ้าหน้าที่
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Tasks: startupicon
+; {commonstartup} ไม่ใช่ {userstartup} เพราะตัวติดตั้งรันด้วยสิทธิ์ผู้ดูแล ถ้าใช้
+; per-user ทางลัดจะไปอยู่ใน Startup ของบัญชีผู้ดูแลที่กดติดตั้ง ไม่ใช่ของเจ้าหน้าที่
+; ที่ใช้เครื่องจริง แล้วโปรแกรมจะไม่เปิดเองเลยตอนเจ้าหน้าที่ล็อกอิน
+Name: "{commonstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Tasks: startupicon
 
 [Registry]
 ; ให้ทั้งหน้าจอและตัว agent ใช้โฟลเดอร์ข้อมูลเดียวกัน
