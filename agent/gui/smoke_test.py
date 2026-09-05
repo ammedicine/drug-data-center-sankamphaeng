@@ -55,6 +55,28 @@ def main() -> int:
     print("status       :", json.dumps(bridge.status(), ensure_ascii=False)[:200])
     print("queue        :", bridge.queue_depth())
 
+    # The JHCIS target has to be readable and writable from the tray: a รพ.สต.
+    # that moves its server, or an agent pointed at another LAN, is changed
+    # from this screen and nowhere else.
+    jhcis = bridge.jhcis_settings()
+    print("jhcis        :", json.dumps(jhcis, ensure_ascii=False) or "อ่านไม่ได้")
+    if jhcis:
+        # Rewrites the same values, which also proves the file is writable and
+        # that leaving the password out keeps the stored one.
+        echo = bridge.save_jhcis(
+            {
+                "host": jhcis["host"],
+                "port": jhcis["port"],
+                "database": jhcis["database"],
+                "user": jhcis["user"],
+            }
+        )
+        after = bridge.jhcis_settings()
+        kept = after.get("hasPassword") == jhcis.get("hasPassword")
+        print("jhcis save   :", echo.ok, "· รหัสผ่านเดิมยังอยู่:", kept)
+        if not (echo.ok and kept):
+            return 1
+
     result = bridge.run(["status"], timeout=300)
     print("`agent status` ok:", result.ok)
     for line in result.output.strip().splitlines()[:12]:

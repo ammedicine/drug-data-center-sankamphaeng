@@ -14,11 +14,14 @@ import {
   centralApiUrl,
   dataDir,
   installationId,
+  jhcisConfig,
   loadCredential,
+  loadJhcisOverride,
   loadSettings,
   loadState,
   machineHostname,
   saveCredential,
+  saveJhcisOverride,
   saveSettings,
   writeStatus,
 } from "./config";
@@ -459,6 +462,69 @@ function settings(): void {
   console.log(JSON.stringify(result, null, 2));
 }
 
+/**
+ * Reads or replaces the JHCIS connection.
+ *
+ * `jhcis` on its own prints the settings in use, with the password masked, so
+ * the desktop app can show them. `jhcis --set` reads the new settings as JSON
+ * on stdin rather than from the command line, because arguments are visible to
+ * every process on the machine and one of these fields is a password.
+ */
+async function jhcis(): Promise<void> {
+  if (!process.argv.includes("--set")) {
+    const current = jhcisConfig();
+    const overridden = loadJhcisOverride() !== null;
+    console.log(
+      JSON.stringify(
+        {
+          host: current.host,
+          port: current.port,
+          database: current.database,
+          user: current.user,
+          hasPassword: Boolean(current.password),
+          // false = ยังใช้ค่าจาก .env อยู่ (ยังไม่เคยตั้งจากหน้าจอ)
+          fromOverride: overridden,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) throw new Error("ไม่ได้รับค่าการเชื่อมต่อทาง stdin");
+
+  const input = JSON.parse(raw) as Partial<Record<string, unknown>>;
+  const host = String(input.host ?? "").trim();
+  const user = String(input.user ?? "").trim();
+  const port = Number(input.port ?? 3306);
+  if (!host) throw new Error("ต้องระบุ host หรือ IP ของ JHCISDB");
+  if (!user) throw new Error("ต้องระบุชื่อผู้ใช้ฐานข้อมูล");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`port ไม่ถูกต้อง: ${String(input.port)}`);
+  }
+
+  // No password in the payload means "keep the one already stored", so moving
+  // the server to a new IP does not require retyping it.
+  const existing = loadJhcisOverride();
+  const password =
+    typeof input.password === "string"
+      ? input.password
+      : (existing?.password ?? process.env.JHCIS_DB_PASSWORD ?? "");
+
+  saveJhcisOverride({
+    host,
+    port,
+    database: String(input.database ?? "jhcisdb").trim() || "jhcisdb",
+    user,
+    password,
+  });
+  console.log(`บันทึกการเชื่อมต่อแล้ว: ${user}@${host}:${port}`);
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
   switch (command) {
@@ -479,6 +545,8 @@ async function main(): Promise<void> {
       return status();
     case "settings":
       return settings();
+    case "jhcis":
+      return jhcis();
     default:
       console.log(
         [
@@ -494,6 +562,7 @@ async function main(): Promise<void> {
           "  status                          สรุปสถานะในเครื่อง",
           "  settings [--interval N] [--times 08:00,16:00] [--auto true|false]",
           "                                  ดู/ตั้งค่าตารางการซิงก์ในเครื่อง",
+          "  jhcis [--set]                   ดูการเชื่อมต่อ JHCISDB (--set = อ่านค่าใหม่เป็น JSON ทาง stdin)",
         ].join("\n"),
       );
   }

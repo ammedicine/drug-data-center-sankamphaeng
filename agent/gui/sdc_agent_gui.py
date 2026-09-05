@@ -137,6 +137,55 @@ class AgentBridge:
             creationflags=creation,
         )
 
+    def run_with_input(self, args: list[str], payload: str, timeout: int = 120) -> CommandResult:
+        """
+        Same as run(), but hands the agent a value on stdin.
+
+        Used for the JHCIS password: command-line arguments are visible to every
+        process on the machine, stdin is not.
+        """
+        try:
+            process = subprocess.Popen(
+                self._command(args),
+                cwd=str(self.root),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            output, _ = process.communicate(payload, timeout=timeout)
+            return CommandResult(process.returncode == 0, output or "")
+        except subprocess.TimeoutExpired:
+            return CommandResult(False, "คำสั่งใช้เวลานานเกินไป")
+        except FileNotFoundError as error:
+            return CommandResult(False, f"ไม่พบโปรแกรม agent: {error}")
+        except Exception as error:  # pragma: no cover - defensive
+            return CommandResult(False, str(error))
+
+    def jhcis_settings(self) -> dict[str, Any]:
+        """Connection the agent is actually using, password masked."""
+        result = self.run(["jhcis"], timeout=60)
+        if not result.ok:
+            return {}
+        try:
+            return json.loads(result.output[result.output.index("{") :])
+        except (ValueError, json.JSONDecodeError):
+            return {}
+
+    def save_jhcis(self, values: dict[str, Any]) -> CommandResult:
+        """
+        Stores the connection in the agent's data folder, not in .env.
+
+        .env lives beside the executable in Program Files, which the staff
+        account running the tray cannot write to - so editing the IP there
+        looked like it worked and never took effect. The data folder is
+        writable, and the agent locks the file down when it saves it.
+        """
+        return self.run_with_input(["jhcis", "--set"], json.dumps(values, ensure_ascii=False))
+
     def run(self, args: list[str], timeout: int = 3600) -> CommandResult:
         try:
             process = self._popen(args)
@@ -200,7 +249,9 @@ class AgentBridge:
         return merged
 
     def credential(self) -> dict[str, Any]:
-        return read_json(app_dir() / "agent.config.json")
+        # อยู่ในโฟลเดอร์ข้อมูลตั้งแต่ v1.0.1 (ก่อนหน้านั้นอยู่ข้าง ๆ ตัวโปรแกรม)
+        current = read_json(data_dir() / "agent.config.json")
+        return current or read_json(app_dir() / "agent.config.json")
 
     def queue_depth(self) -> tuple[int, int]:
         pending = data_dir() / "queue" / "pending"
@@ -509,6 +560,25 @@ class AgentApp(ctk.CTk):
             entry.grid(row=index, column=1, sticky="w", pady=3)
             self.env_entries[key] = entry
 
+        # เปลี่ยนปลายทางแล้วต้องรู้ทันทีว่าต่อติดไหม ไม่ใช่รอจนถึงรอบซิงก์ถัดไป
+        test_row = ctk.CTkFrame(jbody, fg_color="transparent")
+        test_row.grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ctk.CTkButton(
+            test_row,
+            text="บันทึกแล้วทดสอบการเชื่อมต่อ",
+            width=210,
+            fg_color="white",
+            text_color=BRAND,
+            border_width=1,
+            border_color="#e3e8ee",
+            hover_color="#eefcfa",
+            command=self._test_jhcis,
+        ).pack(side="left")
+        self.jhcis_hint = ctk.CTkLabel(
+            test_row, text="", text_color=MUTED, anchor="w", font=ctk.CTkFont(size=11)
+        )
+        self.jhcis_hint.pack(side="left", padx=10)
+
         enroll = self._card(scroll, "ลงทะเบียนกับระบบศูนย์กลาง")
         ebody = ctk.CTkFrame(enroll, fg_color="transparent")
         ebody.pack(fill="x", padx=16, pady=(0, 14))
@@ -584,10 +654,26 @@ class AgentApp(ctk.CTk):
         self.startup_var.set(bool(settings.get("startWithWindows", True)))
         self.tray_var.set(bool(settings.get("minimiseToTray", True)))
 
+        # การเชื่อมต่อ JHCIS อ่านจาก agent โดยตรง (ค่าที่มันใช้จริง ซึ่งอาจมาจาก
+        # ไฟล์ในโฟลเดอร์ข้อมูล ไม่ใช่ .env) ส่วนค่าอื่นยังอ่านจาก .env
         env = self.bridge.read_env()
+        jhcis = self.bridge.jhcis_settings()
+        current = {
+            "JHCIS_DB_HOST": str(jhcis.get("host", "")) or env.get("JHCIS_DB_HOST", ""),
+            "JHCIS_DB_PORT": str(jhcis.get("port", "")) or env.get("JHCIS_DB_PORT", ""),
+            "JHCIS_DB_DATABASE": str(jhcis.get("database", "")) or env.get("JHCIS_DB_DATABASE", ""),
+            "JHCIS_DB_USER": str(jhcis.get("user", "")) or env.get("JHCIS_DB_USER", ""),
+            # ไม่เคยดึงรหัสผ่านออกมาแสดง เว้นว่าง = ใช้รหัสเดิม
+            "JHCIS_DB_PASSWORD": "",
+        }
         for key, entry in self.env_entries.items():
             entry.delete(0, "end")
-            entry.insert(0, env.get(key, ""))
+            entry.insert(0, current.get(key, env.get(key, "")))
+        if hasattr(self, "jhcis_hint"):
+            self.jhcis_hint.configure(
+                text="เว้นช่องรหัสผ่านไว้ = ใช้รหัสเดิม" if jhcis.get("hasPassword") else "",
+                text_color=MUTED,
+            )
 
     def _save_settings(self) -> None:
         minutes = {
@@ -615,7 +701,14 @@ class AgentApp(ctk.CTk):
                 "minimiseToTray": bool(self.tray_var.get()),
             }
         )
-        self.bridge.write_env({key: entry.get().strip() for key, entry in self.env_entries.items()})
+        self._persist_jhcis()
+        # ที่อยู่ศูนย์กลางยังอยู่ใน .env (ใช้ตอนลงทะเบียนครั้งแรกเท่านั้น)
+        try:
+            self.bridge.write_env({"CENTRAL_API_URL": self.env_entries["CENTRAL_API_URL"].get().strip()})
+        except OSError:
+            # .env อยู่ใน Program Files ผู้ใช้ทั่วไปเขียนไม่ได้ ซึ่งไม่เป็นไร
+            # หลังลงทะเบียนแล้วที่อยู่ศูนย์กลางถูกเก็บใน agent.config.json
+            pass
         message = set_autostart(bool(self.startup_var.get()))
 
         # The worker re-reads settings each tick, but JHCIS credentials are read
@@ -625,6 +718,47 @@ class AgentApp(ctk.CTk):
 
         self.settings_hint.configure(text=f"บันทึกแล้ว · {message}", text_color=OK)
         self.after(6000, lambda: self.settings_hint.configure(text=""))
+
+    def _persist_jhcis(self) -> CommandResult:
+        """
+        Sends the JHCIS fields to the agent, which owns the file and its
+        permissions. An empty password box means "keep the one already saved",
+        so moving the server to a new IP does not require retyping it.
+        """
+        values: dict[str, Any] = {
+            "host": self.env_entries["JHCIS_DB_HOST"].get().strip(),
+            "port": self.env_entries["JHCIS_DB_PORT"].get().strip() or 3306,
+            "database": self.env_entries["JHCIS_DB_DATABASE"].get().strip() or "jhcisdb",
+            "user": self.env_entries["JHCIS_DB_USER"].get().strip(),
+        }
+        password = self.env_entries["JHCIS_DB_PASSWORD"].get()
+        if password:
+            values["password"] = password
+        # ไม่ส่งคีย์ password ไปเลย = agent เก็บรหัสเดิมไว้
+        return self.bridge.save_jhcis(values)
+
+    def _test_jhcis(self) -> None:
+        """Saves what is on screen, then asks the agent to connect to it."""
+        self.jhcis_hint.configure(text="กำลังบันทึกและทดสอบ...", text_color=MUTED)
+        self.update_idletasks()
+
+        saved = self._persist_jhcis()
+        if not saved.ok:
+            self.jhcis_hint.configure(text=saved.output.strip()[:120], text_color=DANGER)
+            return
+
+        result = self.bridge.run(["doctor"], timeout=120)
+        if result.ok and "CONNECTED" in result.output:
+            self.jhcis_hint.configure(text="เชื่อมต่อ JHCIS สำเร็จ", text_color=OK)
+            # ให้ตัวที่ทำงานอยู่เบื้องหลังใช้ปลายทางใหม่ทันที
+            self.bridge.stop_background()
+            self.worker_error = self.bridge.start_background()
+        else:
+            tail = [line for line in result.output.splitlines() if line.strip()][-1:]
+            self.jhcis_hint.configure(
+                text=f"เชื่อมต่อไม่สำเร็จ: {tail[0][:100] if tail else 'ตรวจสอบ IP/พอร์ต'}",
+                text_color=DANGER,
+            )
 
     def _enroll(self) -> None:
         token = self.token_entry.get().strip()

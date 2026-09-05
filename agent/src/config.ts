@@ -113,18 +113,55 @@ export function statePath(): string {
   return resolve(dataDir(), "state.json");
 }
 
+/**
+ * Connection settings saved from the tray, if any.
+ *
+ * A รพ.สต. can move its JHCIS server, or the agent can be pointed at a
+ * different LAN, without anyone editing a file in Program Files - which the
+ * staff account cannot write to anyway. What is saved here wins over .env, so
+ * the file the operator can actually change is the one that decides.
+ */
+export function jhcisOverridePath(): string {
+  return resolve(dataDir(), "jhcis.json");
+}
+
+export function loadJhcisOverride(): Partial<JhcisConfig> | null {
+  const path = jhcisOverridePath();
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as Partial<JhcisConfig>;
+  } catch {
+    // A truncated write should not stop the agent from starting on .env.
+    return null;
+  }
+}
+
+/** Writes the override with the same lock-down as the central credential. */
+export function saveJhcisOverride(config: JhcisConfig): void {
+  const path = jhcisOverridePath();
+  writeFileSync(path, JSON.stringify(config, null, 2), { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Windows ignores POSIX modes.
+  }
+  restrictToOwner(path);
+}
+
 export function jhcisConfig(): JhcisConfig {
-  const password = process.env.JHCIS_DB_PASSWORD;
-  const user = process.env.JHCIS_DB_USER;
+  const saved = loadJhcisOverride();
+  const user = saved?.user || process.env.JHCIS_DB_USER;
   if (!user) {
-    throw new Error("JHCIS_DB_USER is not set. Copy agent/.env.example to agent/.env first.");
+    throw new Error(
+      "ยังไม่ได้ตั้งค่าการเชื่อมต่อ JHCIS - ตั้งได้ที่หน้าจอโปรแกรม หรือ copy agent/.env.example เป็น agent/.env",
+    );
   }
   return {
-    host: process.env.JHCIS_DB_HOST ?? "localhost",
-    port: Number(process.env.JHCIS_DB_PORT ?? 3306),
-    database: process.env.JHCIS_DB_DATABASE ?? "jhcisdb",
+    host: saved?.host || process.env.JHCIS_DB_HOST || "localhost",
+    port: Number(saved?.port ?? process.env.JHCIS_DB_PORT ?? 3306),
+    database: saved?.database || process.env.JHCIS_DB_DATABASE || "jhcisdb",
     user,
-    password: password ?? "",
+    password: saved?.password ?? process.env.JHCIS_DB_PASSWORD ?? "",
   };
 }
 
