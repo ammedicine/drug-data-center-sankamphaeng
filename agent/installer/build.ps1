@@ -81,6 +81,14 @@ if (-not $Version) {
 }
 Info "เวอร์ชันที่จะ build: $Version"
 
+# AGENT_VERSION คือเวอร์ชันที่ agent รายงานเข้าศูนย์กลางทุก heartbeat ถ้าไม่ตรงกับ
+# ตัวติดตั้ง หน้าเว็บจะบอกเวอร์ชันผิด และตามไม่ได้ว่าเครื่องไหนยังไม่อัปเดต
+$configPath = Join-Path $AgentRoot "src\config.ts"
+$declared = (Select-String -Path $configPath -Pattern 'AGENT_VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+if ($declared -ne $Version) {
+  throw "AGENT_VERSION ใน src/config.ts เป็น $declared แต่กำลัง build $Version - แก้ให้ตรงกันก่อน"
+}
+
 # 1 ------------------------------------------------------------ bundle agent
 Step "1/4 รวมโค้ด agent เป็นไฟล์เดียว (esbuild)"
 if (-not (Test-Path (Join-Path $AgentRoot "node_modules"))) {

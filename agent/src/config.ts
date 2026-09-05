@@ -21,7 +21,14 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
-export const AGENT_VERSION = "1.0.0";
+/**
+ * Reported to Central on every heartbeat and shown in the Agent table.
+ *
+ * Must match the git tag the installer is built from - build.ps1 refuses to
+ * build when they disagree, because a fleet that all reports 1.0.0 tells an
+ * operator nothing about which machines still need updating.
+ */
+export const AGENT_VERSION = "1.0.2";
 
 export interface JhcisConfig {
   host: string;
