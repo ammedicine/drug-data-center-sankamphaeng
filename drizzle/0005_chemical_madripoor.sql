@@ -1,0 +1,1 @@
+CREATE INDEX `drug_usage_window_idx` ON `drug_usage` (`usage_date`,`drug_type`,`drug_code`,`quantity`);

@@ -36,6 +36,13 @@
       "when": 1788538270623,
       "tag": "0004_add_verify_request",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1788571221476,
+      "tag": "0005_chemical_madripoor",
+      "breakpoints": true
     }
   ]
 }

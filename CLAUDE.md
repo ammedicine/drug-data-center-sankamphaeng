@@ -172,6 +172,20 @@ cdrug 7,410 / visitdrug 265,787 / visit 130,422 / pcucode เดียว = `059
 sync ถัดไปเริ่มจาก `last_visit_date - REPROCESS_DAYS (default 7)` เพื่อจับข้อมูลย้อนหลังที่คีย์ทีหลัง
 Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส่งซ้ำได้ ไม่เกิดข้อมูลซ้ำ
 
+### ประสิทธิภาพหน้ารายงาน (วัดจริง 2026-09-05)
+- **ความช้าที่รู้สึกตอน dev ส่วนใหญ่คือ compile ของ dev server** (dashboard 14.3s, sync 12.8s ครั้งแรก)
+  บน production ไม่มี — วัด `next start` ได้ dashboard 255-270ms, รายงาน 80-88ms, sync ~260ms
+- RTT ไป TiDB แค่ ~47ms ไม่ใช่คอขวด · คอขวดคือ query สแกนทั้งตาราง
+- **index เดิมทุกตัวขึ้นต้นด้วย `facility_id`** แต่ SUPER_ADMIN ดูทุกสถานบริการ (ไม่มีเงื่อนไข facility)
+  -> ใช้ index ไม่ได้ กลายเป็น `IndexFullScan` 265,786 แถวต่อ query (หน้าเดียวมี 6-8 query)
+  เพิ่ม `drug_usage_window_idx (usage_date, drug_type, drug_code, quantity)` = migration 0005
+- `src/lib/services/report-cache.ts` cache ผลรายงาน (TTL 300s) key = ค่าที่เข้า WHERE ทั้งหมด
+  (รวม facility scope -> คนละสิทธิ์คนละ key ไม่รั่ว) และ **ล้างทันทีที่ agent ส่งข้อมูลเข้า**
+  (`invalidateUsageReports()` เรียกจาก `ingestUsageRecords` + `upsertDrugMaster`)
+- pool ขยายเป็น 10 เพราะหน้าเดียวยิง 8 query พร้อมกัน pool 5 ทำให้ต่อคิว
+- ถ้าต้องวัดใหม่: `EXPLAIN ANALYZE` ดูว่ายังเป็น TableFullScan ไหม และ `ANALYZE TABLE drug_usage`
+  หลังเพิ่ม index ทุกครั้ง (stats เก่าทำให้ optimizer เลือกแผนผิด)
+
 ### ช่วงเวลาเริ่มต้นของรายงาน
 - ใช้ **ปีงบประมาณไทย** (1 ต.ค. - 30 ก.ย.) เป็นค่าเริ่มต้นทุกหน้า: 1 ต.ค. ของปีงบฯ ปัจจุบัน ถึง **วันนี้**
 - `src/lib/fiscal-year.ts` เป็นตัวคำนวณกลาง (`currentFiscalRange`, `buildFiscalYear`, `recentFiscalYears`)

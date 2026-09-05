@@ -9,6 +9,7 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { invalidateUsageReports } from "./report-cache";
 import { agents, drugUsage, drugs, syncBatches, syncRejects } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
 import {
@@ -199,6 +200,11 @@ export async function upsertDrugMaster(
         },
       });
   }
+
+  // drug_flag, names and units all show up in the reports, so a refreshed
+  // master invalidates them just as new usage rows do.
+  if (rows.length) invalidateUsageReports();
+
   return rows.length;
 }
 
@@ -271,6 +277,9 @@ export async function ingestUsageRecords(input: {
       recordsRejected: sql`${syncBatches.recordsRejected} + ${rejects.length}`,
     })
     .where(eq(syncBatches.id, input.batchId));
+
+  // The reports are cached until new rows land. They just did.
+  if (unique.length) invalidateUsageReports();
 
   return { accepted: unique.length, rejected: rejects.length, rejects: rejects.slice(0, 50) };
 }

@@ -331,6 +331,18 @@ export const drugUsage = mysqlTable(
     reportIdx: index("drug_usage_report_idx").on(t.facilityId, t.usageDate, t.drugCode),
     drugIdx: index("drug_usage_drug_idx").on(t.facilityId, t.drugCode, t.usageDate),
     typeIdx: index("drug_usage_type_idx").on(t.facilityId, t.drugType, t.usageDate),
+    // Every index above leads with facility_id, which a SUPER_ADMIN report
+    // never constrains - it reads all facilities - so TiDB fell back to an
+    // index full scan of the whole table for each query on the page. This one
+    // leads with the column those reports always do constrain, the date
+    // window, and carries quantity so the summary aggregates without touching
+    // the rows.
+    windowIdx: index("drug_usage_window_idx").on(
+      t.usageDate,
+      t.drugType,
+      t.drugCode,
+      t.quantity,
+    ),
     batchIdx: index("drug_usage_batch_idx").on(t.syncBatchId),
     agentIdx: index("drug_usage_agent_idx").on(t.agentId, t.usageDate),
   }),

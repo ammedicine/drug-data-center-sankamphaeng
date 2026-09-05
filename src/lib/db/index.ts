@@ -21,7 +21,10 @@ function createPool(): mysql.Pool {
   // TiDB Cloud requires TLS; serverless functions must keep the pool small.
   return mysql.createPool({
     uri: url,
-    connectionLimit: Number(process.env.DATABASE_POOL_SIZE ?? 5),
+    // A report page fires up to eight aggregates at once; a pool smaller than
+    // that turns the tail of them into a queue and adds a full query's latency
+    // to the page for no reason.
+    connectionLimit: Number(process.env.DATABASE_POOL_SIZE ?? 10),
     enableKeepAlive: true,
     timezone: "Z",
     charset: "utf8mb4_general_ci",

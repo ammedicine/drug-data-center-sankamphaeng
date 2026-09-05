@@ -8,6 +8,7 @@
 import { and, asc, desc, eq, gte, inArray, like, lte, sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { cachedReport } from "./report-cache";
 import { drugUsage, drugs, facilities } from "@/lib/db/schema";
 
 export interface UsageFilters {
@@ -51,7 +52,7 @@ export interface UsageSummary {
   distinctDrugTypes: number;
 }
 
-export async function getUsageSummary(filters: UsageFilters): Promise<UsageSummary> {
+async function getUsageSummaryUncached(filters: UsageFilters): Promise<UsageSummary> {
   const [row] = await db
     .select({
       dispensingRows: sql<number>`COUNT(*)`,
@@ -84,7 +85,7 @@ export interface UsageByDrugRow {
   lastUsageDate: string | null;
 }
 
-export async function getUsageByDrug(
+async function getUsageByDrugUncached(
   filters: UsageFilters,
   paging: Paging,
   sort: "name" | "quantity" | "rows" | "code" = "name",
@@ -164,7 +165,7 @@ export interface TrendPoint {
   dispensingRows: number;
 }
 
-export async function getUsageTrend(
+async function getUsageTrendUncached(
   filters: UsageFilters,
   granularity: "day" | "month" = "day",
 ): Promise<TrendPoint[]> {
@@ -201,7 +202,7 @@ export interface DrugTypeUsageRow {
 }
 
 /** Per-category totals shown above the table so หมวดยา stay clearly separated. */
-export async function getUsageByDrugType(filters: UsageFilters): Promise<DrugTypeUsageRow[]> {
+async function getUsageByDrugTypeUncached(filters: UsageFilters): Promise<DrugTypeUsageRow[]> {
   const rows = await db
     .select({
       drugType: drugUsage.drugType,
@@ -232,7 +233,7 @@ export interface FacilityUsageRow {
 }
 
 /** Facility comparison - only ever called for SUPER_ADMIN scopes. */
-export async function getUsageByFacility(filters: UsageFilters): Promise<FacilityUsageRow[]> {
+async function getUsageByFacilityUncached(filters: UsageFilters): Promise<FacilityUsageRow[]> {
   const rows = await db
     .select({
       facilityId: drugUsage.facilityId,
@@ -269,7 +270,7 @@ export interface FacilityDrugRow extends UsageByDrugRow {
  * list instantly, without a request per click. Ordering matches the report:
  * codes still in use first, alphabetically, retired codes at the bottom.
  */
-export async function getUsageByFacilityAndDrug(
+async function getUsageByFacilityAndDrugUncached(
   filters: UsageFilters,
   limit = 4000,
 ): Promise<FacilityDrugRow[]> {
@@ -325,7 +326,7 @@ export interface DrugDetail {
   unit: string | null;
 }
 
-export async function getDrugDetail(
+async function getDrugDetailUncached(
   facilityIds: string[] | null,
   drugCode: string,
 ): Promise<DrugDetail | null> {
@@ -370,7 +371,7 @@ export async function searchDrugs(
 }
 
 /** Distinct drug types present in the scope, for the filter dropdown. */
-export async function getAvailableDrugTypes(
+async function getAvailableDrugTypesUncached(
   facilityIds: string[] | null,
 ): Promise<Array<{ drugType: string; count: number }>> {
   const rows = await db
@@ -399,3 +400,25 @@ export async function findDrugCodesByName(
     .limit(200);
   return rows.map((r) => r.drugCode);
 }
+
+/* ---------------------------------------------------------------- caching */
+
+/**
+ * The public API of this module. Each report is answered from cache when the
+ * same scope and window has already been computed; the cache is dropped as
+ * soon as an agent delivers new usage rows (see report-cache.ts).
+ */
+export const getUsageSummary = cachedReport("getUsageSummary", getUsageSummaryUncached);
+export const getUsageByDrug = cachedReport("getUsageByDrug", getUsageByDrugUncached);
+export const getUsageTrend = cachedReport("getUsageTrend", getUsageTrendUncached);
+export const getUsageByDrugType = cachedReport("getUsageByDrugType", getUsageByDrugTypeUncached);
+export const getUsageByFacility = cachedReport("getUsageByFacility", getUsageByFacilityUncached);
+export const getUsageByFacilityAndDrug = cachedReport(
+  "getUsageByFacilityAndDrug",
+  getUsageByFacilityAndDrugUncached,
+);
+export const getDrugDetail = cachedReport("getDrugDetail", getDrugDetailUncached);
+export const getAvailableDrugTypes = cachedReport(
+  "getAvailableDrugTypes",
+  getAvailableDrugTypesUncached,
+);
