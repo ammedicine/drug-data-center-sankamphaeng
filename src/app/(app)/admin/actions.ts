@@ -5,6 +5,7 @@ import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 
 import { issueEnrollmentToken } from "@/lib/agent-auth/enrollment";
+import { effectiveStatus } from "@/lib/services/monitoring";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
 import {
@@ -248,13 +249,24 @@ export async function requestSyncAction(
   const user = await requireApiUser();
   const agentId = String(formData.get("agentId") ?? "");
   const [agent] = await db
-    .select({ id: agents.id, facilityId: agents.facilityId, name: agents.name })
+    .select({
+      id: agents.id,
+      facilityId: agents.facilityId,
+      name: agents.name,
+      status: agents.status,
+      lastHeartbeatAt: agents.lastHeartbeatAt,
+    })
     .from(agents)
     .where(eq(agents.id, agentId))
     .limit(1);
   if (!agent) return fail("ไม่พบ Agent");
   // Refreshing your own facility's data is not an administrative action.
   if (!canTriggerSync(user, agent.facilityId)) return fail("ไม่มีสิทธิ์สั่งซิงก์ Agent นี้");
+
+  const state = effectiveStatus(agent);
+  if (state === "DISABLED") {
+    return fail(`${agent.name} ถูกปิดใช้งานอยู่ จึงสั่งซิงก์ไม่ได้`);
+  }
 
   await db.update(agents).set({ syncRequestedAt: new Date() }).where(eq(agents.id, agentId));
 
@@ -272,7 +284,22 @@ export async function requestSyncAction(
 
   revalidatePath("/admin/agents");
   revalidatePath("/sync");
-  return { success: `ส่งคำสั่งซิงก์ไปยัง ${agent.name} แล้ว Agent จะเริ่มภายใน 5 นาที` };
+  // The central server cannot push into a รพ.สต. LAN, so this is a flag the
+  // agent picks up on its next heartbeat. Promising "within 5 minutes" when
+  // the agent has not called home for hours is simply untrue: the request is
+  // still recorded and will run when it comes back, and that is what to say.
+  if (state === "ONLINE") {
+    return { success: `ส่งคำสั่งซิงก์ไปยัง ${agent.name} แล้ว Agent จะเริ่มภายใน 5 นาที` };
+  }
+
+  const lastSeen = agent.lastHeartbeatAt
+    ? `ติดต่อครั้งล่าสุด ${agent.lastHeartbeatAt.toLocaleString("th-TH")}`
+    : "ยังไม่เคยติดต่อเข้ามาเลย";
+  return {
+    success:
+      `บันทึกคำสั่งซิงก์ไว้แล้ว แต่ ${agent.name} ยังออฟไลน์ (${lastSeen}) ` +
+      `จะเริ่มทำงานทันทีที่โปรแกรมกลับมาออนไลน์ - ตรวจว่าเครื่องที่ รพ.สต. เปิดอยู่และโปรแกรมทำงานอยู่ในถาดระบบ`,
+  };
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   PageHeader,
   StatCard,
   StatusBadge,
+  formatDate,
   formatDateTime,
   formatNumber,
   relativeTime,
@@ -252,7 +253,11 @@ export default async function SyncPage() {
             {
               key: "watermark",
               header: "ข้อมูลถึงวันที่",
-              render: (row) => <span className="text-xs text-muted">{row.lastSyncedVisitDate ?? "-"}</span>,
+              // Every other date on this page is Thai; an ISO string here made
+              // the row look like two different calendars side by side.
+              render: (row) => (
+                <span className="text-xs text-muted">{formatDate(row.lastSyncedVisitDate)}</span>
+              ),
             },
             ...(canTriggerSync(user)
               ? [
