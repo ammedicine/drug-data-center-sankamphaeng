@@ -15,6 +15,7 @@ import { getFleetSummary, listAgents } from "@/lib/services/monitoring";
 
 import {
   AgentForm,
+  AgentDeleteForm,
   AgentRevokeForm,
   AgentTokenForm,
   CollapsibleForm,
@@ -152,6 +153,7 @@ export default async function AgentsPage() {
                     {row.status !== "DISABLED" ? <SyncNowForm agentId={row.id} /> : null}
                     <AgentTokenForm agentId={row.id} />
                     {row.status !== "DISABLED" ? <AgentRevokeForm agentId={row.id} /> : null}
+                    <AgentDeleteForm agentId={row.id} agentName={row.name} />
                   </div>
                 ) : null,
             },

@@ -18,6 +18,8 @@ export type AuditAction =
   | "AGENT_ENROLL"
   | "AGENT_TOKEN_ISSUE"
   | "AGENT_REVOKE"
+  | "AGENT_DELETE"
+  | "FACILITY_DATA_PURGE"
   | "SYNC_START"
   | "SYNC_COMPLETE"
   | "SYNC_FAILED"

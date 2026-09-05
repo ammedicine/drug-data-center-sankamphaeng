@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache";
 
 import { issueEnrollmentToken } from "@/lib/agent-auth/enrollment";
 import { effectiveStatus, listRunningBatches } from "@/lib/services/monitoring";
+import { countFacilityUsage, purgeFacilityUsage } from "@/lib/services/sync";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
 import {
@@ -16,7 +17,13 @@ import {
   isSuperAdmin,
 } from "@/lib/auth/rbac";
 import { db } from "@/lib/db";
-import { agentCredentials, agents, facilities, users } from "@/lib/db/schema";
+import {
+  agentCredentials,
+  agentEnrollmentTokens,
+  agents,
+  facilities,
+  users,
+} from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
 import { clientIp, writeAudit } from "@/lib/services/audit";
 
@@ -709,4 +716,135 @@ export async function toggleUserAction(
 
   revalidatePath("/admin/users");
   return { success: nextActive ? "เปิดใช้งานผู้ใช้แล้ว" : "ปิดใช้งานผู้ใช้แล้ว" };
+}
+
+/**
+ * Deletes a สถานบริการ's dispensing records - everything, or one range of
+ * service dates.
+ *
+ * Destructive and irreversible from the web, so it is gated three ways: only a
+ * SUPER_ADMIN may call it, the facility's own code must be typed to confirm
+ * (a mis-click cannot reach it, and the code names which facility is being
+ * emptied), and the outcome is written to the audit log with the range and the
+ * number of rows removed. The data can be brought back by syncing again -
+ * purgeFacilityUsage rewinds the agent watermark so the next run re-reads the
+ * window rather than believing it is already delivered.
+ */
+export async function purgeFacilityDataAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้น");
+
+  const facilityId = String(formData.get("facilityId") ?? "");
+  const scope = String(formData.get("scope") ?? "range");
+  const confirm = String(formData.get("confirm") ?? "").trim();
+
+  const [facility] = await db
+    .select({ id: facilities.id, code: facilities.code, name: facilities.name })
+    .from(facilities)
+    .where(eq(facilities.id, facilityId))
+    .limit(1);
+  if (!facility) return fail("ไม่พบสถานบริการ");
+
+  if (confirm !== facility.code) {
+    return fail(`กรุณาพิมพ์รหัสสถานบริการ "${facility.code}" ให้ตรงเพื่อยืนยัน`);
+  }
+
+  let from: string | null = null;
+  let to: string | null = null;
+  if (scope === "range") {
+    from = String(formData.get("from") ?? "").trim() || null;
+    to = String(formData.get("to") ?? "").trim() || null;
+    if (!from || !to) return fail("กรุณาเลือกช่วงวันที่รับบริการให้ครบทั้งวันเริ่มและวันสิ้นสุด");
+    if (from > to) return fail("วันเริ่มต้องไม่เกินวันสิ้นสุด");
+  }
+
+  const request = { facilityId, from, to };
+  const expected = await countFacilityUsage(request);
+  if (expected === 0) {
+    return fail("ไม่มีข้อมูลในเงื่อนไขที่เลือก จึงไม่มีอะไรให้ล้าง");
+  }
+
+  const result = await purgeFacilityUsage(request);
+
+  await writeAudit({
+    actorType: "USER",
+    actorId: user.userId,
+    actorLabel: user.email,
+    action: "FACILITY_DATA_PURGE",
+    resource: "drug_usage",
+    resourceId: facilityId,
+    facilityId,
+    ip: clientIp(await headers()),
+    metadata: { from, to, deletedRows: result.deletedRows, watermark: result.watermarkResetTo },
+  });
+
+  revalidatePath("/admin/facilities");
+  revalidatePath("/dashboard");
+
+  const window = from ? `ช่วง ${from} ถึง ${to}` : "ทั้งหมด";
+  const rerun = result.watermarkResetTo
+    ? `Agent จะดึงข้อมูลตั้งแต่ ${result.watermarkResetTo} ใหม่ในรอบถัดไป`
+    : "Agent จะดึงข้อมูลใหม่ทั้งหมดในรอบถัดไป";
+  return {
+    success: `ล้างข้อมูล ${facility.name} ${window} แล้ว ${formatCount(result.deletedRows)} รายการ · ${rerun}`,
+  };
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString("th-TH");
+}
+
+/**
+ * Removes an Agent from the system entirely.
+ *
+ * Different from revoking: revoking leaves the row disabled and visible, this
+ * deletes it. The credential goes with it, so the copy installed at the
+ * รพ.สต. stops being able to speak to Central at all - its next request is
+ * rejected as an unknown credential, and getting that machine working again
+ * means enrolling it afresh with a new code.
+ *
+ * The dispensing data it delivered is NOT touched - that belongs to the
+ * สถานบริการ, not to the machine that carried it - and neither is the batch
+ * history, which is the record of what happened and now reads "Agent ที่ถูกลบแล้ว"
+ * where the name used to be.
+ */
+export async function deleteAgentAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่ลบ Agent ได้");
+
+  const agentId = String(formData.get("agentId") ?? "");
+  const [agent] = await db
+    .select({ id: agents.id, facilityId: agents.facilityId, name: agents.name })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .limit(1);
+  if (!agent) return fail("ไม่พบ Agent");
+
+  await db.delete(agentCredentials).where(eq(agentCredentials.agentId, agentId));
+  await db.delete(agentEnrollmentTokens).where(eq(agentEnrollmentTokens.agentId, agentId));
+  await db.delete(agents).where(eq(agents.id, agentId));
+
+  await writeAudit({
+    actorType: "USER",
+    actorId: user.userId,
+    actorLabel: user.email,
+    action: "AGENT_DELETE",
+    resource: "agent",
+    resourceId: agentId,
+    facilityId: agent.facilityId,
+    ip: clientIp(await headers()),
+    metadata: { name: agent.name },
+  });
+
+  revalidatePath("/admin/agents");
+  revalidatePath("/sync");
+  return {
+    success: `ลบ ${agent.name} ออกจากระบบแล้ว เครื่องที่ติดตั้งไว้จะใช้งานไม่ได้จนกว่าจะลงทะเบียนใหม่ (ข้อมูลการจ่ายยาที่เคยส่งมายังอยู่ครบ)`,
+  };
 }

@@ -10,6 +10,8 @@ import {
   createAgentAction,
   createFacilityAction,
   createUserAction,
+  deleteAgentAction,
+  purgeFacilityDataAction,
   reissueEnrollmentTokenAction,
   requestSyncAction,
   requestVerifyAction,
@@ -324,6 +326,110 @@ export function UserToggleForm({
         variant={isActive ? "danger" : "primary"}
       />
       {state.error ? <Feedback state={state} /> : null}
+    </form>
+  );
+}
+
+export function AgentDeleteForm({ agentId, agentName }: { agentId: string; agentName: string }) {
+  const [state, action] = useActionState<ActionState, FormData>(deleteAgentAction, {});
+  return (
+    <form
+      action={action}
+      onSubmit={(event) => {
+        if (
+          !confirm(
+            `ลบ ${agentName} ออกจากระบบ?\n\n` +
+              `เครื่องที่ติดตั้งไว้จะใช้งานไม่ได้ทันที และต้องลงทะเบียนใหม่ด้วยรหัสใหม่\n` +
+              `ข้อมูลการจ่ายยาที่เคยส่งมาแล้วจะไม่ถูกลบ`,
+          )
+        ) {
+          event.preventDefault();
+        }
+      }}
+    >
+      <input type="hidden" name="agentId" value={agentId} />
+      <Submit label="ลบออกจากระบบ" variant="danger" />
+      {state.error ? <Feedback state={state} /> : null}
+      {state.success ? <Feedback state={state} /> : null}
+    </form>
+  );
+}
+
+/**
+ * Clearing a facility's dispensing records.
+ *
+ * Kept deliberately awkward: the scope has to be chosen, the facility code has
+ * to be typed, and the browser asks once more. This is the only control in the
+ * system that destroys data an agent spent hours delivering.
+ */
+export function FacilityPurgeForm({
+  facilityId,
+  facilityCode,
+  facilityName,
+}: {
+  facilityId: string;
+  facilityCode: string;
+  facilityName: string;
+}) {
+  const [state, action] = useActionState<ActionState, FormData>(purgeFacilityDataAction, {});
+  const [scope, setScope] = useState<"range" | "all">("range");
+
+  return (
+    <form
+      action={action}
+      className="space-y-3"
+      onSubmit={(event) => {
+        const what = scope === "all" ? "ข้อมูลทั้งหมด" : "ข้อมูลในช่วงวันที่ที่เลือก";
+        if (!confirm(`ล้าง${what}ของ ${facilityName}?\n\nการลบนี้ย้อนกลับไม่ได้จากหน้าเว็บ`)) {
+          event.preventDefault();
+        }
+      }}
+    >
+      <input type="hidden" name="facilityId" value={facilityId} />
+
+      <div className="flex flex-wrap gap-4">
+        {(
+          [
+            ["range", "เลือกช่วงวันที่รับบริการ"],
+            ["all", "ล้างทั้งหมด"],
+          ] as Array<["range" | "all", string]>
+        ).map(([value, label]) => (
+          <label key={value} className="flex items-center gap-2 text-[13px]">
+            <input
+              type="radio"
+              name="scope"
+              value={value}
+              checked={scope === value}
+              onChange={() => setScope(value)}
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+
+      {scope === "range" ? (
+        <div className="flex flex-wrap gap-3">
+          <Field label="ตั้งแต่วันที่รับบริการ">
+            <input type="date" name="from" required className={inputClass} />
+          </Field>
+          <Field label="ถึงวันที่รับบริการ">
+            <input type="date" name="to" required className={inputClass} />
+          </Field>
+        </div>
+      ) : null}
+
+      <Field label={`พิมพ์รหัสสถานบริการ "${facilityCode}" เพื่อยืนยัน`}>
+        <input
+          name="confirm"
+          required
+          autoComplete="off"
+          placeholder={facilityCode}
+          className={inputClass}
+        />
+      </Field>
+
+      <Submit label="ล้างข้อมูล" variant="danger" />
+      <Feedback state={state} />
     </form>
   );
 }

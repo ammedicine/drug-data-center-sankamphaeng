@@ -6,7 +6,7 @@
  *  - partial tolerance: one bad row is rejected, the batch still commits
  *  - facility-bound: facilityId always comes from the authenticated agent
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import { invalidateUsageReports } from "./report-cache";
@@ -327,4 +327,88 @@ export async function completeBatch(input: {
       })
       .where(eq(agents.id, input.agent.agentId));
   }
+}
+
+/* ------------------------------------------------------- clearing data */
+
+export interface PurgeRequest {
+  facilityId: string;
+  /** null = every service date on record */
+  from: string | null;
+  to: string | null;
+}
+
+export interface PurgeResult {
+  deletedRows: number;
+  /** what the agent will re-read from on its next run, null = everything */
+  watermarkResetTo: string | null;
+}
+
+/** Rows that a purge would remove, so the operator sees the size first. */
+export async function countFacilityUsage(request: PurgeRequest): Promise<number> {
+  const [row] = await db
+    .select({ total: sql<number>`COUNT(*)` })
+    .from(drugUsage)
+    .where(purgeWhere(request));
+  return Number(row?.total ?? 0);
+}
+
+function purgeWhere(request: PurgeRequest): SQL {
+  const parts: SQL[] = [eq(drugUsage.facilityId, request.facilityId)];
+  if (request.from) parts.push(gte(drugUsage.usageDate, request.from));
+  if (request.to) parts.push(lte(drugUsage.usageDate, request.to));
+  return and(...parts) as SQL;
+}
+
+/**
+ * Deletes dispensing records for one สถานบริการ, optionally limited to a range
+ * of service dates.
+ *
+ * The agent's watermark has to move with the data. It records the latest
+ * visit_date already ingested and an incremental run starts from there, so
+ * deleting rows without touching it leaves a hole that no future sync will
+ * ever fill - the agent believes that window is done. After a purge the
+ * watermark is pulled back to just before the deleted range (or cleared
+ * entirely, which makes the next run a full re-read), so the data can be
+ * brought back simply by syncing again.
+ *
+ * Batch history and the drug master are deliberately left alone: the first is
+ * the record of what happened, and the second is shared reference data whose
+ * loss would cost every remaining row its category, unit and status.
+ */
+export async function purgeFacilityUsage(request: PurgeRequest): Promise<PurgeResult> {
+  // drizzle-mysql2 hands back [ResultSetHeader, fields]; affectedRows lives on
+  // the header, not on the array. Reading it off the array gave 0 every time,
+  // which would have reported "ล้างแล้ว 0 รายการ" after deleting hundreds.
+  const deleted = (await db.delete(drugUsage).where(purgeWhere(request))) as unknown as [
+    { affectedRows?: number } | undefined,
+  ];
+  const deletedRows = Number(deleted?.[0]?.affectedRows ?? 0);
+
+  // Re-reading one day either side of the boundary is cheap and removes any
+  // argument about whether the endpoint itself was included.
+  const watermark = request.from ? previousDay(request.from) : null;
+
+  const agentRows = await db
+    .select({ id: agents.id, lastSyncedVisitDate: agents.lastSyncedVisitDate })
+    .from(agents)
+    .where(eq(agents.facilityId, request.facilityId));
+
+  for (const agent of agentRows) {
+    // Only ever move the watermark backwards.
+    if (watermark && agent.lastSyncedVisitDate && agent.lastSyncedVisitDate <= watermark) continue;
+    await db
+      .update(agents)
+      .set({ lastSyncedVisitDate: watermark })
+      .where(eq(agents.id, agent.id));
+  }
+
+  invalidateUsageReports();
+  return { deletedRows, watermarkResetTo: watermark };
+}
+
+function previousDay(date: string): string {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - 1);
+  return value.toISOString().slice(0, 10);
 }

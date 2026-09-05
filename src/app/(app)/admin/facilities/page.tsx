@@ -3,7 +3,7 @@ import { Card, PageHeader, StatusBadge, relativeTime } from "@/components/ui/pri
 import { canManageSystem, requireAllFacilityViewer } from "@/lib/auth/rbac";
 import { listFacilities } from "@/lib/services/facilities";
 
-import { CollapsibleForm, FacilityForm, FacilityToggleForm } from "../forms";
+import { CollapsibleForm, FacilityForm, FacilityPurgeForm, FacilityToggleForm } from "../forms";
 
 export const metadata = { title: "จัดการสถานบริการ" };
 export const dynamic = "force-dynamic";
@@ -103,6 +103,40 @@ export default async function FacilitiesPage() {
           ]}
         />
       </Card>
+
+      {canManage ? (
+        <Card
+          className="mt-5 border-danger-line"
+          title="ล้างข้อมูลการจ่ายยาของสถานบริการ"
+          description="ลบรายการจ่ายยาที่นำเข้ามาแล้ว เลือกได้ว่าทั้งหมดหรือเฉพาะช่วงวันที่รับบริการ"
+        >
+          <div className="space-y-4 p-5">
+            <p className="rounded-[6px] bg-danger-soft px-4 py-3 text-[13px] text-danger">
+              การลบย้อนกลับไม่ได้จากหน้าเว็บ · ประวัติการซิงก์และทะเบียนยาจะไม่ถูกลบ ·
+              หลังล้างแล้ว Agent จะดึงข้อมูลช่วงนั้นเข้ามาใหม่ในรอบถัดไป
+              หากไม่ต้องการให้กลับมา ต้องหยุด Agent หรือถอนสิทธิ์ก่อน
+            </p>
+            {rows.map((facility) => (
+              <details
+                key={facility.id}
+                className="rounded-[8px] border border-line bg-raised/40 px-4 py-3"
+              >
+                <summary className="cursor-pointer text-[13.5px] font-medium text-ink">
+                  {facility.name}
+                  <span className="ml-2 text-xs font-normal text-muted">{facility.code}</span>
+                </summary>
+                <div className="mt-3">
+                  <FacilityPurgeForm
+                    facilityId={facility.id}
+                    facilityCode={facility.code}
+                    facilityName={facility.name}
+                  />
+                </div>
+              </details>
+            ))}
+          </div>
+        </Card>
+      ) : null}
     </>
   );
 }

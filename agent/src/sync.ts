@@ -703,7 +703,35 @@ export class SyncRunner {
     });
 
     log.debug("heartbeat acknowledged", { config: response.config });
+    this.adoptCentralWatermark(response.config.lastSyncedVisitDate);
     return response.config;
+  }
+
+  /**
+   * Trusts the central watermark whenever it is behind this agent's own.
+   *
+   * The agent decides where an incremental run starts from its local state, so
+   * data removed at the centre - an administrator clearing a range for a
+   * สถานบริการ - would never be collected again: the agent still believes it
+   * delivered that window, and nothing would ever contradict it.
+   *
+   * Central knows what it actually holds, so when it reports an older
+   * watermark than the local one, the local one is wrong and is pulled back to
+   * match. Only ever backwards: a central value that is ahead means another
+   * machine delivered rows this agent has not read, which is not this agent's
+   * cue to skip them.
+   */
+  private adoptCentralWatermark(central: string | null): void {
+    const state = loadState();
+    const local = state.lastSyncedVisitDate;
+    if (local === central) return;
+    if (central !== null && (local === null || central >= local)) return;
+
+    log.info("ปรับ watermark ตามศูนย์กลาง (ข้อมูลปลายทางถูกล้างบางส่วน)", {
+      local,
+      central,
+    });
+    saveState({ ...state, lastSyncedVisitDate: central });
   }
 }
 

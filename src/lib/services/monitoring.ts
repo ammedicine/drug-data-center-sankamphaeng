@@ -134,7 +134,7 @@ export async function listSyncBatches(
       batchRef: syncBatches.batchRef,
       facilityCode: facilities.code,
       facilityName: facilities.name,
-      agentName: agents.name,
+      agentName: sql<string>`COALESCE(${agents.name}, 'Agent ที่ถูกลบแล้ว')`,
       mode: syncBatches.mode,
       status: syncBatches.status,
       startedAt: syncBatches.startedAt,
@@ -146,7 +146,9 @@ export async function listSyncBatches(
     })
     .from(syncBatches)
     .innerJoin(facilities, eq(facilities.id, syncBatches.facilityId))
-    .innerJoin(agents, eq(agents.id, syncBatches.agentId))
+    // Left, not inner: deleting an agent must not delete the record of what it
+    // did. A batch whose agent is gone still belongs in the history.
+    .leftJoin(agents, eq(agents.id, syncBatches.agentId))
     .where(parts.length ? (and(...parts) as SQL) : undefined)
     .orderBy(desc(syncBatches.startedAt))
     .limit(limit);
@@ -189,7 +191,7 @@ export async function listRunningBatches(facilityIds: string[] | null): Promise<
   const rows = await db
     .select({
       agentId: agents.id,
-      agentName: agents.name,
+      agentName: sql<string>`COALESCE(${agents.name}, 'Agent ที่ถูกลบแล้ว')`,
       facilityCode: facilities.code,
       facilityName: facilities.name,
       batchRef: syncBatches.batchRef,
