@@ -32,7 +32,7 @@ export async function GET(req: Request) {
   if (!installer) {
     // Say which of the two it is: a file nobody published, or a server that
     // cannot reach the one that was. Both look identical from the browser.
-    const lookup = await lookupLatestAgentRelease();
+    const lookup = await lookupLatestAgentRelease("fresh");
     const reason =
       lookup.status === "not-configured"
         ? "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GITHUB_TOKEN"

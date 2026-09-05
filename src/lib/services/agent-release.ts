@@ -74,14 +74,23 @@ export type AgentReleaseLookup =
  * installer is a normal state to render, not an error to throw at a page that
  * is about something else.
  */
-export async function lookupLatestAgentRelease(): Promise<AgentReleaseLookup> {
+export async function lookupLatestAgentRelease(
+  /**
+   * "cached" is right for rendering a page - releases are cut by hand, and a
+   * lookup per visitor is waste. "fresh" is required when the answer decides
+   * which bytes to serve: a release published a minute ago must download, and
+   * an asset replaced in place must not be fetched by a stale id.
+   */
+  freshness: "cached" | "fresh" = "cached",
+): Promise<AgentReleaseLookup> {
   if (!token()) return { status: "not-configured" };
 
   try {
     const response = await fetch(API, {
       headers: headers("application/vnd.github+json"),
-      // One lookup every ten minutes is plenty; releases are cut by hand.
-      next: { revalidate: 600 },
+      ...(freshness === "fresh"
+        ? { cache: "no-store" as const }
+        : { next: { revalidate: 600 } }),
     });
     if (response.status === 404) return { status: "none-published" };
     if (response.status === 401 || response.status === 403) {
@@ -137,8 +146,9 @@ export async function openAgentInstaller(): Promise<{
   fileName: string;
   sizeBytes: number;
 } | null> {
-  const release = await getLatestAgentRelease();
-  if (!release) return null;
+  const lookup = await lookupLatestAgentRelease("fresh");
+  if (lookup.status !== "ok") return null;
+  const release = lookup.release;
 
   const response = await fetch(
     `https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${release.assetId}`,
