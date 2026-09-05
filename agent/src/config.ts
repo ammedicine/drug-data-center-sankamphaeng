@@ -13,7 +13,8 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { hostname } from "node:os";
+import { execFileSync } from "node:child_process";
+import { hostname, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 
 import * as dotenv from "dotenv";
@@ -59,8 +60,53 @@ export function dataDir(): string {
   return dir;
 }
 
+/**
+ * Where the central credential lives.
+ *
+ * It holds the HMAC secret that lets this machine speak for its สถานบริการ, so
+ * it belongs inside the agent's own data directory - the one the installer
+ * created and set permissions on. It used to be written one level up, which on
+ * a real install put it in the root of C:\ProgramData where every local user
+ * can read it; installs from that period are moved on first use.
+ */
 export function configPath(): string {
+  return resolve(dataDir(), "agent.config.json");
+}
+
+/** The pre-1.0.1 location, kept only so an existing install can be migrated. */
+function legacyConfigPath(): string {
   return resolve(dataDir(), "..", "agent.config.json");
+}
+
+/**
+ * Locks a file down to SYSTEM, Administrators and the account that owns it.
+ *
+ * Node's file mode is a no-op on Windows - it only toggles the read-only bit -
+ * so the POSIX 0600 below protects nothing there. icacls is what actually
+ * removes the inherited "Users can read" entry.
+ */
+function restrictToOwner(path: string): void {
+  if (process.platform !== "win32") return;
+  try {
+    // SYSTEM and Administrators by SID, so this does not depend on the
+    // language of the Windows install; the owner by bare username, which
+    // icacls resolves against the machine or its domain.
+    execFileSync(
+      "icacls",
+      [
+        path,
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:F",
+        "*S-1-5-32-544:F",
+        `${userInfo().username}:F`,
+      ],
+      { stdio: "ignore" },
+    );
+  } catch {
+    // An unusual account name or a locked-down host can make this fail; the
+    // agent must still run, and the file is no worse off than before.
+  }
 }
 
 export function statePath(): string {
@@ -90,7 +136,15 @@ export function centralApiUrl(): string {
 
 export function loadCredential(): AgentCredentialFile | null {
   const path = configPath();
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) {
+    const legacy = legacyConfigPath();
+    if (legacy !== path && existsSync(legacy)) {
+      renameSync(legacy, path);
+      restrictToOwner(path);
+    } else {
+      return null;
+    }
+  }
   return JSON.parse(readFileSync(path, "utf8")) as AgentCredentialFile;
 }
 
@@ -109,8 +163,9 @@ export function saveCredential(credential: AgentCredentialFile): void {
   try {
     chmodSync(path, 0o600);
   } catch {
-    // Windows ignores POSIX modes; ACLs are handled by the installer instead.
+    // Windows ignores POSIX modes.
   }
+  restrictToOwner(path);
 }
 
 export function loadState(): AgentState {

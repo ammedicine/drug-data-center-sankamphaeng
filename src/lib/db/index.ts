@@ -18,7 +18,17 @@ function createPool(): mysql.Pool {
     );
   }
 
-  // TiDB Cloud requires TLS; serverless functions must keep the pool small.
+  // TiDB Cloud requires TLS, and this connection carries every patient-free
+  // but facility-identifying row in the system, so the encryption is not left
+  // to the connection string: a URL that tries to turn off certificate
+  // verification is refused rather than quietly honoured.
+  if (/ssl=/i.test(url) && /rejectUnauthorized["'\s:=]+false/i.test(decodeURIComponent(url))) {
+    throw new Error(
+      "DATABASE_URL disables TLS certificate verification. Remove rejectUnauthorized=false; " +
+        "TiDB Cloud presents a publicly trusted certificate and does not need it.",
+    );
+  }
+
   return mysql.createPool({
     uri: url,
     // A report page fires up to eight aggregates at once; a pool smaller than
@@ -28,7 +38,9 @@ function createPool(): mysql.Pool {
     enableKeepAlive: true,
     timezone: "Z",
     charset: "utf8mb4_general_ci",
-    ssl: url.includes("ssl=") ? undefined : { minVersion: "TLSv1.2" },
+    // Verified TLS 1.2+, always. Only an explicit CA bundle in the URL is
+    // allowed to add to this; nothing may weaken it.
+    ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
   });
 }
 
