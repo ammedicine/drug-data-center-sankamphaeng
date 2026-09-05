@@ -76,12 +76,15 @@ export type AgentReleaseLookup =
  */
 export async function lookupLatestAgentRelease(
   /**
-   * "cached" is right for rendering a page - releases are cut by hand, and a
-   * lookup per visitor is waste. "fresh" is required when the answer decides
-   * which bytes to serve: a release published a minute ago must download, and
-   * an asset replaced in place must not be fetched by a stale id.
+   * Defaults to "fresh" because the number on the page has to describe the
+   * file the button hands over. Caching the page lookup for ten minutes while
+   * the download resolved live meant that for ten minutes after publishing a
+   * release, the card advertised the previous version and delivered the new
+   * one - worse than either being briefly slow or briefly stale, because the
+   * two disagreed. "cached" remains for any caller that only wants to know
+   * whether a release exists at all.
    */
-  freshness: "cached" | "fresh" = "cached",
+  freshness: "cached" | "fresh" = "fresh",
 ): Promise<AgentReleaseLookup> {
   if (!token()) return { status: "not-configured" };
 
