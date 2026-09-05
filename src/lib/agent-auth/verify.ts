@@ -51,6 +51,8 @@ export interface AuthenticatedAgent {
   lastSyncedVisitDate: string | null;
   disabled: boolean;
   syncRequested: boolean;
+  syncRequestedFrom: string | null;
+  syncRequestedTo: string | null;
   verifyRequested: boolean;
 }
 
@@ -100,6 +102,8 @@ export async function authenticateAgent(
       reprocessDays: agents.reprocessDays,
       lastSyncedVisitDate: agents.lastSyncedVisitDate,
       syncRequestedAt: agents.syncRequestedAt,
+      syncRequestedFrom: agents.syncRequestedFrom,
+      syncRequestedTo: agents.syncRequestedTo,
       verifyRequestedAt: agents.verifyRequestedAt,
       lastSyncAt: agents.lastSyncAt,
       facilityId: facilities.id,
@@ -161,9 +165,17 @@ export async function authenticateAgent(
     lastSyncedVisitDate: row.lastSyncedVisitDate ? String(row.lastSyncedVisitDate) : null,
     // status DISABLED is rejected above, so an authenticated agent may always run
     disabled: false,
+    syncRequestedFrom: row.syncRequestedFrom ?? null,
+    syncRequestedTo: row.syncRequestedTo ?? null,
+    // A plain "sync now" is satisfied by the next sync of any kind. A request
+    // that names a window is not: it stays outstanding until that window has
+    // actually been read, because any other run - the one the agent starts on
+    // launch, or the hourly schedule - would otherwise consume the request
+    // without ever looking at the days that were asked for.
     syncRequested: Boolean(
-      row.syncRequestedAt &&
-        (!row.lastSyncAt || row.syncRequestedAt.getTime() > row.lastSyncAt.getTime()),
+      row.syncRequestedFrom ||
+        (row.syncRequestedAt &&
+          (!row.lastSyncAt || row.syncRequestedAt.getTime() > row.lastSyncAt.getTime())),
     ),
     verifyRequested: Boolean(
       row.verifyRequestedAt &&

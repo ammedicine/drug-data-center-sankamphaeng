@@ -160,6 +160,13 @@ export const agents = mysqlTable(
     failedCount: int("failed_count").notNull().default(0),
     /** set by an operator pressing "Sync Now"; the agent picks it up on its next heartbeat */
     syncRequestedAt: datetime("sync_requested_at"),
+    /**
+     * Service dates the operator asked for. Empty means "carry on from the
+     * watermark"; set means re-read exactly this window, which is how someone
+     * recovers a period they know is wrong without waiting for the schedule.
+     */
+    syncRequestedFrom: date("sync_requested_from", { mode: "string" }),
+    syncRequestedTo: date("sync_requested_to", { mode: "string" }),
     /** same, but asks the agent to reconcile every month against JHCIS */
     verifyRequestedAt: datetime("verify_requested_at"),
     enrolledAt: datetime("enrolled_at"),

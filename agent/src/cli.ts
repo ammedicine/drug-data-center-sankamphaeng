@@ -327,13 +327,18 @@ async function run(): Promise<void> {
     }
   };
 
-  const runOnce = async (reason: string) => {
+  const runOnce = async (reason: string, window?: { from: string; to: string }) => {
     if (stopping || running) return;
     running = true;
     try {
-      log.info("sync triggered", { reason });
+      log.info("sync triggered", { reason, ...(window ?? {}) });
       await safeHeartbeat("SYNCING");
-      const result = await runner.run({ mode: "INCREMENTAL" });
+      // A window asked for from the web is read exactly as given, even where
+      // the agent believes it already delivered those days - that is the whole
+      // point of asking for it.
+      const result = await runner.run(
+        window ? { mode: "MANUAL_RANGE", from: window.from, to: window.to } : { mode: "INCREMENTAL" },
+      );
       await safeHeartbeat(result.pendingChunks ? "ERROR" : "ONLINE");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -396,7 +401,9 @@ async function run(): Promise<void> {
           return;
         }
         if (config?.syncRequested) {
-          await runOnce("central request");
+          const from = config.syncRequestedFrom;
+          const to = config.syncRequestedTo;
+          await runOnce("central request", from && to ? { from, to } : undefined);
           return;
         }
       }

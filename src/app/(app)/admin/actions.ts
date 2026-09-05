@@ -309,7 +309,19 @@ export async function requestSyncAction(
     );
   }
 
-  await db.update(agents).set({ syncRequestedAt: new Date() }).where(eq(agents.id, agentId));
+  // An explicit window re-reads that period whatever the agent thinks it has
+  // already delivered; without one it simply resumes from the watermark.
+  const from = String(formData.get("from") ?? "").trim() || null;
+  const to = String(formData.get("to") ?? "").trim() || null;
+  if ((from && !to) || (to && !from)) {
+    return fail("เลือกช่วงวันที่ต้องระบุทั้งวันเริ่มและวันสิ้นสุด");
+  }
+  if (from && to && from > to) return fail("วันเริ่มต้องไม่เกินวันสิ้นสุด");
+
+  await db
+    .update(agents)
+    .set({ syncRequestedAt: new Date(), syncRequestedFrom: from, syncRequestedTo: to })
+    .where(eq(agents.id, agentId));
 
   await writeAudit({
     actorType: "USER",
@@ -329,8 +341,11 @@ export async function requestSyncAction(
   // agent picks up on its next heartbeat. Promising "within 5 minutes" when
   // the agent has not called home for hours is simply untrue: the request is
   // still recorded and will run when it comes back, and that is what to say.
+  const window = from ? ` เฉพาะวันที่รับบริการ ${from} ถึง ${to}` : "";
   if (state === "ONLINE") {
-    return { success: `ส่งคำสั่งซิงก์ไปยัง ${agent.name} แล้ว Agent จะเริ่มภายใน 5 นาที` };
+    return {
+      success: `ส่งคำสั่งซิงก์ไปยัง ${agent.name} แล้ว${window} Agent จะเริ่มภายใน 5 นาที`,
+    };
   }
 
   const lastSeen = agent.lastHeartbeatAt
@@ -338,7 +353,7 @@ export async function requestSyncAction(
     : "ยังไม่เคยติดต่อเข้ามาเลย";
   return {
     success:
-      `บันทึกคำสั่งซิงก์ไว้แล้ว แต่ ${agent.name} ยังออฟไลน์ (${lastSeen}) ` +
+      `บันทึกคำสั่งซิงก์ไว้แล้ว${window} แต่ ${agent.name} ยังออฟไลน์ (${lastSeen}) ` +
       `จะเริ่มทำงานทันทีที่โปรแกรมกลับมาออนไลน์ - ตรวจว่าเครื่องที่ รพ.สต. เปิดอยู่และโปรแกรมทำงานอยู่ในถาดระบบ`,
   };
 }

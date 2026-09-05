@@ -294,6 +294,17 @@ export async function completeBatch(input: {
   lastVisitDate: string | null;
   errorMessage?: string | null;
 }): Promise<void> {
+  const [batch] = await db
+    .select({ rangeFrom: syncBatches.rangeFrom, rangeTo: syncBatches.rangeTo })
+    .from(syncBatches)
+    .where(eq(syncBatches.id, input.batchId))
+    .limit(1);
+  const servedRequest = Boolean(
+    input.agent.syncRequestedFrom &&
+      batch?.rangeFrom === input.agent.syncRequestedFrom &&
+      batch?.rangeTo === input.agent.syncRequestedTo,
+  );
+
   await db
     .update(syncBatches)
     .set({
@@ -313,7 +324,22 @@ export async function completeBatch(input: {
         lastSyncAt: new Date(),
         syncCount: sql`${agents.syncCount} + 1`,
         lastError: null,
-        ...(input.lastVisitDate ? { lastSyncedVisitDate: input.lastVisitDate } : {}),
+        // Forward only. A manual back-fill of an old period reports an older
+        // last visit date than the watermark already holds, and writing it
+        // straight in would tell the agent it has nothing since - so every
+        // request to re-read one week in July would drag the whole autumn back
+        // through the pipe. Purging is the only thing that moves this
+        // backwards, and it does so deliberately.
+        ...(input.lastVisitDate
+          ? {
+              lastSyncedVisitDate: sql`GREATEST(COALESCE(${agents.lastSyncedVisitDate}, '1900-01-01'), ${input.lastVisitDate})`,
+            }
+          : {}),
+        // Clear the requested window only when this batch is the one that read
+        // it. Clearing on any successful sync let an unrelated run - the one
+        // the agent starts the moment it launches - throw away a request that
+        // had not been carried out yet.
+        ...(servedRequest ? { syncRequestedFrom: null, syncRequestedTo: null } : {}),
       })
       .where(eq(agents.id, input.agent.agentId));
   } else {

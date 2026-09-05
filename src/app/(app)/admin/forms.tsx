@@ -216,11 +216,40 @@ export function AgentRevokeForm({ agentId }: { agentId: string }) {
 
 export function SyncNowForm({ agentId }: { agentId: string }) {
   const [state, action] = useActionState<ActionState, FormData>(requestSyncAction, {});
+  const [pickRange, setPickRange] = useState(false);
+
   return (
     <div className="space-y-2">
-      <form action={action}>
+      <form action={action} className="space-y-2">
         <input type="hidden" name="agentId" value={agentId} />
-        <Submit label="สั่งซิงก์เดี๋ยวนี้" />
+
+        {/* Without a window the agent carries on from where it left off, which
+            is what is wanted almost every time. The window is for the case it
+            cannot handle by itself: a period already delivered but known to be
+            wrong, which an incremental run would never look at again. */}
+        {pickRange ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="text-xs text-muted">
+              ตั้งแต่วันที่รับบริการ
+              <input type="date" name="from" required className={`${inputClass} mt-1`} />
+            </label>
+            <label className="text-xs text-muted">
+              ถึงวันที่รับบริการ
+              <input type="date" name="to" required className={`${inputClass} mt-1`} />
+            </label>
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Submit label={pickRange ? "สั่งซิงก์ตามช่วงที่เลือก" : "สั่งซิงก์เดี๋ยวนี้"} />
+          <button
+            type="button"
+            onClick={() => setPickRange((value) => !value)}
+            className="text-xs text-brand transition-colors duration-150 hover:text-brand-hover"
+          >
+            {pickRange ? "ยกเลิกการเลือกช่วง" : "เลือกช่วงวันที่"}
+          </button>
+        </div>
       </form>
       <Feedback state={state} />
     </div>

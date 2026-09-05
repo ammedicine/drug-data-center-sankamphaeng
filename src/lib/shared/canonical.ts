@@ -185,6 +185,13 @@ export interface AgentConfigResponse {
   disabled: boolean;
   /** an operator asked for an immediate sync (PROJECT_SPEC section 13) */
   syncRequested: boolean;
+  /**
+   * Service dates the operator asked to re-read. Null means resume from the
+   * watermark; a range means read exactly that window, whether or not the
+   * agent believes it already delivered it.
+   */
+  syncRequestedFrom?: string | null;
+  syncRequestedTo?: string | null;
   /** an operator asked for a full month-by-month reconciliation */
   verifyRequested: boolean;
 }

@@ -79,6 +79,8 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       uploadChunkSize: UPLOAD_CHUNK_SIZE,
       disabled: agent.disabled,
       syncRequested: agent.syncRequested,
+      syncRequestedFrom: agent.syncRequestedFrom,
+      syncRequestedTo: agent.syncRequestedTo,
       verifyRequested: agent.verifyRequested,
     },
   });
