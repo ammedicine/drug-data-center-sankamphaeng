@@ -9,7 +9,7 @@ import {
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
-import { getLatestAgentRelease } from "@/lib/services/agent-release";
+import { lookupLatestAgentRelease } from "@/lib/services/agent-release";
 import { Building2, Download, RefreshCcw, Server, TriangleAlert } from "lucide-react";
 import { canTriggerSync, isSuperAdmin, requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
 
@@ -34,7 +34,7 @@ export default async function SyncPage() {
     listSyncBatches(scope.facilityIds, 50),
     getFleetSummary(scope.facilityIds),
     listRunningBatches(scope.facilityIds),
-    getLatestAgentRelease(),
+    lookupLatestAgentRelease(),
   ]);
 
   return (
@@ -72,16 +72,18 @@ export default async function SyncPage() {
         description="ติดตั้งบนเครื่องในเครือข่ายของสถานบริการที่มองเห็น JHCISDB"
       >
         <div className="flex flex-wrap items-center justify-between gap-4 p-5">
-          {release ? (
+          {release.status === "ok" ? (
             <>
               <div className="min-w-[240px]">
                 <p className="text-[13.5px] text-ink">
                   เวอร์ชันล่าสุด{" "}
-                  <span className="numeric font-semibold">{release.version}</span>
+                  <span className="numeric font-semibold">{release.release.version}</span>
                 </p>
                 <p className="mt-0.5 text-xs text-muted">
-                  {release.fileName} · {(release.sizeBytes / 1024 / 1024).toFixed(1)} MB
-                  {release.publishedAt ? ` · เผยแพร่ ${formatDateTime(release.publishedAt)}` : ""}
+                  {release.release.fileName} · {(release.release.sizeBytes / 1024 / 1024).toFixed(1)} MB
+                  {release.release.publishedAt
+                    ? ` · เผยแพร่ ${formatDateTime(release.release.publishedAt)}`
+                    : ""}
                 </p>
                 <p className="mt-1.5 text-xs text-muted">
                   ติดตั้งทับเวอร์ชันเดิมได้ทันที ตัวติดตั้งจะปิดโปรแกรมที่ทำงานอยู่
@@ -98,8 +100,11 @@ export default async function SyncPage() {
             </>
           ) : (
             <p className="text-[13.5px] text-muted">
-              ยังไม่มีไฟล์ติดตั้งเผยแพร่ — ผู้ดูแลระบบต้องสร้าง release พร้อมไฟล์
-              SDCAgent-Setup-x.y.z.exe ก่อน
+              {release.status === "not-configured"
+                ? "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GITHUB_TOKEN จึงดึงไฟล์ติดตั้งมาแสดงไม่ได้"
+                : release.status === "none-published"
+                  ? "ยังไม่มีไฟล์ติดตั้งเผยแพร่ — ผู้ดูแลระบบต้องสร้าง release พร้อมไฟล์ SDCAgent-Setup-x.y.z.exe ก่อน"
+                  : `ดึงข้อมูลไฟล์ติดตั้งไม่สำเร็จ: ${release.detail}`}
             </p>
           )}
         </div>

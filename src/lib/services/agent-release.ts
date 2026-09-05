@@ -56,37 +56,75 @@ function headers(accept: string): HeadersInit {
 }
 
 /**
- * The latest published release, or null when there is none yet, the repository
- * is unreachable, or no token is configured. A missing installer is a normal
- * state to render, not an error to throw at a page that is about something
- * else.
+ * Why there is nothing to download, when there is nothing to download.
+ *
+ * These are different situations for whoever is reading the page: "no release
+ * has been cut" is for the person who builds the Agent, "this server has no
+ * token" is for whoever deploys it. Collapsing both into an empty card sent
+ * people looking for a missing file that was published all along.
  */
-export async function getLatestAgentRelease(): Promise<AgentRelease | null> {
+export type AgentReleaseLookup =
+  | { status: "ok"; release: AgentRelease }
+  | { status: "not-configured" }
+  | { status: "none-published" }
+  | { status: "unavailable"; detail: string };
+
+/**
+ * The latest published release, or the reason there is not one. A missing
+ * installer is a normal state to render, not an error to throw at a page that
+ * is about something else.
+ */
+export async function lookupLatestAgentRelease(): Promise<AgentReleaseLookup> {
+  if (!token()) return { status: "not-configured" };
+
   try {
     const response = await fetch(API, {
       headers: headers("application/vnd.github+json"),
       // One lookup every ten minutes is plenty; releases are cut by hand.
       next: { revalidate: 600 },
     });
-    if (!response.ok) return null;
+    if (response.status === 404) return { status: "none-published" };
+    if (response.status === 401 || response.status === 403) {
+      return { status: "unavailable", detail: "GITHUB_TOKEN ไม่มีสิทธิ์อ่าน repository นี้" };
+    }
+    if (!response.ok) {
+      return { status: "unavailable", detail: `GitHub ตอบกลับ ${response.status}` };
+    }
 
     const release = (await response.json()) as GitHubRelease;
-    if (release.draft) return null;
+    if (release.draft) return { status: "none-published" };
 
     const asset = release.assets?.find((item) => INSTALLER_PATTERN.test(item.name));
-    if (!asset) return null;
+    if (!asset) {
+      return {
+        status: "unavailable",
+        detail: `release ${release.tag_name} ไม่มีไฟล์ชื่อ SDCAgent-Setup-*.exe แนบไว้`,
+      };
+    }
 
     return {
-      version: release.tag_name,
-      publishedAt: release.published_at,
-      fileName: asset.name,
-      sizeBytes: asset.size,
-      assetId: asset.id,
-      notes: release.body?.trim() || null,
+      status: "ok",
+      release: {
+        version: release.tag_name,
+        publishedAt: release.published_at,
+        fileName: asset.name,
+        sizeBytes: asset.size,
+        assetId: asset.id,
+        notes: release.body?.trim() || null,
+      },
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      status: "unavailable",
+      detail: error instanceof Error ? error.message : "ติดต่อ GitHub ไม่ได้",
+    };
   }
+}
+
+/** Convenience for callers that only care whether there is a file. */
+export async function getLatestAgentRelease(): Promise<AgentRelease | null> {
+  const lookup = await lookupLatestAgentRelease();
+  return lookup.status === "ok" ? lookup.release : null;
 }
 
 /**

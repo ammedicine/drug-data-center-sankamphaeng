@@ -12,7 +12,7 @@
  */
 import { NextResponse } from "next/server";
 
-import { openAgentInstaller } from "@/lib/services/agent-release";
+import { lookupLatestAgentRelease, openAgentInstaller } from "@/lib/services/agent-release";
 import { DOWNLOAD_RULE, rateLimit } from "@/lib/security/rate-limit";
 import { clientIp } from "@/lib/services/audit";
 
@@ -30,7 +30,18 @@ export async function GET(req: Request) {
 
   const installer = await openAgentInstaller();
   if (!installer) {
-    return new NextResponse("ยังไม่มีไฟล์ติดตั้งเผยแพร่ กรุณาติดต่อผู้ดูแลระบบ", { status: 404 });
+    // Say which of the two it is: a file nobody published, or a server that
+    // cannot reach the one that was. Both look identical from the browser.
+    const lookup = await lookupLatestAgentRelease();
+    const reason =
+      lookup.status === "not-configured"
+        ? "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า GITHUB_TOKEN"
+        : lookup.status === "unavailable"
+          ? lookup.detail
+          : "ยังไม่มีไฟล์ติดตั้งเผยแพร่";
+    return new NextResponse(`ดาวน์โหลดไม่ได้: ${reason} — กรุณาติดต่อผู้ดูแลระบบ`, {
+      status: lookup.status === "none-published" ? 404 : 503,
+    });
   }
 
   return new NextResponse(installer.body, {
