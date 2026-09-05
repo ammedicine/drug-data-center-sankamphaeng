@@ -27,6 +27,7 @@ const auth = secret(process.env.AUTH_SECRET);
 const signing = secret(process.env.AGENT_SIGNING_SECRET);
 const enrollment = secret(process.env.AGENT_ENROLLMENT_SECRET);
 const baseUrl = process.env.API_BASE_URL || DEFAULT_URL;
+const github = process.env.GITHUB_TOKEN ?? "";
 
 const body = `# สร้างโดย npm run env:vercel เมื่อ ${new Date().toISOString()}
 # ไฟล์นี้มีความลับจริง - ห้าม commit (อยู่ใน .gitignore แล้ว)
@@ -39,6 +40,10 @@ AGENT_ENROLLMENT_SECRET="${enrollment.value}"
 API_BASE_URL="${baseUrl}"
 AGENT_SIGNATURE_MAX_SKEW_SECONDS="300"
 DATABASE_POOL_SIZE="3"
+
+# ดึงตัวติดตั้ง Agent จาก GitHub Release ของ repo ที่เป็น private
+# ถ้าเว้นว่าง หน้าสถานะการซิงก์จะบอกว่ายังไม่มีไฟล์เผยแพร่ (ไม่ error)
+GITHUB_TOKEN="${github}"
 `;
 
 const target = resolve(process.cwd(), ".env.vercel");

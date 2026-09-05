@@ -777,8 +777,35 @@ class AgentApp(ctk.CTk):
         os._exit(0)
 
 
+#: ชื่อเดียวกับ AppMutex ใน sdc-agent.iss - ตัวติดตั้งใช้ตรวจว่าโปรแกรมยังเปิดอยู่ไหม
+#: ถ้าเปลี่ยนชื่อนี้ ต้องแก้ในไฟล์ .iss ให้ตรงกันด้วย
+APP_MUTEX = "SDCAgentRunningMutex"
+
+
+def _claim_single_instance() -> object | None:
+    """
+    จอง mutex ของ Windows ไว้ตลอดอายุโปรแกรม
+
+    ทำสองอย่างพร้อมกัน: กันเปิดซ้อนหลายหน้าต่าง (ซึ่งจะแย่งกันเขียน status.json)
+    และทำให้ตัวติดตั้งเวอร์ชันใหม่รู้ว่ายังมีตัวเก่าทำงานอยู่ แล้วขอปิดก่อนติดตั้ง
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        return None
+    return handle
+
+
 def main() -> None:
     start_in_tray = "--tray" in sys.argv
+    # เก็บ handle ไว้ในตัวแปร local ของ main เพื่อไม่ให้ถูกปล่อยคืนก่อนโปรแกรมจบ
+    mutex = _claim_single_instance()
+    if mutex is None and os.name == "nt":
+        # เปิดอยู่แล้ว - ไม่ต้องเปิดซ้ำ ผู้ใช้กดไอคอนในถาดระบบได้เลย
+        return
     app = AgentApp(start_in_tray=start_in_tray)
     app.mainloop()
 

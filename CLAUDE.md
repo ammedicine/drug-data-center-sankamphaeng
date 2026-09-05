@@ -41,6 +41,23 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
 - เครื่องปลายทางไม่ต้องมี Node/Python เพราะตัวติดตั้งแนบ `node.exe` + `agent.js` + exe ของหน้าจอ
 - **เครื่องนี้ยังไม่ได้ติดตั้ง Inno Setup** (ISCC.exe) จึงยัง build ตัวติดตั้งจริงไม่ได้
 
+### การแจกตัวติดตั้ง (repo เป็น private ตั้งแต่ 2026-09-05)
+- โค้ดปิดหมด แต่ผู้ใช้/คนภายนอกโหลดตัวติดตั้งได้ที่ **`/download/agent`** (ไม่ต้องล็อกอิน)
+  route นี้ดึงไฟล์จาก GitHub Release ด้วย `GITHUB_TOKEN` ฝั่ง server แล้ว stream ต่อ
+  -> token ไม่เคยถึง browser และ route **ไม่รับพารามิเตอร์ใด ๆ** จึงชี้ไป repo/ไฟล์อื่นไม่ได้
+- หน้า `/sync` มีการ์ดบอกเวอร์ชัน (git tag), ขนาดไฟล์, วันที่เผยแพร่ + ปุ่มดาวน์โหลด
+- ชื่อไฟล์ต้องเป็น `SDCAgent-Setup-<version>.exe` (pattern อยู่ใน `agent-release.ts`)
+- ออกเวอร์ชันใหม่: `git tag v1.0.2` -> `agent\installeruild.ps1` (อ่านเวอร์ชันจาก git tag เอง)
+  -> `gh release create v1.0.2 <setup.exe>` — ขั้นตอนเต็มอยู่ใน `.NOTES` ของ build.ps1
+
+### การอัปเกรดทับเวอร์ชันเก่า (ทำในตัวติดตั้งแล้ว)
+1. `taskkill /F /T /IM SDCAgent.exe` ปิดทั้ง tray และ node.exe ที่เป็นลูก
+2. ลบ scheduled task เก่าถ้ามี
+3. รัน uninstaller ของเวอร์ชันเดิมแบบ `/VERYSILENT` แล้วค่อยวางไฟล์ใหม่
+4. **ห้ามแตะ `%ProgramData%\SDCAgent`** (คิวที่ยังส่งไม่สำเร็จ + credential)
+5. **ห้ามเปลี่ยน `AppId`** ใน .iss ไม่งั้นเวอร์ชันเก่าจะค้างคู่กับตัวใหม่ กลายเป็น agent 2 ตัว
+- GUI จอง mutex `SDCAgentRunningMutex` = ตัวเดียวกับ `AppMutex` ใน .iss (กันเปิดซ้อน + ให้ installer รู้ว่ายังเปิดอยู่)
+
 ## 2. โครงสร้าง repo (คุมให้อยู่แค่นี้)
 
 ```

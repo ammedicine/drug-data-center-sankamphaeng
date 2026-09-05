@@ -43,6 +43,13 @@ export const EXPORT_RULE: RateLimitRule = {
   blockMs: 5 * 60_000,
 };
 
+/** The installer is a large file served to anonymous callers. */
+export const DOWNLOAD_RULE: RateLimitRule = {
+  limit: 6,
+  windowMs: 10 * 60_000,
+  blockMs: 10 * 60_000,
+};
+
 export interface RateLimitResult {
   allowed: boolean;
   /** seconds until the caller may try again (only when blocked) */

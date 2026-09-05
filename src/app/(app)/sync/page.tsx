@@ -9,7 +9,8 @@ import {
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
-import { Building2, RefreshCcw, Server, TriangleAlert } from "lucide-react";
+import { getLatestAgentRelease } from "@/lib/services/agent-release";
+import { Building2, Download, RefreshCcw, Server, TriangleAlert } from "lucide-react";
 import { canTriggerSync, isSuperAdmin, requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
 
 import { SyncNowForm, VerifyDataForm } from "../admin/forms";
@@ -28,11 +29,12 @@ export default async function SyncPage() {
   const scope = resolveFacilityScope(user);
   const canSeeTechnical = user.role !== "USER";
 
-  const [agentRows, batches, fleet, running] = await Promise.all([
+  const [agentRows, batches, fleet, running, release] = await Promise.all([
     listAgents(scope.facilityIds),
     listSyncBatches(scope.facilityIds, 50),
     getFleetSummary(scope.facilityIds),
     listRunningBatches(scope.facilityIds),
+    getLatestAgentRelease(),
   ]);
 
   return (
@@ -63,6 +65,45 @@ export default async function SyncPage() {
           icon={Building2}
         />
       </div>
+
+      <Card
+        className="mt-5"
+        title="โปรแกรมเชื่อมข้อมูล JHCIS (Agent)"
+        description="ติดตั้งบนเครื่องในเครือข่ายของสถานบริการที่มองเห็น JHCISDB"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-4 p-5">
+          {release ? (
+            <>
+              <div className="min-w-[240px]">
+                <p className="text-[13.5px] text-ink">
+                  เวอร์ชันล่าสุด{" "}
+                  <span className="numeric font-semibold">{release.version}</span>
+                </p>
+                <p className="mt-0.5 text-xs text-muted">
+                  {release.fileName} · {(release.sizeBytes / 1024 / 1024).toFixed(1)} MB
+                  {release.publishedAt ? ` · เผยแพร่ ${formatDateTime(release.publishedAt)}` : ""}
+                </p>
+                <p className="mt-1.5 text-xs text-muted">
+                  ติดตั้งทับเวอร์ชันเดิมได้ทันที ตัวติดตั้งจะปิดโปรแกรมที่ทำงานอยู่
+                  และถอนเวอร์ชันเก่าออกให้เอง โดยไม่ลบข้อมูลที่ยังส่งไม่สำเร็จ
+                </p>
+              </div>
+              <a
+                href="/download/agent"
+                className="inline-flex items-center gap-2 rounded-[6px] bg-brand px-3.5 py-2 text-[13.5px] font-medium text-white transition-colors duration-150 hover:bg-brand-hover"
+              >
+                <Download aria-hidden className="size-4" />
+                ดาวน์โหลดตัวติดตั้ง
+              </a>
+            </>
+          ) : (
+            <p className="text-[13.5px] text-muted">
+              ยังไม่มีไฟล์ติดตั้งเผยแพร่ — ผู้ดูแลระบบต้องสร้าง release พร้อมไฟล์
+              SDCAgent-Setup-x.y.z.exe ก่อน
+            </p>
+          )}
+        </div>
+      </Card>
 
       {running.length ? (
         <Card
