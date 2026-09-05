@@ -160,6 +160,16 @@ export interface HeartbeatRequest {
   schemaReport?: SchemaReport | null;
   lastError?: string | null;
   pendingBatches?: number;
+  /**
+   * The network card this agent actually reaches Central through. Reported so
+   * an operator can tell which physical machine a สถานบริการ is syncing from -
+   * useful when a clinic has several PCs and one of them is stale.
+   */
+  network?: {
+    macAddress: string | null;
+    ipAddress: string | null;
+    interfaceName: string | null;
+  } | null;
 }
 
 export interface AgentConfigResponse {

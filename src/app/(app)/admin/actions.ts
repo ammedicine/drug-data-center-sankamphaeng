@@ -5,7 +5,7 @@ import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 
 import { issueEnrollmentToken } from "@/lib/agent-auth/enrollment";
-import { effectiveStatus } from "@/lib/services/monitoring";
+import { effectiveStatus, listRunningBatches } from "@/lib/services/monitoring";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
 import {
@@ -181,6 +181,27 @@ export async function reissueEnrollmentTokenAction(
     createdByUserId: user.userId,
   });
 
+  // Whoever enrols a machine owns it, and it is named after their user id -
+  // a สถานบริการ with several PCs then reads as a list of people rather than a
+  // list of hostnames nobody recognises. A SUPER_ADMIN issuing a code on
+  // someone else's behalf does not take the agent from them.
+  if (user.role !== "SUPER_ADMIN") {
+    // The user id is not carried in the session token, so read it here rather
+    // than widening the token and forcing everyone to sign in again.
+    const [account] = await db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, user.userId))
+      .limit(1);
+    await db
+      .update(agents)
+      .set({
+        ownerUserId: user.userId,
+        ...(account?.username ? { name: account.username } : {}),
+      })
+      .where(eq(agents.id, agentId));
+  }
+
   await writeAudit({
     actorType: "USER",
     actorId: user.userId,
@@ -266,6 +287,19 @@ export async function requestSyncAction(
   const state = effectiveStatus(agent);
   if (state === "DISABLED") {
     return fail(`${agent.name} ถูกปิดใช้งานอยู่ จึงสั่งซิงก์ไม่ได้`);
+  }
+
+  // Two machines pulling the same สถานบริการ at once is not harmful - the
+  // record key makes every row idempotent - but it doubles the load on one
+  // JHCIS server and leaves whoever asked wondering why it is slow. Say who is
+  // already doing it rather than silently starting a second run.
+  const running = await listRunningBatches([agent.facilityId]);
+  const other = running.find((batch) => batch.agentId !== agentId);
+  if (other) {
+    return fail(
+      `สถานบริการของท่านกำลังดึงข้อมูลอยู่แล้ว โดย ${other.ownerName ?? other.agentName} ` +
+        `(คืบหน้า ${Math.round(other.progress * 100)}%) กรุณารอให้เสร็จก่อนแล้วค่อยสั่งใหม่`,
+    );
   }
 
   await db.update(agents).set({ syncRequestedAt: new Date() }).where(eq(agents.id, agentId));

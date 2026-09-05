@@ -125,6 +125,21 @@ export const agents = mysqlTable(
     version: varchar("version", { length: 40 }),
     installationId: varchar("installation_id", { length: 64 }),
     hostname: varchar("hostname", { length: 120 }),
+    /**
+     * The account that enrolled this agent. An agent is a machine acting for
+     * one person at one สถานบริการ, so the listing can show each user their
+     * own rather than everyone's.
+     */
+    ownerUserId: id("owner_user_id"),
+    /**
+     * The network card the agent actually reaches Central through - resolved
+     * from the local address of a real connection, not the first entry in the
+     * adapter list, so a Bluetooth or virtual adapter is never reported as the
+     * machine's identity.
+     */
+    macAddress: varchar("mac_address", { length: 32 }),
+    ipAddress: varchar("ip_address", { length: 45 }),
+    networkInterface: varchar("network_interface", { length: 80 }),
     /** reported by the agent from office.offid, validated against the facility */
     jhcisPcucode: char("jhcis_pcucode", { length: 5 }),
     jhcisVersion: varchar("jhcis_version", { length: 40 }),
@@ -154,6 +169,7 @@ export const agents = mysqlTable(
   },
   (t) => ({
     facilityIdx: index("agents_facility_idx").on(t.facilityId, t.status),
+    ownerIdx: index("agents_owner_idx").on(t.ownerUserId),
     heartbeatIdx: index("agents_heartbeat_idx").on(t.lastHeartbeatAt),
   }),
 );

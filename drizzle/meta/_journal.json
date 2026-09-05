@@ -43,6 +43,13 @@
       "when": 1788571221476,
       "tag": "0005_chemical_madripoor",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1788585859012,
+      "tag": "0006_flowery_pete_wisdom",
+      "breakpoints": true
     }
   ]
 }

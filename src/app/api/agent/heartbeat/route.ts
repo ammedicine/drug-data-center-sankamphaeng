@@ -23,6 +23,14 @@ const schema = z.object({
   schemaReport: z.record(z.unknown()).nullable().optional(),
   lastError: z.string().max(2000).nullable().optional(),
   pendingBatches: z.number().int().min(0).optional(),
+  network: z
+    .object({
+      macAddress: z.string().max(32).nullable(),
+      ipAddress: z.string().max(45).nullable(),
+      interfaceName: z.string().max(80).nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 
 /**
@@ -48,6 +56,11 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       mysqlVersion: body.mysqlVersion ?? null,
       jhcisVersion: body.jhcisVersion ?? null,
       ...(body.schemaReport ? { schemaReport: body.schemaReport } : {}),
+      // Only overwrite what the agent could actually determine, so a heartbeat
+      // sent while the network is confused does not erase a known-good card.
+      ...(body.network?.macAddress ? { macAddress: body.network.macAddress } : {}),
+      ...(body.network?.ipAddress ? { ipAddress: body.network.ipAddress } : {}),
+      ...(body.network?.interfaceName ? { networkInterface: body.network.interfaceName } : {}),
       ...(body.lastError ? { lastError: body.lastError, lastErrorAt: now } : {}),
     })
     .where(eq(agents.id, agent.agentId));

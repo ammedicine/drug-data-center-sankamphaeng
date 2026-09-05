@@ -37,8 +37,13 @@ export default async function SyncPage() {
   const scope = resolveFacilityScope(user);
   const canSeeTechnical = user.role !== "USER";
 
+  // A USER sees the machines they enrolled and nothing else. SUPER_ADMIN sees
+  // every facility, and a FACILITY_ADMIN sees its own สถานบริการ, because both
+  // are responsible for more than their own desk.
+  const ownAgentsOnly = user.role === "USER" ? user.userId : null;
+
   const [agentRows, batches, fleet, running, release] = await Promise.all([
-    listAgents(scope.facilityIds),
+    listAgents(scope.facilityIds, ownAgentsOnly),
     listSyncBatches(scope.facilityIds, 50),
     getFleetSummary(scope.facilityIds),
     listRunningBatches(scope.facilityIds),
@@ -235,7 +240,18 @@ export default async function SyncPage() {
               render: (row) => (
                 <>
                   <span className="font-medium text-ink">{row.name}</span>
-                  <CellMeta>{row.hostname ?? "-"}</CellMeta>
+                  {/* The machine, said the way someone can check it: which PC,
+                      on which card, at which address. */}
+                  <CellMeta>
+                    {[
+                      row.hostname,
+                      row.ipAddress,
+                      row.networkInterface,
+                      row.macAddress?.toUpperCase(),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "-"}
+                  </CellMeta>
                 </>
               ),
             },

@@ -23,6 +23,7 @@ import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector, type SchemaMapping } from "./jhcis/schema-inspector";
 import { log } from "./logger";
 import { OfflineQueue } from "./queue/queue";
+import { resolveNetworkIdentity } from "./network";
 
 export type SyncMode = "INITIAL" | "INCREMENTAL" | "MANUAL_RANGE" | "RETRY";
 
@@ -698,6 +699,7 @@ export class SyncRunner {
       schemaReport: report,
       lastError: lastError ?? null,
       pendingBatches: queue.count("PENDING"),
+      network: await resolveNetworkIdentity(this.credential.centralApiUrl),
     });
 
     log.debug("heartbeat acknowledged", { config: response.config });
