@@ -11,9 +11,15 @@ import {
 import { SyncHistoryCard } from "@/components/ui/sync-history";
 import { lookupLatestAgentRelease } from "@/lib/services/agent-release";
 import { Building2, Download, RefreshCcw, Server, TriangleAlert } from "lucide-react";
-import { canTriggerSync, isSuperAdmin, requireUser, resolveFacilityScope } from "@/lib/auth/rbac";
+import {
+  canManageFacility,
+  canTriggerSync,
+  isSuperAdmin,
+  requireUser,
+  resolveFacilityScope,
+} from "@/lib/auth/rbac";
 
-import { SyncNowForm, VerifyDataForm } from "../admin/forms";
+import { AgentTokenForm, SyncNowForm, VerifyDataForm } from "../admin/forms";
 import {
   getFleetSummary,
   listAgents,
@@ -36,6 +42,13 @@ export default async function SyncPage() {
     listRunningBatches(scope.facilityIds),
     lookupLatestAgentRelease(),
   ]);
+
+  // Downloading the installer is only half the job: the tray is useless until
+  // it is enrolled, and until now the only page that issued a token was the
+  // central admin area, which a รพ.สต. account cannot open. The permission to
+  // enrol an agent for one's own facility already existed - it just had
+  // nowhere to be used from.
+  const enrollable = agentRows.filter((agent) => canManageFacility(user, agent.facilityId));
 
   return (
     <>
@@ -105,6 +118,52 @@ export default async function SyncPage() {
                 : release.status === "none-published"
                   ? "ยังไม่มีไฟล์ติดตั้งเผยแพร่ — ผู้ดูแลระบบต้องสร้าง release พร้อมไฟล์ SDCAgent-Setup-x.y.z.exe ก่อน"
                   : `ดึงข้อมูลไฟล์ติดตั้งไม่สำเร็จ: ${release.detail}`}
+            </p>
+          )}
+        </div>
+      </Card>
+
+      <Card
+        className="mt-5"
+        title="เชื่อมต่อโปรแกรมกับระบบ"
+        description="ทำครั้งเดียวตอนติดตั้งเสร็จ เพื่อผูกเครื่องนี้เข้ากับสถานบริการของคุณ"
+      >
+        <div className="space-y-4 p-5">
+          <ol className="space-y-1.5 text-[13.5px] text-ink">
+            <li>1. ติดตั้งโปรแกรมบนเครื่องที่มองเห็น JHCISDB แล้วเปิดขึ้นมา</li>
+            <li>2. ไปที่แท็บ &quot;ตั้งค่า&quot; กรอกที่อยู่ JHCISDB แล้วกดทดสอบการเชื่อมต่อ</li>
+            <li>
+              3. นำ <span className="font-medium">รหัสลงทะเบียน</span> ด้านล่างไปวางในช่อง
+              &quot;ลงทะเบียนกับระบบศูนย์กลาง&quot; แล้วกดลงทะเบียน
+            </li>
+          </ol>
+
+          {enrollable.length ? (
+            <div className="space-y-3">
+              {enrollable.map((agent) => (
+                <div
+                  key={agent.id}
+                  className="rounded-[8px] border border-line bg-raised/40 p-4"
+                >
+                  <p className="text-[13.5px] font-medium text-ink">
+                    {agent.name}
+                    <span className="ml-2 text-xs font-normal text-muted">
+                      {agent.facilityCode} · {agent.facilityName}
+                    </span>
+                  </p>
+                  <p className="mt-0.5 mb-2.5 text-xs text-muted">
+                    รหัสใช้ได้ครั้งเดียวและมีวันหมดอายุ · ออกรหัสใหม่ได้ทุกเมื่อ
+                    รหัสเดิมจะใช้ไม่ได้ทันที
+                  </p>
+                  <AgentTokenForm agentId={agent.id} label="ขอรหัสลงทะเบียน" />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-[8px] bg-raised px-4 py-3 text-[13px] text-muted">
+              {agentRows.length
+                ? "บัญชีของคุณขอรหัสลงทะเบียนเองไม่ได้ กรุณาแจ้งผู้ดูแลระบบของสถานบริการ หรือผู้ดูแลระบบส่วนกลาง เพื่อขอรหัส"
+                : "สถานบริการของคุณยังไม่มี Agent ในระบบ กรุณาแจ้งผู้ดูแลระบบส่วนกลางให้สร้างให้ก่อน"}
             </p>
           )}
         </div>

@@ -41,7 +41,7 @@ function TokenPanel({ state }: { state: ActionState }) {
   return (
     <div className="rounded-[8px] border border-brand-line bg-brand-soft p-4">
       <p className="text-xs font-semibold text-brand-ink">
-        Enrollment token (แสดงครั้งเดียว - หมดอายุ{" "}
+        รหัสลงทะเบียน (แสดงครั้งเดียว - หมดอายุ{" "}
         {state.enrollmentExpiresAt
           ? new Date(state.enrollmentExpiresAt).toLocaleString("th-TH")
           : "-"}
@@ -51,7 +51,8 @@ function TokenPanel({ state }: { state: ActionState }) {
         {state.enrollmentToken}
       </code>
       <p className="mt-2 text-xs text-brand-ink">
-        นำไปกรอกในคำสั่ง <code>agent enroll</code> ที่เครื่องของ รพ.สต. ห้ามส่งผ่านช่องทางสาธารณะ
+        คัดลอกไปวางในโปรแกรมเชื่อมข้อมูลที่เครื่องของ รพ.สต. ที่แท็บ &quot;ตั้งค่า&quot; &rarr;
+        ลงทะเบียนกับระบบศูนย์กลาง · <span className="font-medium">ห้ามส่งผ่านช่องทางสาธารณะ</span>
       </p>
     </div>
   );
@@ -171,13 +172,21 @@ export function AgentForm({
   );
 }
 
-export function AgentTokenForm({ agentId }: { agentId: string }) {
+export function AgentTokenForm({
+  agentId,
+  // The admin area talks to people who know what a token is; the สถานะการนำเข้า
+  // page talks to whoever is standing at the รพ.สต. installing the thing.
+  label = "ออก token ใหม่",
+}: {
+  agentId: string;
+  label?: string;
+}) {
   const [state, action] = useActionState<ActionState, FormData>(reissueEnrollmentTokenAction, {});
   return (
     <div className="space-y-2">
       <form action={action}>
         <input type="hidden" name="agentId" value={agentId} />
-        <Submit label="ออก token ใหม่" />
+        <Submit label={label} />
       </form>
       <TokenPanel state={state} />
       {state.error ? <Feedback state={state} /> : null}
