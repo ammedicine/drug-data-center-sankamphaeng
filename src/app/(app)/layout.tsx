@@ -1,13 +1,7 @@
 import { logoutAction } from "@/app/login/actions";
+import { ROLE_LABELS } from "@/lib/shared/roles";
 import { AppNav, type NavSection } from "@/components/ui/app-nav";
 import { requireUser } from "@/lib/auth/rbac";
-
-const ROLE_LABELS: Record<string, string> = {
-  SUPER_ADMIN: "ผู้ดูแลระบบส่วนกลาง",
-  ADMIN: "แอดมิน (ดูทุกสถานบริการ)",
-  FACILITY_ADMIN: "ผู้ดูแลสถานบริการ",
-  USER: "ผู้ใช้งาน",
-};
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();

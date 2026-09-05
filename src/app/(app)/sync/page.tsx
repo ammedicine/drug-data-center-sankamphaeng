@@ -9,6 +9,7 @@ import {
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
+import { ROLE_LABELS } from "@/lib/shared/roles";
 import { lookupLatestAgentRelease } from "@/lib/services/agent-release";
 import { Building2, Download, RefreshCcw, Server, TriangleAlert } from "lucide-react";
 import {
@@ -129,11 +130,11 @@ export default async function SyncPage() {
         description="ทำครั้งเดียวตอนติดตั้งเสร็จ เพื่อผูกเครื่องนี้เข้ากับสถานบริการของคุณ"
       >
         <div className="space-y-4 p-5">
-          <ol className="space-y-1.5 text-[13.5px] text-ink">
-            <li>1. ติดตั้งโปรแกรมบนเครื่องที่มองเห็น JHCISDB แล้วเปิดขึ้นมา</li>
-            <li>2. ไปที่แท็บ &quot;ตั้งค่า&quot; กรอกที่อยู่ JHCISDB แล้วกดทดสอบการเชื่อมต่อ</li>
+          <ol className="ml-4 list-decimal space-y-1.5 text-[13.5px] text-ink marker:text-muted">
+            <li>ติดตั้งโปรแกรมบนเครื่องที่มองเห็น JHCISDB แล้วเปิดขึ้นมา</li>
+            <li>ไปที่แท็บ &quot;ตั้งค่า&quot; กรอกที่อยู่ JHCISDB แล้วกดทดสอบการเชื่อมต่อ</li>
             <li>
-              3. นำ <span className="font-medium">รหัสลงทะเบียน</span> ด้านล่างไปวางในช่อง
+              นำ <span className="font-medium">รหัสลงทะเบียน</span> ด้านล่างไปวางในช่อง
               &quot;ลงทะเบียนกับระบบศูนย์กลาง&quot; แล้วกดลงทะเบียน
             </li>
           </ol>
@@ -160,11 +161,24 @@ export default async function SyncPage() {
               ))}
             </div>
           ) : (
-            <p className="rounded-[8px] bg-raised px-4 py-3 text-[13px] text-muted">
-              {agentRows.length
-                ? "บัญชีของคุณขอรหัสลงทะเบียนเองไม่ได้ กรุณาแจ้งผู้ดูแลระบบของสถานบริการ หรือผู้ดูแลระบบส่วนกลาง เพื่อขอรหัส"
-                : "สถานบริการของคุณยังไม่มี Agent ในระบบ กรุณาแจ้งผู้ดูแลระบบส่วนกลางให้สร้างให้ก่อน"}
-            </p>
+            <div className="rounded-[8px] bg-raised px-4 py-3 text-[13px] text-muted">
+              {agentRows.length ? (
+                <>
+                  <p>
+                    บัญชีของคุณเป็น <span className="font-medium">{ROLE_LABELS[user.role]}</span>{" "}
+                    จึงขอรหัสลงทะเบียนเองไม่ได้
+                  </p>
+                  <p className="mt-1">
+                    ขอได้ 2 ทาง: แจ้งผู้ดูแลระบบส่วนกลางให้ออกรหัสให้
+                    หรือขอให้เปลี่ยนบัญชีของคุณเป็น{" "}
+                    <span className="font-medium">ผู้ดูแลสถานบริการ</span>{" "}
+                    แล้วจะขอรหัสของสถานบริการตัวเองได้เองทุกเมื่อ
+                  </p>
+                </>
+              ) : (
+                <p>สถานบริการของคุณยังไม่มี Agent ในระบบ กรุณาแจ้งผู้ดูแลระบบส่วนกลางให้สร้างให้ก่อน</p>
+              )}
+            </div>
           )}
         </div>
       </Card>
