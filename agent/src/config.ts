@@ -28,7 +28,7 @@ dotenv.config();
  * build when they disagree, because a fleet that all reports 1.0.0 tells an
  * operator nothing about which machines still need updating.
  */
-export const AGENT_VERSION = "1.0.2";
+export const AGENT_VERSION = "1.0.3";
 
 export interface JhcisConfig {
   host: string;
