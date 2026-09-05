@@ -54,8 +54,28 @@ export interface AgentState {
   batchSequence: number;
 }
 
+/**
+ * Where the agent keeps its queue, state and credential.
+ *
+ * AGENT_DATA_DIR wins when it is set, but it cannot be relied on: the
+ * installer writes it to the machine environment, and a tray launched from
+ * that same installer - or any process started before the change is
+ * broadcast - still runs with the old environment and never sees it. Falling
+ * back to a folder beside the executable then puts working data inside
+ * Program Files, which a normal staff account cannot write to at all, so the
+ * agent would fail to save anything on a real รพ.สต. PC while working
+ * perfectly for whoever installed it as an administrator.
+ *
+ * So Windows falls back to ProgramData, which is writable by design and is
+ * where the installer creates the folder anyway.
+ */
 export function dataDir(): string {
-  const dir = resolve(process.env.AGENT_DATA_DIR ?? "./data");
+  const configured = process.env.AGENT_DATA_DIR?.trim();
+  const fallback =
+    process.platform === "win32" && process.env.ProgramData
+      ? resolve(process.env.ProgramData, "SDCAgent")
+      : resolve("./data");
+  const dir = configured ? resolve(configured) : fallback;
   mkdirSync(dir, { recursive: true });
   return dir;
 }

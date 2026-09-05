@@ -59,8 +59,21 @@ def app_dir() -> Path:
 
 
 def data_dir() -> Path:
+    """
+    Must match dataDir() in agent/src/config.ts.
+
+    AGENT_DATA_DIR is set by the installer but a tray started from that same
+    installer still has the old environment, so the fallback has to be a
+    folder that is writable in its own right. Beside the executable means
+    inside Program Files, where a staff account cannot write.
+    """
     override = os.environ.get("AGENT_DATA_DIR")
-    directory = Path(override) if override else app_dir() / "data"
+    if override:
+        directory = Path(override)
+    elif os.name == "nt" and os.environ.get("ProgramData"):
+        directory = Path(os.environ["ProgramData"]) / "SDCAgent"
+    else:
+        directory = app_dir() / "data"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

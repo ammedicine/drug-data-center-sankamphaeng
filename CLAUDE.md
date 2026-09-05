@@ -69,6 +69,14 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
 3. รัน uninstaller ของเวอร์ชันเดิมแบบ `/VERYSILENT` แล้วค่อยวางไฟล์ใหม่
 4. **ห้ามแตะ `%ProgramData%\SDCAgent`** (คิวที่ยังส่งไม่สำเร็จ + credential)
 5. **ห้ามเปลี่ยน `AppId`** ใน .iss ไม่งั้นเวอร์ชันเก่าจะค้างคู่กับตัวใหม่ กลายเป็น agent 2 ตัว
+### โฟลเดอร์ข้อมูลของ agent (บทเรียน 2026-09-05)
+- **ห้ามใส่ `AGENT_DATA_DIR=./data` ใน `.env.example`** เพราะตัวติดตั้ง copy ไฟล์นี้ไปเป็น `.env`
+  ใน Program Files -> agent อ่านแล้วชี้กลับมาที่โฟลเดอร์โปรแกรม ซึ่ง**ผู้ใช้ทั่วไปเขียนไม่ได้**
+  (ที่เครื่อง dev ไม่เจอเพราะรันเป็น admin) เว้นค่าว่างไว้เสมอ
+- ค่าเริ่มต้นเมื่อไม่ตั้ง `AGENT_DATA_DIR` = `%ProgramData%\SDCAgent` (ทั้งฝั่ง Node และ GUI)
+  ต้องแก้ให้ตรงกันทั้ง `agent/src/config.ts` และ `gui/sdc_agent_gui.py`
+- `agent/.env` ของ dev ยังตั้ง `./data` ได้ (gitignore อยู่แล้ว) และ test ตั้ง env เอง
+
 ### เปลี่ยนปลายทาง JHCISDB จากหน้าจอ (ย้ายวง LAN / ย้ายเครื่อง server)
 - ตั้งได้ที่แท็บ "ตั้งค่า" -> การเชื่อมต่อ JHCIS -> ปุ่ม **บันทึกแล้วทดสอบการเชื่อมต่อ**
 - **ห้ามเขียนลง `.env` อีก** — `.env` อยู่ใน Program Files ผู้ใช้ทั่วไปเขียนไม่ได้
