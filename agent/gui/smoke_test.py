@@ -77,6 +77,13 @@ def main() -> int:
         if not (echo.ok and kept):
             return 1
 
+    # The version has to reach the screen, and it comes from the agent rather
+    # than a constant in the GUI so the two cannot drift apart.
+    version = bridge.agent_version()
+    print("version      :", version or "อ่านไม่ได้")
+    if not version:
+        return 1
+
     result = bridge.run(["status"], timeout=300)
     print("`agent status` ok:", result.ok)
     for line in result.output.strip().splitlines()[:12]:

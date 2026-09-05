@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -177,6 +178,20 @@ class AgentBridge:
             return CommandResult(False, f"ไม่พบโปรแกรม agent: {error}")
         except Exception as error:  # pragma: no cover - defensive
             return CommandResult(False, str(error))
+
+    def agent_version(self) -> str | None:
+        """
+        Version reported by the agent itself.
+
+        Read from the agent rather than kept as a constant here, so the number
+        on screen is the version of the code that will actually do the work -
+        two places to edit is how it ends up saying 1.0.0 for ever.
+        """
+        result = self.run(["status"], timeout=90)
+        if not result.ok:
+            return None
+        match = re.search(r"agent version\s*:\s*(\S+)", result.output)
+        return match.group(1) if match else None
 
     def jhcis_settings(self) -> dict[str, Any]:
         """Connection the agent is actually using, password masked."""
@@ -359,6 +374,7 @@ class AgentApp(ctk.CTk):
         self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
         self.tray_icon = None
         self.busy = False
+        self.app_version = "?"
 
         self.title(APP_NAME)
         self.geometry("880x620")
@@ -373,6 +389,8 @@ class AgentApp(ctk.CTk):
         # operator has no way to fix the settings that caused it.
         self.worker_error = self.bridge.start_background()
         self._schedule_poll()
+
+        self._resolve_version()
 
         if TRAY_AVAILABLE:
             self._start_tray()
@@ -395,6 +413,13 @@ class AgentApp(ctk.CTk):
             header, text="", text_color="#d3f5f0", font=ctk.CTkFont(size=12)
         )
         self.facility_label.pack(side="left", padx=(0, 20), pady=(16, 2))
+
+        # Which version is running has to be readable without opening a log:
+        # it is the first thing to establish when a รพ.สต. reports a problem.
+        self.version_label = ctk.CTkLabel(
+            header, text="เวอร์ชัน ...", text_color="#d3f5f0", font=ctk.CTkFont(size=12)
+        )
+        self.version_label.pack(side="right", padx=20, pady=(16, 2))
 
         self.connection_label = ctk.CTkLabel(
             header, text="กำลังตรวจสอบ...", text_color="white", font=ctk.CTkFont(size=12)
@@ -800,6 +825,11 @@ class AgentApp(ctk.CTk):
     def _refresh(self) -> None:
         while not self.messages.empty():
             kind, output = self.messages.get()
+            if kind == "version":
+                # Not the result of a command the operator ran: it must not
+                # clear the busy state or overwrite the phase message.
+                self._apply_version(output)
+                continue
             self.busy = False
             self.sync_button.configure(state="normal")
             tail = output.strip().splitlines()[-1] if output.strip() else ""
@@ -902,13 +932,39 @@ class AgentApp(ctk.CTk):
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("ออกจากโปรแกรม", lambda: self.after(0, self._quit)),
         )
-        self.tray_icon = pystray.Icon(APP_ID, self._tray_image(), APP_NAME, menu)
+        # Hovering the tray icon is the quickest way to check the version when
+        # the window is closed, which is how it normally runs.
+        tooltip = "\n".join([APP_NAME, f"เวอร์ชัน {self.app_version}"])
+        self.tray_icon = pystray.Icon(APP_ID, self._tray_image(), tooltip, menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def _show_window(self) -> None:
         self.deiconify()
         self.lift()
         self.focus_force()
+
+    def _resolve_version(self) -> None:
+        """
+        Asks the agent its version off the main thread and shows it.
+
+        On a slow machine the first agent call takes a few seconds; the window
+        must not wait for it, so it opens saying "..." and fills in when the
+        answer arrives.
+        """
+
+        def worker() -> None:
+            version = self.bridge.agent_version()
+            self.messages.put(("version", version or "?"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_version(self, version: str) -> None:
+        self.app_version = version
+        label = f"เวอร์ชัน {version}"
+        self.version_label.configure(text=label)
+        self.title(f"{APP_NAME} - {label}")
+        if self.tray_icon is not None:
+            self.tray_icon.title = "\n".join([APP_NAME, label])
 
     def _on_close(self) -> None:
         if self.tray_var.get() and TRAY_AVAILABLE:
