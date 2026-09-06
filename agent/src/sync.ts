@@ -44,6 +44,13 @@ export interface SyncOptions {
    * Set false for the repair runs themselves, so they cannot recurse.
    */
   reconcile?: boolean;
+  /**
+   * Compare monthly row counts with Central first and read only the months
+   * that differ (default true). Set false when the range must be read
+   * whatever the counts say - a repair run, or an operator asking for a
+   * specific window because they believe what is stored there is wrong.
+   */
+  skipMatchingMonths?: boolean;
 }
 
 /** What the after-sync count found. */
@@ -257,8 +264,53 @@ export class SyncRunner {
         extractor.minUsageDate(pcucode),
         extractor.maxUsageDate(pcucode),
       ]);
-      const range = resolveRange(options.mode, this.credential, { min, max }, options);
+      const requested = resolveRange(options.mode, this.credential, { min, max }, options);
       const sourceVersion = report.jhcisVersion ?? report.mysqlVersion;
+
+      // Read only what the centre is missing.
+      //
+      // An incremental run re-reads reprocessDays behind the watermark every
+      // time, to catch visits keyed in late. On an hourly schedule that is the
+      // same week of rows extracted from JHCIS and pushed over the wire again
+      // and again, almost always to be discarded centrally as duplicates -
+      // load on the รพ.สต. server for nothing.
+      //
+      // Comparing row counts per month first is two cheap queries, and when
+      // they agree there is nothing to do at all. Only the months that differ
+      // are read, and the range is narrowed to span just those.
+      const range = options.skipMatchingMonths === false
+        ? requested
+        : await this.narrowToMissing(extractor, pcucode, requested);
+
+      if (!range) {
+        log.info("ไม่มีอะไรต้องดึง ข้อมูลที่ศูนย์กลางตรงกับ JHCIS แล้ว", {
+          from: requested.from,
+          to: requested.to,
+        });
+        writeStatus({
+          phase: "done",
+          message: `ข้อมูลตรงกันแล้ว (${requested.from} ถึง ${requested.to}) ไม่ต้องดึงซ้ำ`,
+          total: 0,
+          extracted: 0,
+          uploaded: 0,
+          pendingChunks: this.queue.count("PENDING"),
+          jhcisConnected: true,
+          lastError: null,
+        });
+        const flushed = await this.flushQueue();
+        return {
+          batchRef: "",
+          mode: options.mode,
+          rangeFrom: requested.from,
+          rangeTo: requested.to,
+          recordsRead: 0,
+          recordsSent: 0,
+          accepted: flushed.accepted,
+          rejected: flushed.rejected,
+          pendingChunks: flushed.remaining,
+          reconciliation: null,
+        };
+      }
 
       const recordsRead = await extractor.countUsage(pcucode, range.from, range.to);
       const batchRef = nextBatchRef();
@@ -564,6 +616,62 @@ export class SyncRunner {
    * migration applied late. Counting both sides is the only honest way to know,
    * and re-sending is safe because every row is keyed deterministically.
    */
+  /**
+   * Narrows a range to the months Central does not already match.
+   *
+   * Returns null when every month agrees, which means there is nothing to
+   * read at all. Comparison is by row count per month: JHCIS is
+   * append-mostly, so a month whose count matches is a month nobody has
+   * touched. An edit that leaves the count unchanged would not be noticed
+   * here - "ตรวจสอบความครบถ้วน" exists for that, and a range asked for
+   * explicitly is read whatever the counts say.
+   *
+   * A failure to reach Central is not a reason to skip: it falls back to
+   * reading the whole range, which is what would have happened anyway.
+   */
+  private async narrowToMissing(
+    extractor: UsageExtractor,
+    pcucode: string,
+    range: { from: string; to: string },
+  ): Promise<{ from: string; to: string } | null> {
+    let local: Array<{ month: string; rows: number }>;
+    let remote: Array<{ month: string; rows: number }>;
+    try {
+      [local, remote] = await Promise.all([
+        extractor.monthlyTally(pcucode, range.from, range.to),
+        withRetry(() => this.client.audit({ pcucode, from: range.from, to: range.to }), {
+          label: "audit",
+        }).then((response) => response.months),
+      ]);
+    } catch (error) {
+      log.warn("เทียบจำนวนกับศูนย์กลางไม่สำเร็จ จะดึงทั้งช่วงตามปกติ", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return range;
+    }
+
+    const centralByMonth = new Map(remote.map((row) => [row.month, row.rows]));
+    const differing = local
+      .filter((row) => (centralByMonth.get(row.month) ?? 0) !== row.rows)
+      .map((row) => row.month)
+      .sort();
+
+    if (!differing.length) return null;
+
+    // Span the differing months, clamped to what was asked for: a month is
+    // read whole because that is the resolution the counts are compared at.
+    const first = `${differing[0]}-01`;
+    const lastMonth = new Date(`${differing[differing.length - 1]}-01T00:00:00Z`);
+    lastMonth.setUTCMonth(lastMonth.getUTCMonth() + 1);
+    lastMonth.setUTCDate(0);
+    const last = lastMonth.toISOString().slice(0, 10);
+
+    const from = first > range.from ? first : range.from;
+    const to = last < range.to ? last : range.to;
+    log.info("ดึงเฉพาะเดือนที่ยังไม่ตรงกัน", { months: differing, from, to });
+    return { from, to };
+  }
+
   async verify(options: { from?: string | null; to?: string | null; repair?: boolean } = {}): Promise<{
     checked: number;
     mismatched: Array<{ month: string; jhcis: number; central: number }>;
