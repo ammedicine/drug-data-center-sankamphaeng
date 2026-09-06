@@ -24,10 +24,20 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import customtkinter as ctk
+
+# Design tokens and the pure status-to-screen mapping.
+#
+# This file is launched as a script, bundled by PyInstaller, and imported by
+# smoke_test.py through importlib - three different ideas of what the module
+# search path is - so its own directory is put on the path explicitly rather
+# than relying on any of them.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import theme  # noqa: E402
 
 try:  # tray icon is optional so the app still opens on a machine without it
     import pystray
@@ -365,31 +375,62 @@ def set_autostart(enabled: bool) -> str:
 
 
 class AgentApp(ctk.CTk):
+    """
+    The window.
+
+    Laid out as a fixed sidebar and one page at a time, rather than tabs: a
+    tab strip reads as a prototype, and it gave no room for the thing that
+    actually matters - one glance telling a เจ้าหน้าที่ whether data is moving.
+
+    Every size, colour and space comes from theme.py. Nothing here invents its
+    own padding, and no widget is given a width because it happened to look
+    right; columns carry weights so Thai text can grow without being clipped at
+    125% or 150% display scaling.
+    """
+
+    NAV = [
+        ("overview", "ภาพรวม", "◉"),
+        ("sync", "การซิงก์", "↻"),
+        ("connection", "การเชื่อมต่อ", "⇄"),
+        ("settings", "ตั้งค่า", "⚙"),
+        ("logs", "บันทึกการทำงาน", "≡"),
+    ]
+
     def __init__(self, start_in_tray: bool = False) -> None:
         super().__init__()
         ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("green")
 
         self.bridge = AgentBridge()
         self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
         self.tray_icon = None
         self.busy = False
         self.app_version = "?"
+        self.current_page = "overview"
+        self.pages: dict[str, ctk.CTkFrame] = {}
+        self.nav_buttons: dict[str, ctk.CTkButton] = {}
+        self._last_log = ""
 
         self.title(APP_NAME)
-        self.geometry("880x620")
-        self.minsize(820, 560)
+        self.geometry("{}x{}".format(*theme.WINDOW_DEFAULT))
+        self.minsize(*theme.WINDOW_MIN)
+        self.configure(fg_color=theme.CANVAS)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Settings variables exist before any page is built, because pages read
+        # them as they are constructed and the tray toggle is needed on close.
+        self.auto_var = ctk.BooleanVar(value=True)
+        self.startup_var = ctk.BooleanVar(value=True)
+        self.tray_var = ctk.BooleanVar(value=True)
+
         self._build_header()
-        self._build_tabs()
+        self._build_shell()
         self._load_settings_into_form()
+        self._select_page("overview")
 
         # The window must open even when the worker cannot start, otherwise the
         # operator has no way to fix the settings that caused it.
         self.worker_error = self.bridge.start_background()
         self._schedule_poll()
-
         self._resolve_version()
 
         if TRAY_AVAILABLE:
@@ -397,303 +438,653 @@ class AgentApp(ctk.CTk):
         if start_in_tray:
             self.after(300, self.withdraw)
 
-    # -- layout ----------------------------------------------------------------
+    # -- small building blocks --------------------------------------------------
+
+    def _font(self, size_key: str, weight: str = "normal") -> ctk.CTkFont:
+        return ctk.CTkFont(size=theme.TYPE[size_key], weight=weight)
+
+    def _card(self, parent: Any, title: str | None = None) -> ctk.CTkFrame:
+        """A white panel. Titles are optional so cards can nest cleanly."""
+        card = ctk.CTkFrame(parent, fg_color=theme.SURFACE, corner_radius=theme.RADIUS["md"])
+        if title:
+            ctk.CTkLabel(
+                card,
+                text=title,
+                font=self._font("section", "bold"),
+                text_color=theme.INK,
+                anchor="w",
+            ).pack(
+                fill="x",
+                padx=theme.SPACE["lg"],
+                pady=(theme.SPACE["md"], theme.SPACE["xs"]),
+            )
+        return card
+
+    def _primary(self, parent: Any, text: str, command: Any) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            fg_color=theme.BRAND,
+            hover_color=theme.BRAND_HOVER,
+            height=theme.BUTTON_HEIGHT,
+            corner_radius=theme.RADIUS["sm"],
+            font=self._font("body", "bold"),
+        )
+
+    def _secondary(self, parent: Any, text: str, command: Any) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            fg_color=theme.SURFACE,
+            text_color=theme.BRAND,
+            border_width=1,
+            border_color=theme.LINE,
+            hover_color=theme.BRAND_SOFT,
+            height=theme.BUTTON_HEIGHT,
+            corner_radius=theme.RADIUS["sm"],
+            font=self._font("body"),
+        )
+
+    def _kv(self, parent: Any, row: int, label: str) -> ctk.CTkLabel:
+        """A label/value pair on the shared grid, returning the value widget."""
+        ctk.CTkLabel(
+            parent,
+            text=label,
+            text_color=theme.MUTED,
+            font=self._font("body"),
+            anchor="w",
+        ).grid(row=row, column=0, sticky="w", pady=theme.SPACE["xs"] // 2)
+        value = ctk.CTkLabel(
+            parent, text="-", font=self._font("body"), anchor="w", text_color=theme.INK
+        )
+        value.grid(row=row, column=1, sticky="w", padx=(theme.SPACE["md"], 0))
+        return value
+
+    # -- shell ------------------------------------------------------------------
+
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, fg_color=BRAND, corner_radius=0)
+        header = ctk.CTkFrame(self, fg_color=theme.SIDEBAR, corner_radius=0, height=64)
         header.pack(fill="x")
+        header.pack_propagate(False)
+        header.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
             header,
             text="ศูนย์ข้อมูลการใช้ยา อำเภอสันกำแพง",
             text_color="white",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(side="left", padx=20, pady=(14, 2))
-
-        self.facility_label = ctk.CTkLabel(
-            header, text="", text_color="#d3f5f0", font=ctk.CTkFont(size=12)
-        )
-        self.facility_label.pack(side="left", padx=(0, 20), pady=(16, 2))
-
-        # Which version is running has to be readable without opening a log:
-        # it is the first thing to establish when a รพ.สต. reports a problem.
-        self.version_label = ctk.CTkLabel(
-            header, text="เวอร์ชัน ...", text_color="#d3f5f0", font=ctk.CTkFont(size=12)
-        )
-        self.version_label.pack(side="right", padx=20, pady=(16, 2))
-
-        self.connection_label = ctk.CTkLabel(
-            header, text="กำลังตรวจสอบ...", text_color="white", font=ctk.CTkFont(size=12)
-        )
-        self.connection_label.pack(side="right", padx=20)
-
-    def _build_tabs(self) -> None:
-        self.tabs = ctk.CTkTabview(self, fg_color="#f6f8fa")
-        self.tabs.pack(fill="both", expand=True, padx=16, pady=16)
-        self.tab_status = self.tabs.add("สถานะการทำงาน")
-        self.tab_settings = self.tabs.add("ตั้งค่า")
-        self.tab_logs = self.tabs.add("บันทึกการทำงาน")
-
-        self._build_status_tab()
-        self._build_settings_tab()
-        self._build_logs_tab()
-
-    def _card(self, parent: Any, title: str) -> ctk.CTkFrame:
-        card = ctk.CTkFrame(parent, fg_color="white", corner_radius=12)
-        card.pack(fill="x", padx=4, pady=8)
-        ctk.CTkLabel(
-            card, text=title, font=ctk.CTkFont(size=13, weight="bold"), anchor="w"
-        ).pack(fill="x", padx=16, pady=(12, 4))
-        return card
-
-    def _build_status_tab(self) -> None:
-        card = self._card(self.tab_status, "สถานะปัจจุบัน")
-
-        self.phase_label = ctk.CTkLabel(
-            card, text="พร้อมทำงาน", font=ctk.CTkFont(size=15, weight="bold"), anchor="w"
-        )
-        self.phase_label.pack(fill="x", padx=16)
-
-        self.progress = ctk.CTkProgressBar(card, height=14, progress_color=BRAND)
-        self.progress.set(0)
-        self.progress.pack(fill="x", padx=16, pady=(10, 4))
-
-        self.progress_label = ctk.CTkLabel(
-            card, text="ยังไม่มีการซิงก์", text_color=MUTED, font=ctk.CTkFont(size=12), anchor="w"
-        )
-        self.progress_label.pack(fill="x", padx=16, pady=(0, 14))
-
-        info = self._card(self.tab_status, "ข้อมูลการซิงก์")
-        grid = ctk.CTkFrame(info, fg_color="transparent")
-        grid.pack(fill="x", padx=16, pady=(0, 14))
-        self.info_labels: dict[str, ctk.CTkLabel] = {}
-        rows = [
-            ("last_sync", "ซิงก์สำเร็จล่าสุด"),
-            ("watermark", "ข้อมูลถึงวันที่"),
-            ("queue", "คิวรอส่ง"),
-            ("worker", "ตัวทำงานเบื้องหลัง"),
-        ]
-        for index, (key, label) in enumerate(rows):
-            ctk.CTkLabel(
-                grid, text=label, text_color=MUTED, font=ctk.CTkFont(size=12), anchor="w", width=160
-            ).grid(row=index, column=0, sticky="w", pady=3)
-            value = ctk.CTkLabel(grid, text="-", font=ctk.CTkFont(size=12), anchor="w")
-            value.grid(row=index, column=1, sticky="w", pady=3)
-            self.info_labels[key] = value
-
-        actions = ctk.CTkFrame(self.tab_status, fg_color="transparent")
-        actions.pack(fill="x", padx=4, pady=(4, 0))
-
-        self.sync_button = ctk.CTkButton(
-            actions,
-            text="ซิงก์ข้อมูลเดี๋ยวนี้",
-            command=lambda: self._run_async(["sync"], "กำลังซิงก์ข้อมูล..."),
-            fg_color=BRAND,
-            hover_color=BRAND_HOVER,
-            height=38,
-        )
-        self.sync_button.pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            actions,
-            text="ตรวจการเชื่อมต่อ JHCIS",
-            command=lambda: self._run_async(["doctor"], "กำลังตรวจการเชื่อมต่อ..."),
-            fg_color="white",
-            text_color=BRAND,
-            border_width=1,
-            border_color="#e3e8ee",
-            hover_color="#eefcfa",
-            height=38,
-        ).pack(side="left", padx=8)
-
-        ctk.CTkButton(
-            actions,
-            text="ส่งข้อมูลที่ค้างอีกครั้ง",
-            command=lambda: self._run_async(["retry"], "กำลังส่งข้อมูลที่ค้าง..."),
-            fg_color="white",
-            text_color=BRAND,
-            border_width=1,
-            border_color="#e3e8ee",
-            hover_color="#eefcfa",
-            height=38,
-        ).pack(side="left", padx=8)
-
-    def _build_settings_tab(self) -> None:
-        scroll = ctk.CTkScrollableFrame(self.tab_settings, fg_color="transparent")
-        scroll.pack(fill="both", expand=True)
-
-        schedule = self._card(scroll, "ตารางการซิงก์อัตโนมัติ")
-        body = ctk.CTkFrame(schedule, fg_color="transparent")
-        body.pack(fill="x", padx=16, pady=(0, 14))
-
-        self.auto_var = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(
-            body, text="ซิงก์อัตโนมัติ", variable=self.auto_var, progress_color=BRAND
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 10))
-
-        ctk.CTkLabel(body, text="ทุก ๆ", text_color=MUTED, anchor="w").grid(
-            row=1, column=0, sticky="w"
-        )
-        self.interval_menu = ctk.CTkOptionMenu(
-            body,
-            values=["15 นาที", "30 นาที", "1 ชั่วโมง", "3 ชั่วโมง", "12 ชั่วโมง", "วันละครั้ง", "ไม่ใช้"],
-            fg_color=BRAND,
-            button_color=BRAND,
-            button_hover_color=BRAND_HOVER,
-        )
-        self.interval_menu.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=4)
-
-        ctk.CTkLabel(body, text="หรือเวลาที่กำหนด", text_color=MUTED, anchor="w").grid(
-            row=2, column=0, sticky="w", pady=(10, 0)
-        )
-        self.times_entry = ctk.CTkEntry(body, placeholder_text="08:00, 16:30", width=240)
-        self.times_entry.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
-        ctk.CTkLabel(
-            body,
-            text="ใส่เวลาแบบ 24 ชั่วโมง คั่นด้วยจุลภาค เช่น 08:00, 16:30",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=11),
+            font=self._font("display", "bold"),
             anchor="w",
-        ).grid(row=3, column=1, sticky="w", padx=(8, 0))
+        ).grid(row=0, column=0, sticky="w", padx=(theme.SPACE["xl"], theme.SPACE["md"]))
 
-        windows = self._card(scroll, "การทำงานบน Windows")
-        wbody = ctk.CTkFrame(windows, fg_color="transparent")
-        wbody.pack(fill="x", padx=16, pady=(0, 14))
-        self.startup_var = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(
-            wbody,
-            text="เปิดโปรแกรมอัตโนมัติเมื่อเริ่มเครื่อง",
-            variable=self.startup_var,
-            progress_color=BRAND,
-        ).pack(anchor="w", pady=4)
-        self.tray_var = ctk.BooleanVar(value=True)
-        ctk.CTkSwitch(
-            wbody,
-            text="ย่อลงถาดระบบเมื่อปิดหน้าต่าง (โปรแกรมยังทำงานต่อ)",
-            variable=self.tray_var,
-            progress_color=BRAND,
-        ).pack(anchor="w", pady=4)
+        # Facility, pcucode and version together: who this machine speaks for,
+        # and which build is speaking - the two questions asked first when a
+        # รพ.สต. reports a problem.
+        self.facility_label = ctk.CTkLabel(
+            header,
+            text="ยังไม่ได้ลงทะเบียนกับศูนย์กลาง",
+            text_color=theme.SIDEBAR_TEXT,
+            font=self._font("body"),
+            anchor="w",
+        )
+        self.facility_label.grid(row=0, column=1, sticky="w")
 
-        jhcis = self._card(scroll, "การเชื่อมต่อ JHCIS (เก็บไว้ในเครื่องนี้เท่านั้น)")
-        jbody = ctk.CTkFrame(jhcis, fg_color="transparent")
-        jbody.pack(fill="x", padx=16, pady=(0, 14))
+        self.version_label = ctk.CTkLabel(
+            header,
+            text="เวอร์ชัน ...",
+            text_color=theme.SIDEBAR_TEXT,
+            font=self._font("body"),
+            anchor="e",
+        )
+        self.version_label.grid(row=0, column=2, sticky="e", padx=theme.SPACE["xl"])
+
+    def _build_shell(self) -> None:
+        shell = ctk.CTkFrame(self, fg_color="transparent")
+        shell.pack(fill="both", expand=True)
+        shell.grid_columnconfigure(1, weight=1)
+        shell.grid_rowconfigure(0, weight=1)
+
+        sidebar = ctk.CTkFrame(
+            shell, fg_color=theme.SIDEBAR, corner_radius=0, width=theme.SIDEBAR_WIDTH
+        )
+        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar.grid_propagate(False)
+
+        for index, (key, label, glyph) in enumerate(self.NAV):
+            button = ctk.CTkButton(
+                sidebar,
+                text=f"  {glyph}   {label}",
+                anchor="w",
+                command=lambda k=key: self._select_page(k),
+                fg_color="transparent",
+                hover_color=theme.SIDEBAR_ACTIVE,
+                text_color=theme.SIDEBAR_TEXT,
+                corner_radius=theme.RADIUS["sm"],
+                height=theme.NAV_ITEM_HEIGHT,
+                font=self._font("body"),
+            )
+            button.pack(
+                fill="x",
+                padx=theme.SPACE["md"],
+                pady=(theme.SPACE["md"] if index == 0 else theme.SPACE["xs"], 0),
+            )
+            self.nav_buttons[key] = button
+
+        self.content = ctk.CTkFrame(shell, fg_color="transparent")
+        self.content.grid(row=0, column=1, sticky="nsew")
+        self.content.grid_columnconfigure(0, weight=1)
+        self.content.grid_rowconfigure(0, weight=1)
+
+        for key, builder in (
+            ("overview", self._page_overview),
+            ("sync", self._page_sync),
+            ("connection", self._page_connection),
+            ("settings", self._page_settings),
+            ("logs", self._page_logs),
+        ):
+            page = ctk.CTkFrame(self.content, fg_color="transparent")
+            page.grid(row=0, column=0, sticky="nsew")
+            builder(page)
+            self.pages[key] = page
+
+    def _select_page(self, key: str) -> None:
+        self.current_page = key
+        self.pages[key].tkraise()
+        for nav_key, button in self.nav_buttons.items():
+            selected = nav_key == key
+            button.configure(
+                fg_color=theme.SIDEBAR_ACTIVE if selected else "transparent",
+                text_color="white" if selected else theme.SIDEBAR_TEXT,
+                font=self._font("body", "bold" if selected else "normal"),
+            )
+
+    def _page_title(self, parent: Any, text: str, subtitle: str) -> None:
+        ctk.CTkLabel(
+            parent, text=text, font=self._font("title", "bold"), text_color=theme.INK, anchor="w"
+        ).pack(fill="x", padx=theme.SPACE["xl"], pady=(theme.SPACE["lg"], 0))
+        ctk.CTkLabel(
+            parent, text=subtitle, font=self._font("caption"), text_color=theme.MUTED, anchor="w"
+        ).pack(fill="x", padx=theme.SPACE["xl"], pady=(2, theme.SPACE["md"]))
+
+    # -- pages ------------------------------------------------------------------
+
+    def _page_overview(self, page: Any) -> None:
+        """
+        Everything that matters, without scrolling: are the links up, what is
+        the current run doing, and when did data last arrive.
+        """
+        self._page_title(page, "ภาพรวม", "สถานะการเชื่อมต่อและการซิงก์ข้อมูลของเครื่องนี้")
+
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=theme.SPACE["xl"], pady=(0, theme.SPACE["lg"]))
+        body.grid_columnconfigure((0, 1, 2), weight=1, uniform="status")
+        body.grid_rowconfigure(1, weight=1)
+
+        self.status_cards: dict[str, dict[str, ctk.CTkLabel]] = {}
+        for column, key in enumerate(("jhcis", "central", "worker")):
+            card = self._card(body)
+            card.grid(
+                row=0,
+                column=column,
+                sticky="nsew",
+                padx=(0 if column == 0 else theme.SPACE["md"], 0),
+            )
+            head = ctk.CTkFrame(card, fg_color="transparent")
+            head.pack(fill="x", padx=theme.SPACE["lg"], pady=(theme.SPACE["md"], 0))
+            dot = ctk.CTkLabel(head, text="●", font=self._font("body"), text_color=theme.MUTED)
+            dot.pack(side="left", padx=(0, theme.SPACE["sm"]))
+            name = ctk.CTkLabel(
+                head, text="", font=self._font("caption"), text_color=theme.MUTED, anchor="w"
+            )
+            name.pack(side="left")
+            value = ctk.CTkLabel(
+                card, text="-", font=self._font("section", "bold"), anchor="w", text_color=theme.INK
+            )
+            value.pack(fill="x", padx=theme.SPACE["lg"], pady=(theme.SPACE["xs"], 0))
+            detail = ctk.CTkLabel(
+                card,
+                text="",
+                font=self._font("caption"),
+                text_color=theme.MUTED,
+                anchor="w",
+                justify="left",
+            )
+            detail.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+            self.status_cards[key] = {"dot": dot, "name": name, "value": value, "detail": detail}
+
+        # The current sync is the loudest thing on the page by design.
+        sync_card = self._card(body, "การซิงก์รอบปัจจุบัน")
+        sync_card.grid(
+            row=1, column=0, columnspan=3, sticky="nsew", pady=(theme.SPACE["md"], 0)
+        )
+
+        self.sync_headline = ctk.CTkLabel(
+            sync_card, text="พร้อมทำงาน", font=self._font("title", "bold"), anchor="w"
+        )
+        self.sync_headline.pack(fill="x", padx=theme.SPACE["lg"])
+
+        self.sync_range = ctk.CTkLabel(
+            sync_card,
+            text="ยังไม่ได้เลือกช่วง",
+            font=self._font("body"),
+            text_color=theme.MUTED,
+            anchor="w",
+        )
+        self.sync_range.pack(fill="x", padx=theme.SPACE["lg"], pady=(2, theme.SPACE["sm"]))
+
+        bar_row = ctk.CTkFrame(sync_card, fg_color="transparent")
+        bar_row.pack(fill="x", padx=theme.SPACE["lg"])
+        bar_row.grid_columnconfigure(0, weight=1)
+        self.progress = ctk.CTkProgressBar(
+            bar_row, height=12, progress_color=theme.BRAND, corner_radius=theme.RADIUS["sm"]
+        )
+        self.progress.set(0)
+        self.progress.grid(row=0, column=0, sticky="ew")
+        self.progress_percent = ctk.CTkLabel(
+            bar_row, text="0%", font=self._font("body", "bold"), text_color=theme.INK, width=48
+        )
+        self.progress_percent.grid(row=0, column=1, padx=(theme.SPACE["md"], 0))
+
+        counters = ctk.CTkFrame(sync_card, fg_color="transparent")
+        counters.pack(fill="x", padx=theme.SPACE["lg"], pady=(theme.SPACE["md"], 0))
+        counters.grid_columnconfigure(tuple(range(5)), weight=1, uniform="counter")
+        self.counter_labels: list[tuple[ctk.CTkLabel, ctk.CTkLabel]] = []
+        for column in range(5):
+            caption = ctk.CTkLabel(
+                counters, text="", font=self._font("caption"), text_color=theme.MUTED, anchor="w"
+            )
+            caption.grid(row=0, column=column, sticky="w")
+            value = ctk.CTkLabel(
+                counters, text="-", font=self._font("section", "bold"), anchor="w",
+                text_color=theme.INK,
+            )
+            value.grid(row=1, column=column, sticky="w")
+            self.counter_labels.append((caption, value))
+
+        timing = ctk.CTkFrame(sync_card, fg_color="transparent")
+        timing.pack(fill="x", padx=theme.SPACE["lg"], pady=(theme.SPACE["md"], theme.SPACE["md"]))
+        self.sync_timing = ctk.CTkLabel(
+            timing, text="", font=self._font("caption"), text_color=theme.MUTED, anchor="w"
+        )
+        self.sync_timing.pack(fill="x")
+
+        summary = ctk.CTkFrame(body, fg_color="transparent")
+        summary.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(theme.SPACE["md"], 0))
+        summary.grid_columnconfigure((0, 1, 2), weight=1, uniform="summary")
+        self.summary_labels: dict[str, ctk.CTkLabel] = {}
+        for column, (key, label) in enumerate(
+            (
+                ("last_sync", "ซิงก์สำเร็จล่าสุด"),
+                ("watermark", "ข้อมูลล่าสุดถึงวันที่"),
+                ("next_sync", "รอบอัตโนมัติถัดไป"),
+            )
+        ):
+            cell = self._card(summary)
+            cell.grid(
+                row=0, column=column, sticky="ew", padx=(0 if column == 0 else theme.SPACE["md"], 0)
+            )
+            ctk.CTkLabel(
+                cell, text=label, font=self._font("caption"), text_color=theme.MUTED, anchor="w"
+            ).pack(fill="x", padx=theme.SPACE["lg"], pady=(theme.SPACE["md"], 0))
+            value = ctk.CTkLabel(
+                cell, text="-", font=self._font("section", "bold"), anchor="w", text_color=theme.INK
+            )
+            value.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+            self.summary_labels[key] = value
+
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(theme.SPACE["md"], 0))
+        self.sync_button = self._primary(
+            actions, "ซิงก์เดี๋ยวนี้", lambda: self._run_async(["sync"], "กำลังซิงก์ข้อมูล...")
+        )
+        self.sync_button.pack(side="left")
+        self.verify_button = self._secondary(
+            actions, "ตรวจสอบความครบถ้วน", lambda: self._run_async(["verify"], "กำลังตรวจสอบ...")
+        )
+        self.verify_button.pack(side="left", padx=theme.SPACE["sm"])
+        self.retry_button = self._secondary(
+            actions, "ส่งข้อมูลค้างอีกครั้ง", lambda: self._run_async(["retry"], "กำลังส่งข้อมูลค้าง...")
+        )
+        self.retry_button.pack(side="left")
+        self.action_hint = ctk.CTkLabel(
+            actions, text="", font=self._font("caption"), text_color=theme.MUTED
+        )
+        self.action_hint.pack(side="left", padx=theme.SPACE["md"])
+
+    def _page_sync(self, page: Any) -> None:
+        self._page_title(page, "การซิงก์", "รายละเอียดรอบปัจจุบันและผลการซิงก์ล่าสุด")
+
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=theme.SPACE["xl"], pady=(0, theme.SPACE["lg"]))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        detail = self._card(body, "รอบปัจจุบัน")
+        detail.grid(row=0, column=0, sticky="ew")
+        grid = ctk.CTkFrame(detail, fg_color="transparent")
+        grid.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+        grid.grid_columnconfigure(1, weight=1)
+        self.detail_labels = {
+            key: self._kv(grid, row, label)
+            for row, (key, label) in enumerate(
+                (
+                    ("phase", "สถานะ"),
+                    ("range", "ช่วงวันที่รับบริการ"),
+                    ("batch", "รหัสรอบ"),
+                    ("expected", "พบใน JHCIS"),
+                    ("extracted", "อ่านแล้ว"),
+                    ("uploaded", "ส่งออกแล้ว"),
+                    ("accepted", "ศูนย์กลางรับแล้ว"),
+                    ("rejected", "ปฏิเสธ"),
+                    ("queue", "คิวรอส่ง"),
+                    ("started", "เริ่มเมื่อ"),
+                )
+            )
+        }
+
+        recent = self._card(body, "ผลการทำงานล่าสุด")
+        recent.grid(row=1, column=0, sticky="nsew", pady=(theme.SPACE["md"], 0))
+        self.recent_box = ctk.CTkTextbox(
+            recent,
+            height=120,
+            font=ctk.CTkFont(family="Consolas", size=theme.TYPE["caption"]),
+            fg_color=theme.CANVAS,
+            border_width=0,
+        )
+        self.recent_box.pack(
+            fill="both", expand=True, padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"])
+        )
+
+    def _page_connection(self, page: Any) -> None:
+        """
+        JHCIS and Central are different systems with different failures, so
+        they get different panels and their own test buttons - it must never be
+        ambiguous which one a button is about to talk to.
+        """
+        self._page_title(page, "การเชื่อมต่อ", "ตั้งค่าปลายทาง JHCIS และการลงทะเบียนกับศูนย์กลาง")
+
+        body = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=theme.SPACE["xl"], pady=(0, theme.SPACE["lg"]))
+        body.grid_columnconfigure(0, weight=1)
+
+        jhcis = self._card(body, "ฐานข้อมูล JHCIS (เก็บไว้ในเครื่องนี้เท่านั้น)")
+        jhcis.pack(fill="x")
+        form = ctk.CTkFrame(jhcis, fg_color="transparent")
+        form.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["sm"]))
+        form.grid_columnconfigure(1, weight=1)
+
         self.env_entries: dict[str, ctk.CTkEntry] = {}
         fields = [
-            ("JHCIS_DB_HOST", "เครื่องฐานข้อมูล", "localhost"),
+            ("JHCIS_DB_HOST", "เครื่องฐานข้อมูล (IP)", "192.168.1.10"),
             ("JHCIS_DB_PORT", "พอร์ต", "3306"),
             ("JHCIS_DB_DATABASE", "ชื่อฐานข้อมูล", "jhcisdb"),
             ("JHCIS_DB_USER", "ผู้ใช้ (สิทธิ์อ่านอย่างเดียว)", "readonly"),
             ("JHCIS_DB_PASSWORD", "รหัสผ่าน", ""),
-            ("CENTRAL_API_URL", "ที่อยู่ระบบศูนย์กลาง", "https://"),
         ]
-        for index, (key, label, placeholder) in enumerate(fields):
-            ctk.CTkLabel(jbody, text=label, text_color=MUTED, anchor="w", width=200).grid(
-                row=index, column=0, sticky="w", pady=3
-            )
+        for row, (key, label, placeholder) in enumerate(fields):
+            ctk.CTkLabel(
+                form,
+                text=label,
+                text_color=theme.MUTED,
+                font=self._font("body"),
+                anchor="w",
+                width=theme.LABEL_WIDTH,
+            ).grid(row=row, column=0, sticky="w", pady=theme.SPACE["xs"])
             entry = ctk.CTkEntry(
-                jbody,
-                width=320,
+                form,
                 placeholder_text=placeholder,
                 show="*" if key.endswith("PASSWORD") else "",
+                height=32,
+                corner_radius=theme.RADIUS["sm"],
+                border_color=theme.LINE,
             )
-            entry.grid(row=index, column=1, sticky="w", pady=3)
+            entry.grid(row=row, column=1, sticky="ew", pady=theme.SPACE["xs"])
             self.env_entries[key] = entry
 
-        # เปลี่ยนปลายทางแล้วต้องรู้ทันทีว่าต่อติดไหม ไม่ใช่รอจนถึงรอบซิงก์ถัดไป
-        test_row = ctk.CTkFrame(jbody, fg_color="transparent")
-        test_row.grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=(10, 0))
-        ctk.CTkButton(
-            test_row,
-            text="บันทึกแล้วทดสอบการเชื่อมต่อ",
-            width=210,
-            fg_color="white",
-            text_color=BRAND,
-            border_width=1,
-            border_color="#e3e8ee",
-            hover_color="#eefcfa",
-            command=self._test_jhcis,
-        ).pack(side="left")
-        self.jhcis_hint = ctk.CTkLabel(
-            test_row, text="", text_color=MUTED, anchor="w", font=ctk.CTkFont(size=11)
+        jhcis_actions = ctk.CTkFrame(jhcis, fg_color="transparent")
+        jhcis_actions.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+        self._secondary(jhcis_actions, "บันทึกและทดสอบการเชื่อมต่อ JHCIS", self._test_jhcis).pack(
+            side="left"
         )
-        self.jhcis_hint.pack(side="left", padx=10)
+        self.jhcis_hint = ctk.CTkLabel(
+            jhcis_actions, text="", font=self._font("caption"), text_color=theme.MUTED
+        )
+        self.jhcis_hint.pack(side="left", padx=theme.SPACE["md"])
 
-        enroll = self._card(scroll, "ลงทะเบียนกับระบบศูนย์กลาง")
-        ebody = ctk.CTkFrame(enroll, fg_color="transparent")
-        ebody.pack(fill="x", padx=16, pady=(0, 14))
+        central = self._card(body, "ศูนย์กลาง (Central)")
+        central.pack(fill="x", pady=(theme.SPACE["md"], 0))
+        cgrid = ctk.CTkFrame(central, fg_color="transparent")
+        cgrid.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["sm"]))
+        cgrid.grid_columnconfigure(1, weight=1)
+
         ctk.CTkLabel(
-            ebody,
-            text="ขอรหัสลงทะเบียน (enrollment token) จากผู้ดูแลระบบส่วนกลาง ใช้ได้ครั้งเดียว",
-            text_color=MUTED,
-            font=ctk.CTkFont(size=11),
+            cgrid,
+            text="ที่อยู่ศูนย์กลาง",
+            text_color=theme.MUTED,
+            font=self._font("body"),
             anchor="w",
-        ).pack(anchor="w", pady=(0, 6))
-        row = ctk.CTkFrame(ebody, fg_color="transparent")
+            width=theme.LABEL_WIDTH,
+        ).grid(row=0, column=0, sticky="w", pady=theme.SPACE["xs"])
+        central_entry = ctk.CTkEntry(
+            cgrid, placeholder_text="https://", height=32, corner_radius=theme.RADIUS["sm"],
+            border_color=theme.LINE,
+        )
+        central_entry.grid(row=0, column=1, sticky="ew", pady=theme.SPACE["xs"])
+        self.env_entries["CENTRAL_API_URL"] = central_entry
+
+        self.central_labels = {
+            key: self._kv(cgrid, row, label)
+            for row, (key, label) in enumerate(
+                (("enrolled", "สถานะการลงทะเบียน"), ("facility", "สถานบริการ"), ("ack", "ติดต่อสำเร็จล่าสุด")),
+                start=1,
+            )
+        }
+
+        enroll_row = ctk.CTkFrame(central, fg_color="transparent")
+        enroll_row.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+        ctk.CTkLabel(
+            enroll_row,
+            text="รหัสลงทะเบียน (ขอจากผู้ดูแลระบบ ใช้ได้ครั้งเดียว)",
+            text_color=theme.MUTED,
+            font=self._font("caption"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, theme.SPACE["xs"]))
+        row = ctk.CTkFrame(enroll_row, fg_color="transparent")
         row.pack(fill="x")
-        self.token_entry = ctk.CTkEntry(row, placeholder_text="ENR-...", width=380)
-        self.token_entry.pack(side="left")
-        ctk.CTkButton(
-            row,
-            text="ลงทะเบียน",
-            width=120,
-            fg_color=BRAND,
-            hover_color=BRAND_HOVER,
-            command=self._enroll,
-        ).pack(side="left", padx=8)
+        self.token_entry = ctk.CTkEntry(
+            row, placeholder_text="ENR-...", height=32, corner_radius=theme.RADIUS["sm"],
+            border_color=theme.LINE,
+        )
+        self.token_entry.pack(side="left", fill="x", expand=True)
+        self._primary(row, "ลงทะเบียนกับศูนย์กลาง", self._enroll).pack(
+            side="left", padx=(theme.SPACE["sm"], 0)
+        )
 
-        save_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        save_row.pack(fill="x", pady=(8, 16))
-        ctk.CTkButton(
-            save_row,
-            text="บันทึกการตั้งค่า",
-            command=self._save_settings,
-            fg_color=BRAND,
-            hover_color=BRAND_HOVER,
-            height=38,
-            width=170,
-        ).pack(side="left")
-        self.settings_hint = ctk.CTkLabel(save_row, text="", text_color=OK, anchor="w")
-        self.settings_hint.pack(side="left", padx=12)
+        self.connection_hint = ctk.CTkLabel(
+            body, text="", font=self._font("caption"), text_color=theme.MUTED, anchor="w"
+        )
+        self.connection_hint.pack(fill="x", pady=(theme.SPACE["sm"], 0))
 
-    def _build_logs_tab(self) -> None:
-        self.log_box = ctk.CTkTextbox(self.tab_logs, font=ctk.CTkFont(family="Consolas", size=11))
-        self.log_box.pack(fill="both", expand=True, padx=4, pady=4)
+    def _page_settings(self, page: Any) -> None:
+        """Schedule and Windows behaviour only - no connection fields here."""
+        self._page_title(page, "ตั้งค่า", "ตารางการซิงก์อัตโนมัติและพฤติกรรมของโปรแกรม")
 
-        row = ctk.CTkFrame(self.tab_logs, fg_color="transparent")
-        row.pack(fill="x", padx=4, pady=(0, 4))
-        ctk.CTkButton(
-            row,
-            text="เปิดโฟลเดอร์ข้อมูล",
-            command=lambda: webbrowser.open(str(data_dir())),
-            fg_color="white",
-            text_color=BRAND,
-            border_width=1,
-            border_color="#e3e8ee",
-            hover_color="#eefcfa",
-        ).pack(side="left")
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=theme.SPACE["xl"], pady=(0, theme.SPACE["lg"]))
+        body.grid_columnconfigure(0, weight=1)
+
+        schedule = self._card(body, "ตารางการซิงก์อัตโนมัติ")
+        schedule.grid(row=0, column=0, sticky="ew")
+        grid = ctk.CTkFrame(schedule, fg_color="transparent")
+        grid.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+        grid.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkSwitch(
+            grid,
+            text="ซิงก์อัตโนมัติ",
+            variable=self.auto_var,
+            progress_color=theme.BRAND,
+            font=self._font("body"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(theme.SPACE["xs"], theme.SPACE["sm"]))
+
+        ctk.CTkLabel(
+            grid, text="ทุก ๆ", text_color=theme.MUTED, font=self._font("body"), anchor="w",
+            width=theme.LABEL_WIDTH,
+        ).grid(row=1, column=0, sticky="w", pady=theme.SPACE["xs"])
+        self.interval_menu = ctk.CTkOptionMenu(
+            grid,
+            values=["15 นาที", "30 นาที", "1 ชั่วโมง", "3 ชั่วโมง", "12 ชั่วโมง", "วันละครั้ง", "ไม่ใช้"],
+            fg_color=theme.BRAND,
+            button_color=theme.BRAND,
+            button_hover_color=theme.BRAND_HOVER,
+            font=self._font("body"),
+        )
+        self.interval_menu.grid(row=1, column=1, sticky="w", pady=theme.SPACE["xs"])
+
+        ctk.CTkLabel(
+            grid, text="หรือเวลาที่กำหนด", text_color=theme.MUTED, font=self._font("body"),
+            anchor="w", width=theme.LABEL_WIDTH,
+        ).grid(row=2, column=0, sticky="w", pady=theme.SPACE["xs"])
+        self.times_entry = ctk.CTkEntry(
+            grid, placeholder_text="08:00, 16:30", height=32,
+            corner_radius=theme.RADIUS["sm"], border_color=theme.LINE,
+        )
+        self.times_entry.grid(row=2, column=1, sticky="ew", pady=theme.SPACE["xs"])
+        ctk.CTkLabel(
+            grid,
+            text="ใส่เวลาแบบ 24 ชั่วโมง คั่นด้วยจุลภาค",
+            text_color=theme.MUTED,
+            font=self._font("caption"),
+            anchor="w",
+        ).grid(row=3, column=1, sticky="w")
+
+        windows = self._card(body, "การทำงานร่วมกับ Windows")
+        windows.grid(row=1, column=0, sticky="ew", pady=(theme.SPACE["md"], 0))
+        wbody = ctk.CTkFrame(windows, fg_color="transparent")
+        wbody.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+        ctk.CTkSwitch(
+            wbody,
+            text="เปิดโปรแกรมอัตโนมัติเมื่อเริ่มเครื่อง",
+            variable=self.startup_var,
+            progress_color=theme.BRAND,
+            font=self._font("body"),
+        ).pack(anchor="w", pady=theme.SPACE["xs"])
+        ctk.CTkSwitch(
+            wbody,
+            text="ย่อลงถาดระบบเมื่อปิดหน้าต่าง (โปรแกรมยังทำงานต่อ)",
+            variable=self.tray_var,
+            progress_color=theme.BRAND,
+            font=self._font("body"),
+        ).pack(anchor="w", pady=theme.SPACE["xs"])
+
+        save_row = ctk.CTkFrame(body, fg_color="transparent")
+        save_row.grid(row=2, column=0, sticky="ew", pady=(theme.SPACE["md"], 0))
+        self._primary(save_row, "บันทึกการตั้งค่า", self._save_settings).pack(side="left")
+        self.settings_hint = ctk.CTkLabel(
+            save_row, text="", font=self._font("caption"), text_color=theme.OK
+        )
+        self.settings_hint.pack(side="left", padx=theme.SPACE["md"])
+
+    def _page_logs(self, page: Any) -> None:
+        self._page_title(page, "บันทึกการทำงาน", "บันทึกล่าสุดของโปรแกรมในเครื่องนี้")
+
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=theme.SPACE["xl"], pady=(0, theme.SPACE["lg"]))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        controls = ctk.CTkFrame(body, fg_color="transparent")
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, theme.SPACE["sm"]))
+
+        ctk.CTkLabel(
+            controls, text="ระดับ", text_color=theme.MUTED, font=self._font("body")
+        ).pack(side="left", padx=(0, theme.SPACE["sm"]))
+        self.log_level = ctk.CTkOptionMenu(
+            controls,
+            values=["ทั้งหมด", "เฉพาะ ERROR", "ERROR + WARN"],
+            width=160,
+            fg_color=theme.SURFACE,
+            text_color=theme.INK,
+            button_color=theme.LINE,
+            button_hover_color=theme.LINE,
+            font=self._font("body"),
+            command=lambda _: self._render_log(force=True),
+        )
+        self.log_level.pack(side="left")
+
+        self._secondary(
+            controls, "เปิดโฟลเดอร์บันทึก", lambda: webbrowser.open(str(data_dir() / "logs"))
+        ).pack(side="left", padx=theme.SPACE["sm"])
+        self._secondary(controls, "คัดลอกข้อผิดพลาดล่าสุด", self._copy_last_error).pack(side="left")
+        self.log_hint = ctk.CTkLabel(
+            controls, text="", font=self._font("caption"), text_color=theme.MUTED
+        )
+        self.log_hint.pack(side="left", padx=theme.SPACE["md"])
+
+        self.log_box = ctk.CTkTextbox(
+            body,
+            height=240,
+            font=ctk.CTkFont(family="Consolas", size=theme.TYPE["caption"]),
+            fg_color=theme.SURFACE,
+            border_width=0,
+            corner_radius=theme.RADIUS["md"],
+        )
+        self.log_box.grid(row=1, column=0, sticky="nsew")
 
     # -- behaviour --------------------------------------------------------------
+
+    def _copy_last_error(self) -> None:
+        for line in reversed(self.bridge.latest_log(400).splitlines()):
+            if "ERROR" in line:
+                self.clipboard_clear()
+                self.clipboard_append(line.strip())
+                self.log_hint.configure(text="คัดลอกแล้ว", text_color=theme.OK)
+                self.after(4000, lambda: self.log_hint.configure(text=""))
+                return
+        self.log_hint.configure(text="ไม่พบข้อผิดพลาดในบันทึกล่าสุด", text_color=theme.MUTED)
+        self.after(4000, lambda: self.log_hint.configure(text=""))
+
+    def _render_log(self, force: bool = False) -> None:
+        content = self.bridge.latest_log()
+        level = self.log_level.get()
+        if level == "เฉพาะ ERROR":
+            content = "\n".join(l for l in content.splitlines() if "ERROR" in l)
+        elif level == "ERROR + WARN":
+            content = "\n".join(l for l in content.splitlines() if "ERROR" in l or "WARN" in l)
+        content = content or "ไม่มีบันทึกที่ตรงกับตัวกรอง"
+        if force or content != self._last_log:
+            self._last_log = content
+            self.log_box.delete("1.0", "end")
+            self.log_box.insert("1.0", content)
+            self.log_box.see("end")
+
     def _load_settings_into_form(self) -> None:
         settings = self.bridge.settings()
         self.auto_var.set(bool(settings.get("autoSyncEnabled", True)))
         minutes = int(settings.get("syncIntervalMinutes", 60))
-        self.interval_menu.set(
-            {
-                0: "ไม่ใช้",
-                15: "15 นาที",
-                30: "30 นาที",
-                60: "1 ชั่วโมง",
-                180: "3 ชั่วโมง",
-                720: "12 ชั่วโมง",
-                1440: "วันละครั้ง",
-            }.get(minutes, "1 ชั่วโมง")
-        )
-        self.times_entry.delete(0, "end")
-        self.times_entry.insert(0, ", ".join(settings.get("dailyTimes", [])))
+        if hasattr(self, "interval_menu"):
+            self.interval_menu.set(
+                {
+                    0: "ไม่ใช้",
+                    15: "15 นาที",
+                    30: "30 นาที",
+                    60: "1 ชั่วโมง",
+                    180: "3 ชั่วโมง",
+                    720: "12 ชั่วโมง",
+                    1440: "วันละครั้ง",
+                }.get(minutes, "1 ชั่วโมง")
+            )
+            self.times_entry.delete(0, "end")
+            self.times_entry.insert(0, ", ".join(settings.get("dailyTimes", [])))
         self.startup_var.set(bool(settings.get("startWithWindows", True)))
         self.tray_var.set(bool(settings.get("minimiseToTray", True)))
 
-        # การเชื่อมต่อ JHCIS อ่านจาก agent โดยตรง (ค่าที่มันใช้จริง ซึ่งอาจมาจาก
-        # ไฟล์ในโฟลเดอร์ข้อมูล ไม่ใช่ .env) ส่วนค่าอื่นยังอ่านจาก .env
+        if not hasattr(self, "env_entries"):
+            return
+
+        # JHCIS settings come from the agent itself - the values it is actually
+        # using, which may be the file in the data folder rather than .env.
         env = self.bridge.read_env()
         jhcis = self.bridge.jhcis_settings()
         current = {
@@ -701,7 +1092,8 @@ class AgentApp(ctk.CTk):
             "JHCIS_DB_PORT": str(jhcis.get("port", "")) or env.get("JHCIS_DB_PORT", ""),
             "JHCIS_DB_DATABASE": str(jhcis.get("database", "")) or env.get("JHCIS_DB_DATABASE", ""),
             "JHCIS_DB_USER": str(jhcis.get("user", "")) or env.get("JHCIS_DB_USER", ""),
-            # ไม่เคยดึงรหัสผ่านออกมาแสดง เว้นว่าง = ใช้รหัสเดิม
+            # The password is never read back out. Blank means "keep the one
+            # already stored", so moving a server does not require retyping it.
             "JHCIS_DB_PASSWORD": "",
         }
         for key, entry in self.env_entries.items():
@@ -710,7 +1102,7 @@ class AgentApp(ctk.CTk):
         if hasattr(self, "jhcis_hint"):
             self.jhcis_hint.configure(
                 text="เว้นช่องรหัสผ่านไว้ = ใช้รหัสเดิม" if jhcis.get("hasPassword") else "",
-                text_color=MUTED,
+                text_color=theme.MUTED,
             )
 
     def _save_settings(self) -> None:
@@ -739,29 +1131,32 @@ class AgentApp(ctk.CTk):
                 "minimiseToTray": bool(self.tray_var.get()),
             }
         )
-        self._persist_jhcis()
-        # ที่อยู่ศูนย์กลางยังอยู่ใน .env (ใช้ตอนลงทะเบียนครั้งแรกเท่านั้น)
-        try:
-            self.bridge.write_env({"CENTRAL_API_URL": self.env_entries["CENTRAL_API_URL"].get().strip()})
-        except OSError:
-            # .env อยู่ใน Program Files ผู้ใช้ทั่วไปเขียนไม่ได้ ซึ่งไม่เป็นไร
-            # หลังลงทะเบียนแล้วที่อยู่ศูนย์กลางถูกเก็บใน agent.config.json
-            pass
         message = set_autostart(bool(self.startup_var.get()))
 
-        # The worker re-reads settings each tick, but JHCIS credentials are read
-        # at start-up, so a restart is the honest way to apply them.
+        # The worker re-reads settings each tick, so only the schedule needs no
+        # restart; it is restarted anyway because startup behaviour changed.
         self.bridge.stop_background()
         self.worker_error = self.bridge.start_background()
 
-        self.settings_hint.configure(text=f"บันทึกแล้ว · {message}", text_color=OK)
+        self.settings_hint.configure(text=f"บันทึกแล้ว · {message}", text_color=theme.OK)
         self.after(6000, lambda: self.settings_hint.configure(text=""))
+
+    def _save_connection(self) -> CommandResult:
+        """Writes the Central URL, then hands JHCIS to the agent to store."""
+        try:
+            self.bridge.write_env(
+                {"CENTRAL_API_URL": self.env_entries["CENTRAL_API_URL"].get().strip()}
+            )
+        except OSError:
+            # .env lives in Program Files, which a staff account cannot write.
+            # After enrolment the central URL lives in agent.config.json anyway.
+            pass
+        return self._persist_jhcis()
 
     def _persist_jhcis(self) -> CommandResult:
         """
         Sends the JHCIS fields to the agent, which owns the file and its
-        permissions. An empty password box means "keep the one already saved",
-        so moving the server to a new IP does not require retyping it.
+        permissions. An empty password box means "keep the one already saved".
         """
         values: dict[str, Any] = {
             "host": self.env_entries["JHCIS_DB_HOST"].get().strip(),
@@ -772,45 +1167,50 @@ class AgentApp(ctk.CTk):
         password = self.env_entries["JHCIS_DB_PASSWORD"].get()
         if password:
             values["password"] = password
-        # ไม่ส่งคีย์ password ไปเลย = agent เก็บรหัสเดิมไว้
+        # Omitting the key entirely is what tells the agent to keep the old one.
         return self.bridge.save_jhcis(values)
 
     def _test_jhcis(self) -> None:
         """Saves what is on screen, then asks the agent to connect to it."""
-        self.jhcis_hint.configure(text="กำลังบันทึกและทดสอบ...", text_color=MUTED)
+        self.jhcis_hint.configure(text="กำลังบันทึกและทดสอบ...", text_color=theme.MUTED)
         self.update_idletasks()
 
-        saved = self._persist_jhcis()
+        saved = self._save_connection()
         if not saved.ok:
-            self.jhcis_hint.configure(text=saved.output.strip()[:120], text_color=DANGER)
+            self.jhcis_hint.configure(text=saved.output.strip()[:120], text_color=theme.DANGER)
             return
 
         result = self.bridge.run(["doctor"], timeout=120)
         if result.ok and "CONNECTED" in result.output:
-            self.jhcis_hint.configure(text="เชื่อมต่อ JHCIS สำเร็จ", text_color=OK)
-            # ให้ตัวที่ทำงานอยู่เบื้องหลังใช้ปลายทางใหม่ทันที
+            self.jhcis_hint.configure(text="เชื่อมต่อ JHCIS สำเร็จ", text_color=theme.OK)
+            # Let the background worker pick up the new target immediately.
             self.bridge.stop_background()
             self.worker_error = self.bridge.start_background()
         else:
             tail = [line for line in result.output.splitlines() if line.strip()][-1:]
             self.jhcis_hint.configure(
                 text=f"เชื่อมต่อไม่สำเร็จ: {tail[0][:100] if tail else 'ตรวจสอบ IP/พอร์ต'}",
-                text_color=DANGER,
+                text_color=theme.DANGER,
             )
 
     def _enroll(self) -> None:
         token = self.token_entry.get().strip()
         if not token:
-            self.settings_hint.configure(text="กรุณากรอกรหัสลงทะเบียน", text_color=DANGER)
+            self.connection_hint.configure(text="กรุณากรอกรหัสลงทะเบียน", text_color=theme.DANGER)
             return
+        self._save_connection()
         self._run_async(["enroll", "--token", token], "กำลังลงทะเบียน...")
+
+    def _action_buttons(self) -> list[ctk.CTkButton]:
+        return [self.sync_button, self.verify_button, self.retry_button]
 
     def _run_async(self, args: list[str], busy_text: str) -> None:
         if self.busy:
             return
         self.busy = True
-        self.sync_button.configure(state="disabled")
-        self.phase_label.configure(text=busy_text, text_color=BRAND)
+        for button in self._action_buttons():
+            button.configure(state="disabled")
+        self.sync_headline.configure(text=busy_text, text_color=theme.BRAND)
 
         def worker() -> None:
             result = self.bridge.run(args)
@@ -827,92 +1227,115 @@ class AgentApp(ctk.CTk):
             kind, output = self.messages.get()
             if kind == "version":
                 # Not the result of a command the operator ran: it must not
-                # clear the busy state or overwrite the phase message.
+                # clear the busy state or overwrite the headline.
                 self._apply_version(output)
                 continue
             self.busy = False
-            self.sync_button.configure(state="normal")
             tail = output.strip().splitlines()[-1] if output.strip() else ""
             if kind == "error":
-                self.phase_label.configure(text=f"ไม่สำเร็จ: {tail}"[:120], text_color=DANGER)
-            else:
-                self.phase_label.configure(text=tail[:120] or "ทำงานเสร็จแล้ว", text_color=OK)
+                self.sync_headline.configure(text=f"ไม่สำเร็จ: {tail}"[:140], text_color=theme.DANGER)
             self._load_settings_into_form()
 
         status = self.bridge.status()
         state = self.bridge.state()
         credential = self.bridge.credential()
+        settings = self.bridge.settings()
         pending, failed = self.bridge.queue_depth()
 
         if credential:
             self.facility_label.configure(
-                text=f"{credential.get('facilityCode', '')} · {credential.get('facilityName', '')}"
+                text="{} · {} · pcucode {}".format(
+                    credential.get("facilityCode", "-"),
+                    credential.get("facilityName", "-"),
+                    credential.get("expectedPcucode", "-"),
+                )
             )
         else:
             self.facility_label.configure(text="ยังไม่ได้ลงทะเบียนกับศูนย์กลาง")
 
-        jhcis = status.get("jhcisConnected")
-        central = status.get("centralConnected")
-        marks = {
-            True: "เชื่อมต่อแล้ว",
-            False: "ไม่ได้เชื่อมต่อ",
-            None: "ยังไม่ทราบ",
-        }
-        self.connection_label.configure(
-            text=f"JHCIS: {marks[jhcis]}   ·   ศูนย์กลาง: {marks[central]}"
-        )
+        # Every visible state comes from theme.py, so what the screen says and
+        # what the tests assert cannot drift apart.
+        for item in theme.system_status(status, credential, self.bridge.background_running(), self.worker_error):
+            widgets = self.status_cards[item.key]
+            colour = theme.TONE_COLOURS[item.tone]
+            widgets["dot"].configure(text_color=colour)
+            widgets["name"].configure(text=item.label)
+            widgets["value"].configure(text=item.text, text_color=colour)
+            widgets["detail"].configure(text=item.detail)
 
-        total = int(status.get("total") or 0)
-        uploaded = int(status.get("uploaded") or 0)
-        extracted = int(status.get("extracted") or 0)
-        phase = status.get("phase", "idle")
-
+        view = theme.sync_view(status)
         if not self.busy:
-            phase_text = {
-                "idle": "พร้อมทำงาน",
-                "starting": "กำลังเตรียมข้อมูล",
-                "extracting": "กำลังอ่านข้อมูลจาก JHCIS",
-                "uploading": "กำลังส่งข้อมูลขึ้นศูนย์กลาง",
-                "done": status.get("message") or "ซิงก์สำเร็จ",
-                "error": status.get("message") or "พบข้อผิดพลาด",
-            }.get(phase, phase)
-            colour = {"error": DANGER, "done": OK}.get(phase, BRAND)
-            self.phase_label.configure(text=phase_text, text_color=colour)
-
-        if total > 0:
-            done = max(uploaded, min(extracted, total))
-            self.progress.set(min(1.0, done / total))
-            self.progress_label.configure(
-                text=(
-                    f"อ่านแล้ว {extracted:,} / {total:,} รายการ · "
-                    f"ส่งขึ้นศูนย์กลางแล้ว {uploaded:,} รายการ"
-                )
+            self.sync_headline.configure(
+                text=view.headline[:140], text_color=theme.TONE_COLOURS[view.tone]
             )
-        else:
-            self.progress.set(0)
-            self.progress_label.configure(text="ยังไม่มีการซิงก์ในรอบนี้")
-
-        self.info_labels["last_sync"].configure(
-            text=(state.get("lastSyncAt") or status.get("lastSyncAt") or "ยังไม่เคยซิงก์")[:19].replace("T", " ")
+        self.sync_range.configure(text=f"ช่วงวันที่รับบริการ  {view.range_text}")
+        self.progress.set(view.progress)
+        self.progress_percent.configure(text=view.percent_text)
+        for (caption, value), (label, text) in zip(self.counter_labels, view.counters):
+            caption.configure(text=label)
+            value.configure(text=text)
+        self.sync_timing.configure(
+            text=(
+                f"เริ่มเมื่อ {view.started_text} · ใช้เวลา {view.elapsed_text}"
+                if view.active
+                else f"เริ่มเมื่อ {view.started_text}"
+            )
         )
-        self.info_labels["watermark"].configure(text=state.get("lastSyncedVisitDate") or "-")
-        self.info_labels["queue"].configure(
+
+        # Starting a second run would be refused by the agent's lock anyway;
+        # saying so before the click is kinder than an error afterwards.
+        blocked = self.busy or view.active
+        for button in self._action_buttons():
+            button.configure(state="disabled" if blocked else "normal")
+        self.action_hint.configure(text=view.busy_reason if view.active else "")
+
+        self.summary_labels["last_sync"].configure(
+            text=(state.get("lastSyncAt") or status.get("lastSyncAt") or "ยังไม่เคยซิงก์")[:19].replace(
+                "T", " "
+            )
+        )
+        self.summary_labels["watermark"].configure(text=state.get("lastSyncedVisitDate") or "-")
+        self.summary_labels["next_sync"].configure(
+            text=(
+                "ปิดการซิงก์อัตโนมัติ"
+                if not settings.get("autoSyncEnabled", True)
+                else theme.next_sync_text(settings, state)
+            )
+        )
+
+        self.detail_labels["phase"].configure(text=view.headline[:80])
+        self.detail_labels["range"].configure(text=view.range_text)
+        self.detail_labels["batch"].configure(text=status.get("batchRef") or "-")
+        self.detail_labels["expected"].configure(text=theme.number(status.get("recordsExpected")))
+        self.detail_labels["extracted"].configure(text=theme.number(status.get("recordsExtracted")))
+        self.detail_labels["uploaded"].configure(text=theme.number(status.get("recordsUploaded")))
+        self.detail_labels["accepted"].configure(text=theme.number(status.get("recordsAccepted")))
+        self.detail_labels["rejected"].configure(text=theme.number(status.get("recordsRejected")))
+        self.detail_labels["queue"].configure(
             text=f"{pending} ชุด" + (f" (ล้มเหลว {failed} ชุด)" if failed else "")
         )
-        self.info_labels["worker"].configure(
-            text=(
-                "กำลังทำงาน"
-                if self.bridge.background_running()
-                else (self.worker_error or "หยุดอยู่")
-            )
+        self.detail_labels["started"].configure(text=view.started_text)
+
+        self.central_labels["enrolled"].configure(
+            text="ลงทะเบียนแล้ว" if credential else "ยังไม่ได้ลงทะเบียน"
+        )
+        self.central_labels["facility"].configure(
+            text=credential.get("facilityName", "-") if credential else "-"
+        )
+        self.central_labels["ack"].configure(
+            text=theme.relative(status.get("centralAckAt"), datetime.now(timezone.utc))
         )
 
-        if self.tabs.get() == "บันทึกการทำงาน":
-            content = self.bridge.latest_log()
-            if content != self.log_box.get("1.0", "end").strip():
-                self.log_box.delete("1.0", "end")
-                self.log_box.insert("1.0", content)
-                self.log_box.see("end")
+        if self.current_page == "sync":
+            recent = status.get("message") or ""
+            error = status.get("lastError") or ""
+            text = "\n".join(part for part in (recent, error) if part) or "ยังไม่มีผลการทำงานล่าสุด"
+            if text != self.recent_box.get("1.0", "end").strip():
+                self.recent_box.delete("1.0", "end")
+                self.recent_box.insert("1.0", text)
+
+        if self.current_page == "logs":
+            self._render_log()
 
     # -- tray ------------------------------------------------------------------
     def _tray_image(self):  # pragma: no cover - visual only

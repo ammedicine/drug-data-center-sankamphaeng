@@ -152,6 +152,8 @@ Invoke-Native {
     --workpath (Join-Path $BuildDir "pyinstaller") `
     --specpath (Join-Path $BuildDir "pyinstaller") `
     --add-data "$customtkinterPath;customtkinter" `
+    --paths (Join-Path $AgentRoot "gui") `
+    --hidden-import theme `
     (Join-Path $AgentRoot "gui\sdc_agent_gui.py")
 } "PyInstaller"
 Info "ได้ $BuildDir\gui\SDCAgent.exe"

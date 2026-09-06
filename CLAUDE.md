@@ -30,6 +30,7 @@ JHCISDB (LAN, read-only) → Local Agent (outbound only) → HTTPS + HMAC
 
 ```
 agent/gui/sdc_agent_gui.py   หน้าจอ CustomTkinter + ไอคอนถาดระบบ (pystray)
+agent/gui/theme.py           design token + ตัวแปลงสถานะเป็นสิ่งที่หน้าจอแสดง (pure)
 agent/gui/smoke_test.py      ทดสอบตรรกะโดยไม่เปิดหน้าต่าง (ใช้ตอน desktop ล็อก/CI)
 agent/installer/build.ps1    bundle agent -> node runtime -> PyInstaller -> Inno Setup
 agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, ProgramData, uninstall)
@@ -87,6 +88,20 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
   (ไม่ส่งทาง argv เพราะรหัสผ่านจะโผล่ใน process list) — `agent jhcis` อ่านค่าปัจจุบันแบบปิดรหัสผ่าน
 - **เว้นช่องรหัสผ่านว่าง = ใช้รหัสเดิม** (ย้าย IP โดยไม่ต้องพิมพ์รหัสใหม่)
 - `gui/smoke_test.py` ตรวจ save/load รอบนี้ให้ด้วย รันได้โดยไม่ต้องเปิดหน้าต่าง
+
+### หน้าจอ Agent (redesign 2026-09-06)
+- โครงเป็น **sidebar ซ้าย + เนื้อหาขวา** 5 หน้า: ภาพรวม · การซิงก์ · การเชื่อมต่อ · ตั้งค่า · บันทึก
+- **`gui/theme.py` เป็นที่เดียวที่กำหนด** ระยะห่าง (4/8/12/16/24/32), ขนาดตัวอักษร, สี, ขนาดหน้าต่าง
+  ห้าม hardcode padding/สี/ความกว้างใน `sdc_agent_gui.py` อีก
+- **ตรรกะว่าจอจะแสดงอะไร อยู่ใน theme.py ทั้งหมด** (`system_status`, `sync_view`, `next_sync_text`)
+  เป็น pure function -> `smoke_test.py` ตรวจได้ทุกสถานะโดยไม่ต้องเปิดหน้าต่าง (เครื่อง build ไม่มีจอ)
+- ขนาดหน้าต่าง 1100x720 · **ต่ำสุด 960x700** (ไม่ใช่ 640 เพราะวัดจริงแล้วหน้าภาพรวมสูง 626px
+  ถ้าต่ำกว่านี้จะโดนตัด) — เปลี่ยนเมื่อไรต้องวัดใหม่
+- สี 4 โทนเท่านั้น: เขียว=ปกติ · เหลือง=ข้อมูลเก่า/กำลัง retry · แดง=ผิดพลาด · เทา=ยังไม่ทราบ
+- progress คิดจาก **accepted+rejected / expected** ไม่ใช่จำนวนที่อ่านได้ เพราะการอ่านนำการส่งเสมอ
+  ถ้าใช้ยอดอ่าน หลอดจะเต็ม 100% ทั้งที่ข้อมูลยังส่งไม่หมด
+- ปุ่มที่ทำให้ซิงก์ซ้อนจะถูก disable พร้อมบอกเหตุผล เมื่อ `syncPhase` อยู่ใน READING/UPLOADING/VERIFYING
+- PyInstaller ต้องมี `--paths gui --hidden-import theme` ไม่งั้น exe จะหา theme ไม่เจอ
 
 - GUI จอง mutex `SDCAgentRunningMutex` = ตัวเดียวกับ `AppMutex` ใน .iss (กันเปิดซ้อน + ให้ installer รู้ว่ายังเปิดอยู่)
 

@@ -1,7 +1,14 @@
 """
 Headless check of the desktop app's plumbing: paths, agent command resolution,
-settings/state files and one real CLI call. Run it when a GUI cannot be opened
-(a locked desktop, CI) - it exercises everything except the widgets.
+settings and state files, one real CLI call - and every state the screen can
+be in.
+
+The window cannot be opened on a build machine or a locked desktop, so the
+parts that decide what the screen says live in theme.py as pure functions.
+This exercises them against the situations that actually happen at a รพ.สต.:
+never enrolled, Central unreachable, JHCIS down, a sync at 0%, half done and
+finished, rows rejected, chunks stuck in the queue, and an error message far
+too long for its label.
 
     gui\\.venv\\Scripts\\python.exe gui\\smoke_test.py
 """
@@ -11,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -25,6 +33,131 @@ def load_app():
     sys.modules["sdc_gui"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def check(theme) -> list[str]:
+    """Returns a list of failures; empty means every scenario mapped correctly."""
+    failures: list[str] = []
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(seconds=5)).isoformat()
+    stale = (now - timedelta(seconds=600)).isoformat()
+    enrolled = {"facilityCode": "RPST-05957", "facilityName": "รพ.สต.ทดสอบ", "expectedPcucode": "05957"}
+
+    def expect(condition: bool, message: str) -> None:
+        if not condition:
+            failures.append(message)
+
+    # --- never enrolled -----------------------------------------------------
+    items = {i.key: i for i in theme.system_status({}, {}, False, None, now)}
+    expect(items["central"].tone == "muted", "not enrolled: Central should be muted, not an error")
+    expect("ลงทะเบียน" in items["central"].text, "not enrolled: should say so plainly")
+    expect(items["jhcis"].tone == "muted", "not enrolled: JHCIS is unknown, not broken")
+    expect(items["worker"].tone == "danger", "worker stopped should be red")
+
+    # --- Central unreachable, JHCIS fine ------------------------------------
+    status = {
+        "centralState": "NETWORK_ERROR",
+        "centralAckAt": stale,
+        "jhcisState": "CONNECTED",
+        "jhcisCheckedAt": fresh,
+    }
+    items = {i.key: i for i in theme.system_status(status, enrolled, True, None, now)}
+    expect(items["central"].tone == "danger", "Central down should be red")
+    expect(items["jhcis"].tone == "ok", "JHCIS must stay green while Central is down")
+
+    # --- credential revoked -------------------------------------------------
+    status = {"centralState": "AUTH_ERROR", "centralAckAt": stale}
+    item = theme.central_status(status, enrolled, now)
+    expect(item.tone == "danger", "revoked credential should be red")
+    expect("ลงทะเบียนใหม่" in item.detail, "revoked credential should say what to do about it")
+
+    # --- said connected, but long ago ---------------------------------------
+    status = {"centralState": "CONNECTED", "centralAckAt": stale}
+    item = theme.central_status(status, enrolled, now)
+    expect(item.tone == "warn", "an old acknowledgement must read as stale, not connected")
+
+    # --- JHCIS switched off -------------------------------------------------
+    item = theme.jhcis_status({"jhcisState": "UNREACHABLE", "jhcisCheckedAt": fresh}, now)
+    expect(item.tone == "danger", "JHCIS unreachable should be red")
+
+    # --- idle ---------------------------------------------------------------
+    view = theme.sync_view({}, now)
+    expect(view.progress == 0.0, "idle progress should be 0")
+    expect(not view.active, "idle must not disable the action buttons")
+    expect(view.range_text != "", "idle still needs something in the range line")
+
+    # --- a run at 0%, 50% and 100% -----------------------------------------
+    base = {
+        "syncPhase": "UPLOADING",
+        "rangeFrom": "2026-09-01",
+        "rangeTo": "2026-09-06",
+        "recordsExpected": 12482,
+        "syncStartedAt": (now - timedelta(minutes=3)).isoformat(),
+    }
+    view = theme.sync_view({**base, "recordsExtracted": 500}, now)
+    expect(view.progress == 0.0, "nothing accepted yet means 0%")
+    expect(view.active, "a running sync must disable actions")
+    expect(view.busy_reason != "", "a disabled action needs a reason on screen")
+
+    view = theme.sync_view({**base, "recordsExtracted": 8500, "recordsAccepted": 6241}, now)
+    expect(abs(view.progress - 0.5) < 0.01, f"half delivered should be 50%, got {view.progress}")
+    expect(view.percent_text == "50%", f"percent text should be 50%, got {view.percent_text}")
+    expect("8,500" in view.counters[0][1], "counters should be grouped with commas")
+    expect("12,482" in view.counters[0][1], "counters should show the total read from JHCIS")
+
+    view = theme.sync_view(
+        {**base, "syncPhase": "SUCCESS", "recordsExtracted": 12482, "recordsAccepted": 12482}, now
+    )
+    expect(view.progress == 1.0, "everything delivered should be 100%")
+    expect(not view.active, "a finished run must re-enable the actions")
+
+    # Reading always runs ahead of uploading; progress must follow what the
+    # centre confirmed, or the bar hits 100% while data is still in flight.
+    view = theme.sync_view({**base, "recordsExtracted": 12482, "recordsAccepted": 2000}, now)
+    expect(view.progress < 0.2, "progress must track accepted rows, not rows read")
+
+    # --- rejected rows and a stuck queue ------------------------------------
+    view = theme.sync_view(
+        {
+            **base,
+            "recordsExtracted": 12482,
+            "recordsUploaded": 12482,
+            "recordsAccepted": 12480,
+            "recordsRejected": 2,
+            "pendingChunks": 1,
+        },
+        now,
+    )
+    labels = dict(view.counters)
+    expect(labels["ปฏิเสธ"] == "2", "rejected rows must be shown, not folded into accepted")
+    expect(labels["ศูนย์กลางรับแล้ว"] == "12,480", "accepted must exclude rejected")
+    expect("1" in labels["คิวรอส่ง"], "a stuck queue must be visible")
+
+    # --- a very long error --------------------------------------------------
+    long_error = "connect ETIMEDOUT 192.168.1.10:3306 " * 12
+    view = theme.sync_view({"syncPhase": "ERROR", "lastError": long_error}, now)
+    expect(view.tone == "danger", "an error should be red")
+    expect(long_error[:40] in view.headline, "the error text should survive into the headline")
+    expect(not view.active, "a failed run must not leave the buttons disabled")
+
+    # --- next scheduled run -------------------------------------------------
+    text = theme.next_sync_text({"syncIntervalMinutes": 60}, {"lastSyncAt": fresh}, now)
+    expect("น." in text, f"next run should be a clock time, got {text}")
+    expect(
+        theme.next_sync_text({"syncIntervalMinutes": 0, "dailyTimes": []}, {}, now)
+        == "ไม่ได้ตั้งเวลาไว้",
+        "no schedule should say so rather than showing a time",
+    )
+    daily = theme.next_sync_text({"syncIntervalMinutes": 0, "dailyTimes": ["08:00"]}, {}, now)
+    expect("08:00" in daily, f"a daily time should be reported, got {daily}")
+
+    # --- tokens are a system, not a pile of numbers -------------------------
+    expect(sorted(theme.SPACE.values()) == [4, 8, 12, 16, 24, 32], "spacing scale changed")
+    expect(theme.WINDOW_MIN[0] <= theme.WINDOW_DEFAULT[0], "default window smaller than minimum")
+    expect(theme.WINDOW_MIN == (960, 700), "minimum window size changed")
+    expect(set(theme.TONE_COLOURS) == {"ok", "warn", "danger", "muted"}, "tone set changed")
+
+    return failures
 
 
 def main() -> int:
@@ -82,6 +215,14 @@ def main() -> int:
     version = bridge.agent_version()
     print("version      :", version or "อ่านไม่ได้")
     if not version:
+        return 1
+
+    # Every state the window can be in, checked without opening one.
+    failures = check(app.theme)
+    print("สถานะหน้าจอที่ตรวจ :", "ผ่านทั้งหมด" if not failures else f"ไม่ผ่าน {len(failures)} ข้อ")
+    for failure in failures:
+        print("   !", failure)
+    if failures:
         return 1
 
     result = bridge.run(["status"], timeout=300)
