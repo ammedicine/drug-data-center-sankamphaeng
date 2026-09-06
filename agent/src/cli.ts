@@ -30,6 +30,7 @@ import { JhcisConnection } from "./jhcis/connection";
 import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector } from "./jhcis/schema-inspector";
 import { log } from "./logger";
+import { SyncLockedError, withSyncLock } from "./lock";
 import { OfflineQueue } from "./queue/queue";
 import { SyncRunner, type SyncMode } from "./sync";
 
@@ -199,12 +200,14 @@ async function sync(): Promise<void> {
   const runner = new SyncRunner();
   try {
     await runner.heartbeat("SYNCING");
-    const result = await runner.run({
-      mode,
+    const result = await withSyncLock("sync (manual)", () =>
+      runner.run({
+        mode,
       from: arg("from") ?? null,
       to: arg("to") ?? null,
       dryRun: has("dry-run"),
-    });
+      }),
+    );
     console.log(
       `${result.batchRef}: อ่าน ${result.recordsRead} · ส่ง ${result.recordsSent} · ` +
         `บันทึก ${result.accepted} · ปฏิเสธ ${result.rejected} · ค้าง ${result.pendingChunks} chunk`,
@@ -226,6 +229,10 @@ async function sync(): Promise<void> {
     await runner.heartbeat(result.pendingChunks ? "ERROR" : "ONLINE");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // A run that ended in an error must not leave SUCCESS on screen from the
+    // run before it - including when it failed before it started, which is
+    // what a heartbeat failure is.
+    writeStatus({ phase: "error", syncPhase: "ERROR", lastError: message });
     await new SyncRunner().heartbeat("ERROR", message).catch(() => undefined);
     throw error;
   }
@@ -234,11 +241,13 @@ async function sync(): Promise<void> {
 /** Compares JHCIS with the central database and re-sends whatever is missing. */
 async function verify(): Promise<void> {
   const runner = new SyncRunner();
-  const result = await runner.verify({
-    from: arg("from") ?? null,
+  const result = await withSyncLock("verify (manual)", () =>
+    runner.verify({
+      from: arg("from") ?? null,
     to: arg("to") ?? null,
     repair: !has("check-only"),
-  });
+    }),
+  );
 
   console.log(`ตรวจสอบ ${result.checked} เดือน`);
   if (!result.mismatched.length) {
@@ -272,7 +281,7 @@ async function retry(): Promise<void> {
   const runner = new SyncRunner();
 
   const moved = queue.requeueFailed();
-  const result = await runner.flushQueue();
+  const result = await withSyncLock("retry (manual)", () => runner.flushQueue());
   console.log(
     `นำกลับเข้าคิว ${moved} chunk · บันทึกสำเร็จ ${result.accepted} · ปฏิเสธ ${result.rejected} · ค้าง ${result.remaining}`,
   );
@@ -336,16 +345,36 @@ async function run(): Promise<void> {
       // A window asked for from the web is read exactly as given, even where
       // the agent believes it already delivered those days - that is the whole
       // point of asking for it.
-      const result = await runner.run(
-        window ? { mode: "MANUAL_RANGE", from: window.from, to: window.to } : { mode: "INCREMENTAL" },
+      // The in-process `running` flag guards this worker against itself; the
+      // lock guards it against the tray, which starts sync in its own process.
+      const result = await withSyncLock(`sync (${reason})`, () =>
+        runner.run(
+          window
+            ? { mode: "MANUAL_RANGE", from: window.from, to: window.to }
+            : { mode: "INCREMENTAL" },
+        ),
       );
       await safeHeartbeat(result.pendingChunks ? "ERROR" : "ONLINE");
     } catch (error) {
+      if (error instanceof SyncLockedError) {
+        // The tray started a sync by hand while the schedule came due. Skip
+        // this tick rather than reporting a failure: nothing is wrong, and the
+        // next tick will find the pipeline free.
+        log.info("skipping this tick, a sync is already running", {
+          holder: error.holder.label,
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       log.error("scheduled sync failed", { error: message });
       // A failed run must not stop the agent: the queue keeps whatever was read
       // and the next tick (or a manual retry) picks up from there.
-      writeStatus({ phase: "error", lastError: message, message: "ซิงก์ไม่สำเร็จ" });
+      writeStatus({
+        phase: "error",
+        syncPhase: "ERROR",
+        lastError: message,
+        message: "ซิงก์ไม่สำเร็จ",
+      });
       await safeHeartbeat("ERROR", message);
     } finally {
       running = false;
@@ -377,8 +406,15 @@ async function run(): Promise<void> {
       const current = loadSettings();
       const now = new Date();
 
-      const heartbeatDue =
-        Date.now() - lastHeartbeat >= Math.max(1, current.heartbeatMinutes) * 60_000;
+      // Seconds, not minutes: this is how quickly the web learns that an
+      // agent is alive, that JHCIS came back, or that a sync finished. A
+      // settings.json from an older Agent has no heartbeatSeconds, so its
+      // minutes are converted rather than ignored.
+      const heartbeatEvery = Math.max(
+        10,
+        current.heartbeatSeconds ?? (current.heartbeatMinutes ?? 1) * 60,
+      );
+      const heartbeatDue = Date.now() - lastHeartbeat >= heartbeatEvery * 1000;
       if (heartbeatDue) {
         lastHeartbeat = Date.now();
         const config = await safeHeartbeat(running ? "SYNCING" : "ONLINE");
@@ -390,11 +426,11 @@ async function run(): Promise<void> {
           running = true;
           try {
             log.info("verify requested by an operator");
-            await runner.verify({});
+            await withSyncLock("verify (central request)", () => runner.verify({}));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             log.error("verify failed", { error: message });
-            writeStatus({ phase: "error", lastError: message });
+            writeStatus({ phase: "error", syncPhase: "ERROR", lastError: message });
           } finally {
             running = false;
           }

@@ -150,6 +150,18 @@ export const agents = mysqlTable(
     /** how many days back an incremental run re-reads (late data protection) */
     reprocessDays: int("reprocess_days").notNull().default(7),
     lastHeartbeatAt: datetime("last_heartbeat_at"),
+    /**
+     * What the agent reported about its own link to JHCIS on that heartbeat.
+     *
+     * Central cannot see a รพ.สต.'s LAN, so this is the only way the web can
+     * tell "the agent is fine but JHCIS is down" from "the agent is gone" -
+     * two situations needing two different people, which used to collapse into
+     * a single OFFLINE.
+     */
+    jhcisConnected: boolean("jhcis_connected"),
+    lastJhcisCheckAt: datetime("last_jhcis_check_at"),
+    /** chunks the agent still has queued and undelivered */
+    pendingBatches: int("pending_batches").notNull().default(0),
     lastSyncAt: datetime("last_sync_at"),
     lastSuccessfulSyncAt: datetime("last_successful_sync_at"),
     lastError: text("last_error"),

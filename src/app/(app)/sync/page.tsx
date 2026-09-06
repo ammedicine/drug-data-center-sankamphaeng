@@ -9,7 +9,9 @@ import {
   formatNumber,
   relativeTime,
 } from "@/components/ui/primitives";
+import { LiveStatusBadge } from "@/components/ui/live-refresh";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
+import { JHCIS_LINK_LABELS } from "@/lib/shared/agent-status";
 import { ROLE_LABELS } from "@/lib/shared/roles";
 import { lookupLatestAgentRelease } from "@/lib/services/agent-release";
 import { Building2, Download, RefreshCcw, Server, TriangleAlert } from "lucide-react";
@@ -62,6 +64,7 @@ export default async function SyncPage() {
       <PageHeader
         title="สถานะการซิงก์ข้อมูล"
         subtitle="ข้อมูลถูกดึงจาก JHCIS โดย Agent ที่ติดตั้งในเครือข่ายของสถานบริการ และส่งออกทาง HTTPS เท่านั้น"
+        actions={<LiveStatusBadge />}
       />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -201,7 +204,11 @@ export default async function SyncPage() {
                 <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
                   <span className="text-[13.5px] font-medium text-ink">
                     {batch.facilityCode} · {batch.agentName}
-                    <span className="ml-2 text-xs font-normal text-muted">{batch.batchRef}</span>
+                    <span className="ml-2 text-xs font-normal text-muted">
+                      {batch.rangeFrom && batch.rangeTo
+                        ? `ข้อมูล ${formatDate(batch.rangeFrom)} ถึง ${formatDate(batch.rangeTo)}`
+                        : batch.batchRef}
+                    </span>
                   </span>
                   <span className="numeric text-xs text-muted">
                     {formatNumber(batch.recordsAccepted + batch.recordsRejected)} /{" "}
@@ -255,7 +262,40 @@ export default async function SyncPage() {
                 </>
               ),
             },
-            { key: "status", header: "สถานะ", render: (row) => <StatusBadge status={row.effectiveStatus} /> },
+            {
+              key: "status",
+              header: "สถานะ",
+              render: (row) => <StatusBadge status={row.effectiveStatus} />,
+            },
+            {
+              key: "jhcis",
+              header: "JHCIS",
+              // Separate from the agent's own status: an agent can be online
+              // and still unable to read the database it exists to read.
+              render: (row) => (
+                <span
+                  className={`text-xs ${
+                    row.jhcisState === "CONNECTED"
+                      ? "text-ok"
+                      : row.jhcisState === "UNREACHABLE"
+                        ? "text-danger"
+                        : "text-muted"
+                  }`}
+                >
+                  {JHCIS_LINK_LABELS[row.jhcisState]}
+                </span>
+              ),
+            },
+            {
+              key: "queue",
+              header: "คิวค้างส่ง",
+              align: "right",
+              render: (row) => (
+                <span className={`text-xs ${row.pendingBatches ? "text-warn" : "text-muted"}`}>
+                  {row.pendingBatches ? `${formatNumber(row.pendingBatches)} ชุด` : "-"}
+                </span>
+              ),
+            },
             {
               key: "heartbeat",
               header: "Heartbeat",

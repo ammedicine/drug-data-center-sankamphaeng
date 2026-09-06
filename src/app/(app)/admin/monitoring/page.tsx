@@ -1,4 +1,6 @@
 import { Activity, Building2, Server, TriangleAlert, WifiOff } from "lucide-react";
+import { LiveStatusBadge } from "@/components/ui/live-refresh";
+import { STALE_AFTER_SECONDS } from "@/lib/shared/agent-status";
 
 import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
@@ -12,7 +14,6 @@ import {
 import { SyncHistoryCard } from "@/components/ui/sync-history";
 import { requireAllFacilityViewer } from "@/lib/auth/rbac";
 import {
-  HEARTBEAT_TIMEOUT_MINUTES,
   getFleetSummary,
   listAgents,
   listSyncBatches,
@@ -37,7 +38,8 @@ export default async function MonitoringPage() {
     <>
       <PageHeader
         title="การเฝ้าระวังระบบ"
-        subtitle={`Agent ถือว่าออฟไลน์เมื่อไม่มี heartbeat เกิน ${HEARTBEAT_TIMEOUT_MINUTES} นาที`}
+        subtitle={`Agent ถือว่าออฟไลน์เมื่อไม่มี heartbeat เกิน ${STALE_AFTER_SECONDS} วินาที`}
+        actions={<LiveStatusBadge />}
       />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">

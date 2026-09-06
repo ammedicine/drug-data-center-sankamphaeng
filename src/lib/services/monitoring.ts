@@ -7,9 +7,17 @@ import { and, desc, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { agents, facilities, syncBatches, users } from "@/lib/db/schema";
 import type { AgentStatus } from "@/lib/db/schema";
+import { STALE_AFTER_SECONDS, isFresh, type JhcisLinkState } from "@/lib/shared/agent-status";
 
 /** An agent is considered offline when its heartbeat is older than this. */
-export const HEARTBEAT_TIMEOUT_MINUTES = 10;
+/**
+ * Kept for anything still importing it. The live threshold is
+ * STALE_AFTER_SECONDS in the shared status module, so the agent's heartbeat
+ * cadence and the server's idea of "too long ago" cannot drift apart - which
+ * they had, at 5 minutes and 10 minutes respectively, guaranteeing the tray
+ * and the web disagreed for minutes at a time by design.
+ */
+export const HEARTBEAT_TIMEOUT_MINUTES = STALE_AFTER_SECONDS / 60;
 
 export interface AgentRow {
   id: string;
@@ -26,6 +34,9 @@ export interface AgentRow {
   lastSuccessfulSyncAt: Date | null;
   ownerUserId: string | null;
   ownerName: string | null;
+  jhcisState: JhcisLinkState;
+  lastJhcisCheckAt: Date | null;
+  pendingBatches: number;
   macAddress: string | null;
   ipAddress: string | null;
   networkInterface: string | null;
@@ -43,10 +54,26 @@ export function effectiveStatus(row: {
   lastHeartbeatAt: Date | null;
 }): AgentStatus {
   if (row.status === "DISABLED") return "DISABLED";
-  if (!row.lastHeartbeatAt) return "OFFLINE";
-  const ageMinutes = (Date.now() - row.lastHeartbeatAt.getTime()) / 60_000;
-  if (ageMinutes > HEARTBEAT_TIMEOUT_MINUTES) return "OFFLINE";
+  // Online means it reported in recently. A stored status of ONLINE from an
+  // agent that has since gone quiet is not evidence of anything.
+  if (!isFresh(row.lastHeartbeatAt)) return "OFFLINE";
   return row.status === "OFFLINE" ? "ONLINE" : row.status;
+}
+
+/**
+ * What the web can honestly say about an agent's link to its JHCIS database.
+ *
+ * Only a fresh heartbeat carries a usable answer: an agent that stopped
+ * reporting tells us nothing about JHCIS, so the state is UNKNOWN rather than
+ * the last thing it happened to say before it went quiet.
+ */
+export function jhcisLinkState(row: {
+  lastHeartbeatAt: Date | null;
+  jhcisConnected: boolean | null;
+}): JhcisLinkState {
+  if (!isFresh(row.lastHeartbeatAt)) return "UNKNOWN";
+  if (row.jhcisConnected === null) return "UNKNOWN";
+  return row.jhcisConnected ? "CONNECTED" : "UNREACHABLE";
 }
 
 /**
@@ -89,6 +116,9 @@ export async function listAgents(
       macAddress: agents.macAddress,
       ipAddress: agents.ipAddress,
       networkInterface: agents.networkInterface,
+      jhcisConnected: agents.jhcisConnected,
+      lastJhcisCheckAt: agents.lastJhcisCheckAt,
+      pendingBatches: agents.pendingBatches,
     })
     .from(agents)
     .innerJoin(facilities, eq(facilities.id, agents.facilityId))
@@ -100,12 +130,16 @@ export async function listAgents(
     ...r,
     lastSyncedVisitDate: r.lastSyncedVisitDate ? String(r.lastSyncedVisitDate) : null,
     effectiveStatus: effectiveStatus(r),
+    jhcisState: jhcisLinkState(r),
   }));
 }
 
 export interface SyncBatchRow {
   id: string;
   batchRef: string;
+  /** service dates the run read - stored all along, never shown */
+  rangeFrom: string | null;
+  rangeTo: string | null;
   facilityCode: string;
   facilityName: string;
   agentName: string;
@@ -137,6 +171,8 @@ export async function listSyncBatches(
       agentName: sql<string>`COALESCE(${agents.name}, 'Agent ที่ถูกลบแล้ว')`,
       mode: syncBatches.mode,
       status: syncBatches.status,
+      rangeFrom: syncBatches.rangeFrom,
+      rangeTo: syncBatches.rangeTo,
       startedAt: syncBatches.startedAt,
       completedAt: syncBatches.completedAt,
       recordsRead: syncBatches.recordsRead,
@@ -160,6 +196,8 @@ export interface RunningBatch {
   facilityCode: string;
   facilityName: string;
   batchRef: string;
+  rangeFrom: string | null;
+  rangeTo: string | null;
   startedAt: Date;
   recordsRead: number;
   recordsAccepted: number;
@@ -195,6 +233,8 @@ export async function listRunningBatches(facilityIds: string[] | null): Promise<
       facilityCode: facilities.code,
       facilityName: facilities.name,
       batchRef: syncBatches.batchRef,
+      rangeFrom: syncBatches.rangeFrom,
+      rangeTo: syncBatches.rangeTo,
       startedAt: syncBatches.startedAt,
       recordsRead: syncBatches.recordsRead,
       recordsAccepted: syncBatches.recordsAccepted,

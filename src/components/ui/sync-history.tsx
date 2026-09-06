@@ -2,6 +2,7 @@ import { CellMeta, DataTable } from "@/components/ui/data-table";
 import {
   Card,
   StatusBadge,
+  formatDate,
   formatDateTime,
   formatNumber,
 } from "@/components/ui/primitives";
@@ -62,6 +63,21 @@ export function SyncHistoryCard({
                 },
               ]
             : []),
+          {
+            key: "range",
+            header: "ช่วงข้อมูลที่อ่าน",
+            // The range was stored on every batch from the start and never
+            // shown, so history could say a run moved 4,650 rows without
+            // saying which days those rows were from.
+            render: (row) =>
+              row.rangeFrom && row.rangeTo ? (
+                <span className="whitespace-nowrap text-xs text-muted">
+                  {formatDate(row.rangeFrom)} – {formatDate(row.rangeTo)}
+                </span>
+              ) : (
+                <span className="text-xs text-muted">-</span>
+              ),
+          },
           {
             key: "started",
             header: "เริ่ม",

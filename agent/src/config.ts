@@ -17,6 +17,13 @@ import { execFileSync } from "node:child_process";
 import { hostname, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 
+import {
+  HEARTBEAT_INTERVAL_SECONDS,
+  type CentralLinkState,
+  type JhcisLinkState,
+  type SyncPhase,
+} from "@shared/agent-status";
+
 import * as dotenv from "dotenv";
 
 dotenv.config();
@@ -268,7 +275,15 @@ export interface AgentSettings {
   syncIntervalMinutes: number;
   /** fixed clock times to sync at, "HH:MM" 24-hour */
   dailyTimes: string[];
+  /**
+   * Superseded by heartbeatSeconds; kept so a settings.json written by an
+   * older Agent still loads. Minutes are too coarse for a status someone is
+   * watching: at the old default of 5, the web could be five minutes behind
+   * the tray while both were working perfectly.
+   */
   heartbeatMinutes: number;
+  /** how often to report in; the value actually used */
+  heartbeatSeconds: number;
   /** start the desktop app with Windows */
   startWithWindows: boolean;
   /** keep running in the notification area when the window is closed */
@@ -280,6 +295,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   syncIntervalMinutes: 60,
   dailyTimes: [],
   heartbeatMinutes: 5,
+  heartbeatSeconds: HEARTBEAT_INTERVAL_SECONDS,
   startWithWindows: true,
   minimiseToTray: true,
 };
@@ -311,7 +327,18 @@ export function saveSettings(settings: Partial<AgentSettings>): AgentSettings {
  * A small file the desktop app polls for progress. It is written frequently and
  * atomically (temp + rename) so a half-written file is never observed.
  */
+/**
+ * What the Agent knows about itself, written to status.json for the desktop
+ * app to read.
+ *
+ * Two rules shaped this. Nothing here is derived from `message` - the text is
+ * for a person, and every number a screen needs is its own field, so the tray
+ * never parses prose to decide what to draw. And a link is only reported as
+ * working on evidence that it worked, with a timestamp saying when: a live
+ * process and a retryable-looking error are not evidence.
+ */
 export interface AgentStatus {
+  /** legacy free-text phase, kept so an older desktop app still works */
   phase: "idle" | "starting" | "extracting" | "uploading" | "done" | "error";
   message: string;
   /** rows the current run expects to move, and how far it has got */
@@ -320,11 +347,44 @@ export interface AgentStatus {
   uploaded: number;
   pendingChunks: number;
   batchRef: string | null;
+  /** legacy booleans, still written so an older tray keeps working */
   jhcisConnected: boolean | null;
   centralConnected: boolean | null;
   lastSyncAt: string | null;
   lastError: string | null;
   updatedAt: string;
+
+  /* ---------------------------------------------------- connection truth */
+  centralState: CentralLinkState;
+  jhcisState: JhcisLinkState;
+  syncPhase: SyncPhase;
+  /** when a heartbeat was last attempted, whether or not it worked */
+  centralAttemptAt: string | null;
+  /** when the Central API last answered an authenticated request */
+  centralAckAt: string | null;
+  /** when the JHCIS connection was last proven by connecting to it */
+  jhcisCheckedAt: string | null;
+
+  /* -------------------------------------------------- live sync telemetry */
+  /** service dates the current run is reading */
+  rangeFrom: string | null;
+  rangeTo: string | null;
+  /** rows JHCIS says are in that range */
+  recordsExpected: number;
+  /** read out of JHCIS so far */
+  recordsExtracted: number;
+  /** written to the durable queue */
+  recordsQueued: number;
+  /** sent to Central in a request */
+  recordsUploaded: number;
+  /** Central confirmed it stored */
+  recordsAccepted: number;
+  /** Central refused, with the reason recorded centrally */
+  recordsRejected: number;
+  syncStartedAt: string | null;
+  lastProgressAt: string | null;
+  /** when the schedule fires next, so the tray can say so */
+  nextSyncAt: string | null;
 }
 
 export function statusPath(): string {
@@ -346,6 +406,26 @@ export function loadStatus(): AgentStatus {
     lastSyncAt: null,
     lastError: null,
     updatedAt: new Date().toISOString(),
+    // Every new field defaults here and loadStatus spreads the file over it,
+    // so a status.json from an older Agent stays readable - the fields it
+    // never heard of simply keep these values.
+    centralState: "UNKNOWN",
+    jhcisState: "UNKNOWN",
+    syncPhase: "IDLE",
+    centralAttemptAt: null,
+    centralAckAt: null,
+    jhcisCheckedAt: null,
+    rangeFrom: null,
+    rangeTo: null,
+    recordsExpected: 0,
+    recordsExtracted: 0,
+    recordsQueued: 0,
+    recordsUploaded: 0,
+    recordsAccepted: 0,
+    recordsRejected: 0,
+    syncStartedAt: null,
+    lastProgressAt: null,
+    nextSyncAt: null,
   };
   if (!existsSync(path)) return empty;
   try {

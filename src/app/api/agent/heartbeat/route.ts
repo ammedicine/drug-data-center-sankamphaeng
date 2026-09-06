@@ -56,6 +56,12 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       mysqlVersion: body.mysqlVersion ?? null,
       jhcisVersion: body.jhcisVersion ?? null,
       ...(body.schemaReport ? { schemaReport: body.schemaReport } : {}),
+      // The agent reports its own link to JHCIS; Central had been reading this
+      // and throwing it away, which left the web unable to say whether a quiet
+      // agent was offline or simply unable to reach its database.
+      jhcisConnected: body.jhcisConnected,
+      lastJhcisCheckAt: now,
+      pendingBatches: body.pendingBatches ?? 0,
       // Only overwrite what the agent could actually determine, so a heartbeat
       // sent while the network is confused does not erase a known-good card.
       ...(body.network?.macAddress ? { macAddress: body.network.macAddress } : {}),

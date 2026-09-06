@@ -12,6 +12,8 @@ import {
   dataDir,
   loadState,
   loadStatus,
+  machineHostname,
+  type AgentStatus,
   requireCredential,
   saveState,
   writeStatus,
@@ -133,6 +135,33 @@ export class SyncRunner {
   private readonly client = new CentralClient(this.credential.centralApiUrl, this.credential);
   private readonly queue = new OfflineQueue(dataDir());
 
+  /**
+   * Status fields recording that the Central API just answered us. Only ever
+   * called after a request came back, because that is the only thing proving
+   * the link works: signed, accepted, replied to.
+   */
+  private centralAck(): Partial<AgentStatus> {
+    const now = new Date().toISOString();
+    return { centralState: "CONNECTED", centralConnected: true, centralAttemptAt: now, centralAckAt: now };
+  }
+
+  /**
+   * Status fields recording that it did not. 401/403 is kept apart from
+   * everything else because the two need different people: a network error
+   * clears up on its own or is the clinic's internet, an auth error means this
+   * machine's credential is no longer accepted. centralAckAt is left alone -
+   * it still says when the link last genuinely worked.
+   */
+  private centralFailure(error: unknown): Partial<AgentStatus> {
+    const status = error instanceof CentralApiError ? error.status : 0;
+    const auth = status === 401 || status === 403;
+    return {
+      centralState: auth ? "AUTH_ERROR" : "NETWORK_ERROR",
+      centralConnected: false,
+      centralAttemptAt: new Date().toISOString(),
+    };
+  }
+
   /** Uploads everything still sitting in the queue (called on every run). */
   async flushQueue(): Promise<{ accepted: number; rejected: number; remaining: number }> {
     let accepted = 0;
@@ -152,11 +181,20 @@ export class SyncRunner {
         );
         accepted += result.accepted;
         rejected += result.rejected;
+        const before = loadStatus();
         writeStatus({
           phase: "uploading",
-          uploaded: loadStatus().uploaded + chunk.records.length,
+          syncPhase: "UPLOADING",
+          // uploaded is what left this machine; accepted and rejected are what
+          // Central said it did with them. Conflating the two is how a screen
+          // claims rows arrived that were actually refused.
+          uploaded: before.uploaded + chunk.records.length,
+          recordsUploaded: before.recordsUploaded + chunk.records.length,
+          recordsAccepted: before.recordsAccepted + result.accepted,
+          recordsRejected: before.recordsRejected + result.rejected,
           pendingChunks: this.queue.count("PENDING"),
-          centralConnected: true,
+          lastProgressAt: new Date().toISOString(),
+          ...this.centralAck(),
         });
         if (result.rejects.length) {
           log.warn("central rejected records", {
@@ -175,11 +213,17 @@ export class SyncRunner {
           permanent,
           error: message,
         });
+        // A failed upload is never evidence of a working link. This used to be
+        // `centralConnected: !permanent`, which called every retryable failure
+        // - a timeout, a reset connection, DNS failing - a successful
+        // connection, so the tray said "เชื่อมต่อแล้ว" precisely when nothing
+        // was getting through.
         writeStatus({
           phase: "error",
+          syncPhase: "ERROR",
           lastError: message,
-          centralConnected: !permanent,
           pendingChunks: this.queue.count("PENDING"),
+          ...this.centralFailure(error),
         });
         if (!permanent) break; // network is down - stop and retry on the next run
       }
@@ -302,6 +346,18 @@ export class SyncRunner {
           pendingChunks: this.queue.count("PENDING"),
           jhcisConnected: true,
           lastError: null,
+          syncPhase: "SUCCESS",
+          jhcisState: "CONNECTED",
+          jhcisCheckedAt: new Date().toISOString(),
+          rangeFrom: requested.from,
+          rangeTo: requested.to,
+          recordsExpected: 0,
+          recordsExtracted: 0,
+          recordsQueued: 0,
+          recordsUploaded: 0,
+          recordsAccepted: 0,
+          recordsRejected: 0,
+          lastProgressAt: new Date().toISOString(),
         });
         const flushed = await this.flushQueue();
         return {
@@ -330,6 +386,23 @@ export class SyncRunner {
         batchRef,
         jhcisConnected: true,
         lastError: null,
+        // Published before a single row is read, so a screen can say which
+        // days are being worked on instead of showing a bar with no subject,
+        // and every counter starts from zero for this run rather than
+        // carrying the previous one's totals.
+        syncPhase: "READING",
+        jhcisState: "CONNECTED",
+        jhcisCheckedAt: new Date().toISOString(),
+        rangeFrom: range.from,
+        rangeTo: range.to,
+        recordsExpected: recordsRead,
+        recordsExtracted: 0,
+        recordsQueued: 0,
+        recordsUploaded: 0,
+        recordsAccepted: 0,
+        recordsRejected: 0,
+        syncStartedAt: new Date().toISOString(),
+        lastProgressAt: new Date().toISOString(),
       });
 
       log.info("sync starting", {
@@ -371,7 +444,16 @@ export class SyncRunner {
         });
         recordsSent += buffer.length;
         buffer = [];
-        writeStatus({ phase: "extracting", extracted: recordsSent, total: recordsRead });
+        writeStatus({
+          phase: "extracting",
+          syncPhase: "READING",
+          extracted: recordsSent,
+          total: recordsRead,
+          recordsExtracted: recordsSent,
+          // Queued, not merely read: the chunk is durable on disk by now.
+          recordsQueued: recordsSent,
+          lastProgressAt: new Date().toISOString(),
+        });
       };
 
       for await (const page of extractor.streamUsage(
@@ -498,8 +580,10 @@ export class SyncRunner {
           : flushed.remaining
             ? `ยังมี ${flushed.remaining} ชุดข้อมูลที่ส่งไม่สำเร็จ`
             : `ตรวจสอบแล้วยังขาด ${reconciliation?.gap ?? 0} รายการ`,
+        syncPhase: complete ? "SUCCESS" : "ERROR",
         pendingChunks: flushed.remaining,
         lastSyncAt: new Date().toISOString(),
+        lastProgressAt: new Date().toISOString(),
         lastError: complete ? null : "อัปโหลดไม่ครบ",
       });
 
@@ -704,7 +788,14 @@ export class SyncRunner {
       const from = options.from ?? min ?? today();
       const to = options.to ?? max ?? today();
 
-      writeStatus({ phase: "starting", message: `กำลังตรวจสอบความครบถ้วน ${from} ถึง ${to}` });
+      writeStatus({
+        phase: "starting",
+        syncPhase: "VERIFYING",
+        message: `กำลังตรวจสอบความครบถ้วน ${from} ถึง ${to}`,
+        rangeFrom: from,
+        rangeTo: to,
+        lastProgressAt: new Date().toISOString(),
+      });
 
       const [local, remote] = await Promise.all([
         extractor.monthlyTally(pcucode, from, to),
@@ -800,10 +891,26 @@ export class SyncRunner {
       await db.close();
     }
 
+    // Recorded whether or not JHCIS answered, so a screen can tell "checked a
+    // moment ago and it is down" from "never checked".
+    writeStatus({
+      jhcisState: jhcisConnected ? "CONNECTED" : "UNREACHABLE",
+      jhcisConnected,
+      jhcisCheckedAt: new Date().toISOString(),
+    });
+
     const queue = new OfflineQueue(dataDir());
-    const response = await this.client.heartbeat({
+    writeStatus({ centralAttemptAt: new Date().toISOString() });
+
+    let response;
+    try {
+      response = await this.client.heartbeat({
       agentVersion: AGENT_VERSION,
-      hostname: this.credential.installationId,
+      // The machine's own name. This used to send installationId, so every
+      // screen showed a generated id where an operator expected to see which
+      // PC this is; installationId still travels in its own field and stays
+      // the stable identity Central knows the installation by.
+      hostname: machineHostname(),
       installationId: this.credential.installationId,
       status,
       jhcisConnected,
@@ -814,9 +921,16 @@ export class SyncRunner {
       lastError: lastError ?? null,
       pendingBatches: queue.count("PENDING"),
       network: await resolveNetworkIdentity(this.credential.centralApiUrl),
-    });
+      });
+    } catch (error) {
+      // The attempt stands; the acknowledgement does not. Nothing after this
+      // will describe the link as connected.
+      writeStatus(this.centralFailure(error));
+      throw error;
+    }
 
     log.debug("heartbeat acknowledged", { config: response.config });
+    writeStatus({ ...this.centralAck(), pendingChunks: queue.count("PENDING") });
     this.adoptCentralWatermark(response.config.lastSyncedVisitDate);
     return response.config;
   }
