@@ -278,9 +278,15 @@ export class SyncRunner {
       // Comparing row counts per month first is two cheap queries, and when
       // they agree there is nothing to do at all. Only the months that differ
       // are read, and the range is narrowed to span just those.
-      const range = options.skipMatchingMonths === false
-        ? requested
-        : await this.narrowToMissing(extractor, pcucode, requested);
+      // Only an INCREMENTAL run may skip: it is the one that repeats on a
+      // schedule and re-reads the same days. A range someone asked for
+      // explicitly - MANUAL_RANGE, a repair, a first full read - is read as
+      // asked, because the reason for asking is usually that what is stored
+      // for those days is not trusted, and counts alone would not show that.
+      const maySkip = options.skipMatchingMonths ?? options.mode === "INCREMENTAL";
+      const range = maySkip
+        ? await this.narrowToMissing(extractor, pcucode, requested)
+        : requested;
 
       if (!range) {
         log.info("ไม่มีอะไรต้องดึง ข้อมูลที่ศูนย์กลางตรงกับ JHCIS แล้ว", {
