@@ -110,16 +110,40 @@ export class UsageExtractor {
   }
 
   /** Total rows in the window - used for progress and batch bookkeeping. */
+  /**
+   * Rows this window will yield, counted the same way streamUsage reads them.
+   *
+   * The obvious single query - LEFT JOIN visit, filter on
+   * COALESCE(v.visitdate, DATE(vd.dateupdate)) - cannot use an index, because
+   * the expression is computed per row, so it scanned all 265k visitdrug rows
+   * on every run: 6.5 seconds before a single row was read, measured on the
+   * development database.
+   *
+   * Splitting it in two is exact and eight times faster. The visit-joined half
+   * goes through the vs_date index; the orphan half - rows whose visit record
+   * was deleted, 18 of them in that database - is the only part that has to
+   * scan, and it is the same set streamUsage picks up in its own second pass.
+   */
   async countUsage(pcucode: string, from: string, to: string): Promise<number> {
-    const dateExpr = this.dateExpr();
-    const row = await this.db.queryOne<RowDataPacket & { n: number }>(
-      `SELECT COUNT(*) AS n
-         FROM visitdrug vd
-         LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
-        WHERE vd.pcucode = ? AND ${dateExpr} >= ? AND ${dateExpr} <= ?`,
-      [pcucode, from, to],
-    );
-    return Number(row?.n ?? 0);
+    const [joined, orphans] = await Promise.all([
+      this.db.queryOne<RowDataPacket & { n: number }>(
+        `SELECT COUNT(*) AS n
+           FROM visitdrug vd
+           JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+          WHERE vd.pcucode = ? AND v.visitdate >= ? AND v.visitdate <= ?`,
+        [pcucode, from, to],
+      ),
+      this.db.queryOne<RowDataPacket & { n: number }>(
+        `SELECT COUNT(*) AS n
+           FROM visitdrug vd
+           LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
+          WHERE vd.pcucode = ?
+            AND v.visitno IS NULL
+            AND DATE(vd.dateupdate) >= ? AND DATE(vd.dateupdate) <= ?`,
+        [pcucode, from, to],
+      ),
+    ]);
+    return Number(joined?.n ?? 0) + Number(orphans?.n ?? 0);
   }
 
   /**

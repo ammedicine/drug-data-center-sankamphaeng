@@ -284,6 +284,7 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 - [x] PHASE 11 — security checklist + unit test 20 ข้อ (docs/SECURITY.md)
 - [x] PHASE 12 — เชื่อม TiDB Cloud จริงแล้ว (migrate + seed + sync + รายงาน ผ่านครบวง)
       เหลือ deploy ขึ้น Vercel
+- [x] PHASE 13 — สถานะตามจริง + realtime (ดู §8), หน้าจอ agent ใหม่, ท่อส่งแบบ producer/consumer (§9)
 
 ### ผลทดสอบกับของจริง (2026-09-04, รอบเต็ม)
 - sync ทั้งฐาน: **265,786 / 265,787 แถว** เข้า TiDB (ขาด 1 แถวที่ `drugcode` ว่าง ซึ่งถูกปฏิเสธ
@@ -356,3 +357,37 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
   ถ้าเผลอ ให้หยุด dev server → `rm -rf .next` → เริ่มใหม่
 - client component **ห้าม** import `src/lib/shared/canonical.ts` (มี `node:crypto`) ให้ใช้ `drug-types.ts` แทน
 - migration ต้อง `npm run db:generate` **แล้ว** `npm run db:migrate` ทุกครั้ง ก่อนทดสอบ sync
+
+## 8. สถานะการเชื่อมต่อต้องเป็นความจริง (Phase 1)
+
+- **บั๊กเดิม: `centralConnected: !permanent`** — error 401/403 ถือว่า "ยังต่อได้" เพราะไม่ permanent
+  ตอนนี้แยกเป็น `centralState`: `CONNECTED` / `NETWORK_ERROR` / `AUTH_ERROR` / `UNKNOWN`
+  พร้อม `centralAttemptAt` (ลองเมื่อไหร่) และ `centralAckAt` (ศูนย์กลางตอบจริงเมื่อไหร่)
+- ค่าคงที่กลางอยู่ที่ **`src/lib/shared/agent-status.ts`** ที่เดียว: heartbeat 30 วินาที,
+  ถือว่า stale ที่ 90 วินาที, หน้าเว็บ poll 5 วินาที — ห้ามเขียนตัวเลขพวกนี้ซ้ำที่อื่น
+- `jhcisConnected` เก็บลง Central แล้ว (migration 0008) หน้าเว็บจึงรู้ว่า LAN ฝั่ง รพ.สต. ล่ม
+- `/api/sync/live` **ต้อง auth และไม่รับพารามิเตอร์ใด ๆ** (USER เห็นแค่ agent ของตัวเอง ไม่มี secret ในผลลัพธ์)
+- **cross-process lock** ที่ `<data>/sync.lock` — tray กับ scheduler อยู่คนละ process
+  เคยซิงก์ทับกันได้ ตอนนี้ตัวที่สองเจอ `SyncLockedError` แล้วข้ามรอบ (lock ค้างเกิน 5 นาที
+  หรือ pid ตายแล้ว = ยึดต่อได้ ไม่ค้างถาวร)
+
+## 9. ท่อส่งข้อมูล (Phase 3) — วัดก่อนแก้เสมอ
+
+- อ่านกับส่ง**ทำงานพร้อมกัน**แล้ว (เดิมอ่านจนจบค่อยส่ง) รายละเอียดใน `docs/SYNC.md` §4.1-4.2, §7
+- **ห้ามเพิ่ม upload concurrency ต่อ agent** — 20 สถานบริการยิงพร้อมกันอยู่แล้ว
+  เพิ่มความขนานต่อเครื่อง = ย้ายคอขวดไปที่ TiDB
+- ผลวัดจริง (mock Central 40ms, `agent/bench.mts`):
+
+  | | ก่อน | หลัง |
+  |---|---|---|
+  | 4,650 แถว รวม | 13.20 s | 7.35 s |
+  | เริ่มส่งครั้งแรกที่ | 12,479 ms | 4,002 ms |
+  | 20,374 แถว รวม | 21.65 s | 7.83 s |
+  | 20,374 แถว rows/sec | 941 | 2,604 |
+  | คิวสูงสุดบนดิสก์ | 11 | 6 (12 พอดีเมื่อ latency 250ms) |
+  | จำนวน request | 41 | 41 (ไม่เปลี่ยน) |
+
+- ศูนย์กลางล่ม (`--outage 8`): ยอม `Retry-After`, ดึงต่อจนจบ, เก็บคิว 10 chunk บนดิสก์,
+  พอกลับมาส่งครบ 4,650 แถว เหลือค้าง 0
+- **TiDB ยังไม่ใช่คอขวด** — ~565 ms ต่อ 500 แถว ที่ RTT ~47ms ยังไม่มีหลักฐานให้ทำ Phase 4
+  (Redis/QStash/queue กลาง) ถ้าจะเสนอ ต้องมี metric ใหม่ก่อน ไม่ใช่ความรู้สึก

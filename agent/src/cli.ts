@@ -31,6 +31,11 @@ import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector } from "./jhcis/schema-inspector";
 import { log } from "./logger";
 import { SyncLockedError, withSyncLock } from "./lock";
+import {
+  dailyOffsetSeconds,
+  intervalOffsetSeconds,
+  nextScheduledRun,
+} from "./schedule";
 import { OfflineQueue } from "./queue/queue";
 import { SyncRunner, type SyncMode } from "./sync";
 
@@ -307,6 +312,10 @@ async function run(): Promise<void> {
   const credential = loadCredential();
   if (!credential) throw new Error("ยังไม่ได้ลงทะเบียน Agent (sdc-agent enroll)");
 
+  // Every agent gets its own slot within the schedule, derived from this id,
+  // so a district that all syncs "every hour" does not arrive at once.
+  const agentId = credential.agentId;
+
   let stopping = false;
   let running = false;
   /** clock times already fired today, so a daily time runs once per day */
@@ -450,20 +459,36 @@ async function run(): Promise<void> {
       const dayKey = now.toISOString().slice(0, 10);
       for (const time of current.dailyTimes) {
         const marker = `${dayKey} ${time}`;
-        if (time === clock && !firedToday.has(marker)) {
-          firedToday.add(marker);
-          await runOnce(`daily ${time}`);
-          return;
-        }
+        if (time !== clock || firedToday.has(marker)) continue;
+        // The operator's time is kept; the offset only moves the run within
+        // that minute, so twenty clinics set to 08:00 do not all arrive in the
+        // same second.
+        const offset = dailyOffsetSeconds(agentId, time);
+        if (now.getSeconds() < offset) continue;
+        firedToday.add(marker);
+        await runOnce(`daily ${time}`);
+        return;
       }
 
       if (current.syncIntervalMinutes > 0) {
-        const dueAt = lastIntervalRun + current.syncIntervalMinutes * 60_000;
+        const offset = intervalOffsetSeconds(agentId, current.syncIntervalMinutes) * 1000;
+        const dueAt = lastIntervalRun + current.syncIntervalMinutes * 60_000 + offset;
         if (Date.now() >= dueAt) {
           lastIntervalRun = Date.now();
           await runOnce(`every ${current.syncIntervalMinutes} minutes`);
         }
       }
+
+      // Publish the real moment, offset included, so the screen shows when the
+      // sync will happen rather than when the schedule nominally fires.
+      const next = nextScheduledRun({
+        agentId,
+        now,
+        intervalMinutes: current.autoSyncEnabled ? current.syncIntervalMinutes : 0,
+        dailyTimes: current.autoSyncEnabled ? current.dailyTimes : [],
+        lastIntervalRunAt: lastIntervalRun,
+      });
+      writeStatus({ nextSyncAt: next ? next.toISOString() : null });
     })();
   }, TICK_MS);
 

@@ -27,6 +27,14 @@ export class CentralApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /**
+     * Seconds the server asked us to wait, from Retry-After. Present on 429
+     * and on a 503 that names a time. Honouring it matters when several
+     * รพ.สต. are syncing at once: backing off by our own guess would have them
+     * all return together, which is the collision the header exists to
+     * prevent.
+     */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = "CentralApiError";
@@ -39,6 +47,24 @@ export class CentralApiError extends Error {
 }
 
 const RETRYABLE_NETWORK = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|fetch failed/i;
+
+/**
+ * Retry-After, in seconds. The header may be a number of seconds or an HTTP
+ * date; both are accepted, and anything else is ignored rather than guessed
+ * at. Capped at five minutes so a malformed or hostile value cannot park an
+ * agent for hours.
+ */
+export function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds, 300);
+
+  const when = Date.parse(trimmed);
+  if (Number.isNaN(when)) return null;
+  return Math.min(300, Math.max(0, Math.round((when - Date.now()) / 1000)));
+}
 
 export class CentralClient {
   constructor(
@@ -84,6 +110,7 @@ export class CentralClient {
         response.status,
         error?.code ?? "HTTP_ERROR",
         error?.message ?? `${response.status} ${response.statusText}`,
+        parseRetryAfter(response.headers.get("retry-after")),
       );
     }
 
@@ -178,7 +205,13 @@ export class CentralClient {
 /** Exponential backoff with jitter; gives up on permanent 4xx immediately. */
 export async function withRetry<T>(
   operation: () => Promise<T>,
-  options: { attempts?: number; baseDelayMs?: number; label: string } = { label: "request" },
+  options: {
+    attempts?: number;
+    baseDelayMs?: number;
+    label: string;
+    /** counted so a run can report how much of its time went on retries */
+    onRetry?: () => void;
+  } = { label: "request" },
 ): Promise<T> {
   const attempts = options.attempts ?? Number(process.env.AGENT_RETRY_ATTEMPTS ?? 5);
   const baseDelay = options.baseDelayMs ?? Number(process.env.AGENT_RETRY_BASE_MS ?? 2000);
@@ -195,10 +228,20 @@ export async function withRetry<T>(
       if (permanent || (attempt === attempts && !networkIssue)) throw error;
       if (attempt === attempts) throw error;
 
-      const delay = Math.round(baseDelay * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5));
+      // The server's own instruction wins over our backoff curve: it knows
+      // when it will be ready and we do not.
+      const askedFor =
+        error instanceof CentralApiError && error.retryAfterSeconds !== null
+          ? error.retryAfterSeconds * 1000
+          : null;
+      const delay =
+        askedFor ?? Math.round(baseDelay * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5));
+      options.onRetry?.();
       log.warn(`${options.label} failed, retrying`, {
         attempt,
         delayMs: delay,
+        honouredRetryAfter: askedFor !== null,
+        status: error instanceof CentralApiError ? error.status : undefined,
         error: error instanceof Error ? error.message : String(error),
       });
       await new Promise((done) => setTimeout(done, delay));

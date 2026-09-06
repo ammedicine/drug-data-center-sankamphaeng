@@ -32,8 +32,27 @@ export type SyncMode = "INITIAL" | "INCREMENTAL" | "MANUAL_RANGE" | "RETRY";
 const EXTRACT_PAGE_SIZE = 500;
 /** Kept in step with the server's UPLOAD_CHUNK_SIZE. */
 const DEFAULT_CHUNK_SIZE = 500;
-/** Upload once this many chunks are waiting, so progress is visible early. */
-const UPLOAD_EVERY_CHUNKS = 10;
+
+/**
+ * How much unsent work may pile up on disk before the reader waits.
+ *
+ * The reader is far faster than the link: measured against a mock Central at
+ * 40ms per request, extraction finished 15 seconds into a 21 second run with
+ * nothing uploaded, because the old code waited for ten whole chunks before
+ * its first upload. Twelve chunks - about six thousand rows - is enough to
+ * keep the uploader busy through a slow page without letting a full history
+ * queue up unsent, and it bounds what a crash leaves behind.
+ */
+const MAX_PENDING_CHUNKS = 12;
+
+/** Room to make before the reader resumes, so it does not stop and start. */
+const RESUME_PENDING_CHUNKS = 6;
+
+/** How often the uploader looks for work when the queue is empty. */
+const UPLOAD_IDLE_MS = 40;
+
+/** How long to wait after a failed upload before trying the queue again. */
+const UPLOAD_BACKOFF_MS = 2000;
 
 export interface SyncOptions {
   mode: SyncMode;
@@ -108,12 +127,33 @@ function nextBatchRef(): string {
  * late would otherwise be missed. Re-reading is safe: the central server keys
  * every row deterministically and upserts.
  */
-export function resolveRange(
+export async function resolveRange(
   mode: SyncMode,
   credential: AgentCredentialFile,
-  bounds: { min: string | null; max: string | null },
+  /**
+   * Loads the oldest and newest dispensing dates - only called when the answer
+   * is actually needed. Both are MIN/MAX over a date expression that no index
+   * covers, three seconds each on the development database, and an incremental
+   * run with a watermark and a fixed end date needs neither. Paying for them on
+   * every hourly run was three seconds of a รพ.สต.'s database server spent to
+   * compute something that was then discarded.
+   */
+  loadBounds: () => Promise<{ min: string | null; max: string | null }>,
   explicit: { from?: string | null; to?: string | null },
-): { from: string; to: string } {
+): Promise<{ from: string; to: string }> {
+  const state = loadState();
+  const watermark = state.lastSyncedVisitDate;
+
+  // An incremental run that already knows where it left off, and is told where
+  // to stop, can answer without touching JHCIS at all.
+  if (mode !== "MANUAL_RANGE" && mode !== "INITIAL" && watermark && explicit.to) {
+    return { from: shiftDays(watermark, -credential.reprocessDays), to: explicit.to };
+  }
+  if (mode === "MANUAL_RANGE" && explicit.from && explicit.to) {
+    return { from: explicit.from, to: explicit.to };
+  }
+
+  const bounds = await loadBounds();
   const to = explicit.to ?? bounds.max ?? today();
 
   if (mode === "MANUAL_RANGE") {
@@ -123,14 +163,31 @@ export function resolveRange(
   if (mode === "INITIAL") {
     return { from: explicit.from ?? bounds.min ?? shiftDays(to, -365), to };
   }
-
-  const state = loadState();
-  const watermark = state.lastSyncedVisitDate;
   if (!watermark) return { from: bounds.min ?? shiftDays(to, -365), to };
   return { from: shiftDays(watermark, -credential.reprocessDays), to };
 }
 
+/** p95 and friends, for the one log line that reports where a run's time went. */
+function percentile(values: number[], p: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length * p) / 100))];
+}
+
 export class SyncRunner {
+  /**
+   * Counters for the run in progress. Reset at the start of each run so the
+   * numbers describe that run and not the process's whole history.
+   */
+  private telemetry = {
+    uploadRequests: 0,
+    uploadMsTotal: 0,
+    uploadDurations: [] as number[],
+    retries: 0,
+    peakQueueChunks: 0,
+    firstUploadAt: null as number | null,
+  };
+
   private readonly credential = requireCredential();
   private readonly client = new CentralClient(this.credential.centralApiUrl, this.credential);
   private readonly queue = new OfflineQueue(dataDir());
@@ -162,12 +219,80 @@ export class SyncRunner {
     };
   }
 
+  /**
+   * Sends chunks as they appear, one request at a time.
+   *
+   * Concurrency is deliberately one per Agent. Several รพ.สต. syncing at once
+   * already give Central plenty of parallelism; adding more from inside a
+   * single agent would multiply the load on one clinic's link and on TiDB
+   * without evidence that either has spare capacity.
+   *
+   * A link that is down does not stop the reader: the queue is durable, so the
+   * run keeps filling it and the rows go out when the connection returns. It
+   * does stop the uploader from hammering a dead endpoint.
+   */
+  private async consumeQueue(
+    pipeline: { producerDone: boolean; uploaderStalled: boolean },
+    delivered: { accepted: number; rejected: number },
+  ): Promise<void> {
+    const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+    while (!pipeline.producerDone || this.queue.count("PENDING") > 0) {
+      const depth = this.queue.count("PENDING");
+      this.telemetry.peakQueueChunks = Math.max(this.telemetry.peakQueueChunks, depth);
+      if (depth === 0) {
+        await sleep(UPLOAD_IDLE_MS);
+        continue;
+      }
+
+      const flushed = await this.flushQueue();
+      delivered.accepted += flushed.accepted;
+      delivered.rejected += flushed.rejected;
+
+      // Whether anything got through, not whether the queue shrank: the reader
+      // is adding chunks the whole time, so comparing the depth before and
+      // after made a healthy link look stalled and switched backpressure off
+      // exactly when it was needed.
+      const movedNothing = flushed.accepted + flushed.rejected === 0;
+      if (movedNothing && flushed.remaining > 0) {
+        // Nothing got through. Stop waiting on it: the reader is released so
+        // the range is still collected, and it will be delivered later.
+        pipeline.uploaderStalled = true;
+        if (pipeline.producerDone) return;
+        await sleep(UPLOAD_BACKOFF_MS);
+      } else {
+        pipeline.uploaderStalled = false;
+      }
+    }
+  }
+
+  /**
+   * Holds the reader back while the queue is full.
+   *
+   * Returns immediately when the uploader has stalled, because blocking then
+   * would mean abandoning the extraction as well - and the whole point of a
+   * durable queue is that reading can finish while the link is down.
+   */
+  private async awaitQueueSpace(pipeline: {
+    producerDone: boolean;
+    uploaderStalled: boolean;
+  }): Promise<void> {
+    if (this.queue.count("PENDING") < MAX_PENDING_CHUNKS) return;
+
+    const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+    while (this.queue.count("PENDING") > RESUME_PENDING_CHUNKS) {
+      if (pipeline.uploaderStalled) return;
+      await sleep(UPLOAD_IDLE_MS);
+    }
+  }
+
   /** Uploads everything still sitting in the queue (called on every run). */
   async flushQueue(): Promise<{ accepted: number; rejected: number; remaining: number }> {
     let accepted = 0;
     let rejected = 0;
 
     for (const chunk of this.queue.list("PENDING")) {
+      const uploadStartedAt = Date.now();
       try {
         const result = await withRetry(
           () =>
@@ -177,10 +302,17 @@ export class SyncRunner {
               sourceVersion: chunk.sourceVersion,
               records: chunk.records,
             }),
-          { label: `upload ${chunk.batchRef}#${chunk.sequence}` },
+          {
+            label: `upload ${chunk.batchRef}#${chunk.sequence}`,
+            onRetry: () => (this.telemetry.retries += 1),
+          },
         );
         accepted += result.accepted;
         rejected += result.rejected;
+        this.telemetry.uploadRequests += 1;
+        this.telemetry.uploadMsTotal += Date.now() - uploadStartedAt;
+        this.telemetry.uploadDurations.push(Date.now() - uploadStartedAt);
+        this.telemetry.firstUploadAt ??= Date.now();
         const before = loadStatus();
         writeStatus({
           phase: "uploading",
@@ -285,6 +417,17 @@ export class SyncRunner {
   }
 
   async run(options: SyncOptions): Promise<SyncResult> {
+    const runStartedAt = Date.now();
+    let extractStartedAt = runStartedAt;
+    let extractEndedAt = runStartedAt;
+    this.telemetry = {
+      uploadRequests: 0,
+      uploadMsTotal: 0,
+      uploadDurations: [],
+      retries: 0,
+      peakQueueChunks: 0,
+      firstUploadAt: null,
+    };
     const db = new JhcisConnection();
     try {
       const inspector = new SchemaInspector(db);
@@ -304,11 +447,19 @@ export class SyncRunner {
       }
 
       const extractor = new UsageExtractor(db, mapping);
-      const [min, max] = await Promise.all([
-        extractor.minUsageDate(pcucode),
-        extractor.maxUsageDate(pcucode),
-      ]);
-      const requested = resolveRange(options.mode, this.credential, { min, max }, options);
+      // Memoised so a mode that does need the bounds still pays for them once.
+      let bounds: { min: string | null; max: string | null } | null = null;
+      const loadBounds = async (): Promise<{ min: string | null; max: string | null }> => {
+        if (!bounds) {
+          const [min, max] = await Promise.all([
+            extractor.minUsageDate(pcucode),
+            extractor.maxUsageDate(pcucode),
+          ]);
+          bounds = { min, max };
+        }
+        return bounds;
+      };
+      const requested = await resolveRange(options.mode, this.credential, loadBounds, options);
       const sourceVersion = report.jhcisVersion ?? report.mysqlVersion;
 
       // Read only what the centre is missing.
@@ -456,6 +607,20 @@ export class SyncRunner {
         });
       };
 
+      // Reader and uploader run together. The reader writes every chunk to the
+      // durable queue first - nothing is uploaded that is not already on disk -
+      // and the uploader sends whatever is there, so delivery starts within a
+      // chunk of the first page rather than after the whole history has been
+      // read. When the queue reaches MAX_PENDING_CHUNKS the reader waits: a
+      // slow link must not turn into a quarter of a million rows held in a
+      // process that could be killed at any moment.
+      extractStartedAt = Date.now();
+      const pipeline = { producerDone: false, uploaderStalled: false };
+      const delivered = { accepted: 0, rejected: 0 };
+      const uploader = options.dryRun
+        ? Promise.resolve()
+        : this.consumeQueue(pipeline, delivered);
+
       for await (const page of extractor.streamUsage(
         pcucode,
         range.from,
@@ -464,18 +629,19 @@ export class SyncRunner {
       )) {
         for (const record of page) {
           buffer.push(record);
-          if (buffer.length >= DEFAULT_CHUNK_SIZE) flushBuffer();
-        }
-
-        // Upload as we go instead of queueing the whole history first: a full
-        // sync is a quarter of a million rows, and waiting for extraction to
-        // finish would leave the operator staring at a bar that never moves -
-        // and would lose everything already read if the machine restarted.
-        if (!options.dryRun && this.queue.count("PENDING") >= UPLOAD_EVERY_CHUNKS) {
-          await this.flushQueue();
+          if (buffer.length >= DEFAULT_CHUNK_SIZE) {
+            flushBuffer();
+            // Checked per chunk, not per page: one page covers 400 visits and
+            // can carry several thousand rows, so waiting until the end of a
+            // page let the queue run to 22 chunks against a limit of 12.
+            if (!options.dryRun) await this.awaitQueueSpace(pipeline);
+          }
         }
       }
       flushBuffer();
+      extractEndedAt = Date.now();
+      pipeline.producerDone = true;
+      await uploader;
 
       if (options.dryRun) {
         log.info("dry run - chunks queued but not uploaded", { batchRef, chunks: sequence });
@@ -521,8 +687,16 @@ export class SyncRunner {
         });
       }
 
-      // 3. Upload every queued chunk (including leftovers from earlier runs).
-      const flushed = await this.flushQueue();
+      // 3. Anything still queued: chunks the uploader could not deliver while
+      //    the link was down, and leftovers from earlier runs. The totals are
+      //    what the uploader already delivered plus whatever this last pass
+      //    manages, so accepted and rejected count every row once.
+      const drained = await this.flushQueue();
+      const flushed = {
+        accepted: delivered.accepted + drained.accepted,
+        rejected: delivered.rejected + drained.rejected,
+        remaining: drained.remaining,
+      };
 
       // 4. Count both sides before calling the run a success.
       //
@@ -587,6 +761,13 @@ export class SyncRunner {
         lastError: complete ? null : "อัปโหลดไม่ครบ",
       });
 
+      // One line carrying everything needed to find the next bottleneck
+      // without adding instrumentation after the fact: where the time went,
+      // how fast each stage moved, how deep the queue got, and how much of the
+      // run was spent waiting for Central rather than for JHCIS.
+      const elapsedMs = Date.now() - runStartedAt;
+      const perSecond = (rows: number, ms: number) =>
+        ms > 0 ? Math.round((rows / ms) * 1000) : 0;
       log.info("sync finished", {
         batchRef,
         recordsRead,
@@ -595,6 +776,21 @@ export class SyncRunner {
         rejected: flushed.rejected,
         pending: flushed.remaining,
         reconciliation,
+        metrics: {
+          elapsedMs,
+          prepareMs: extractStartedAt - runStartedAt,
+          extractMs: extractEndedAt - extractStartedAt,
+          extractRowsPerSec: perSecond(recordsSent, extractEndedAt - extractStartedAt),
+          uploadRowsPerSec: perSecond(flushed.accepted, elapsedMs),
+          timeToFirstUploadMs: this.telemetry.firstUploadAt
+            ? this.telemetry.firstUploadAt - runStartedAt
+            : null,
+          uploadRequests: this.telemetry.uploadRequests,
+          uploadMsTotal: this.telemetry.uploadMsTotal,
+          uploadMsP95: percentile(this.telemetry.uploadDurations, 95),
+          retries: this.telemetry.retries,
+          peakQueueChunks: this.telemetry.peakQueueChunks,
+        },
       });
 
       return {

@@ -20,8 +20,16 @@ import {
 } from "@/lib/shared/canonical";
 import type { AuthenticatedAgent } from "@/lib/agent-auth/verify";
 
-/** Chunk size for the multi-row upserts sent to TiDB. */
-const UPSERT_CHUNK = 200;
+/**
+ * Rows per multi-row upsert sent to TiDB.
+ *
+ * Held equal to UPLOAD_CHUNK_SIZE so one uploaded chunk becomes one statement:
+ * measured against the real TiDB Cloud instance, 500 averaged ~565ms per
+ * upload request against ~663ms at 200 - the difference being TiDB round trips
+ * rather than work, since the row count is identical. 500 rows of drug_usage
+ * is roughly 150KB, far inside the packet and transaction limits.
+ */
+const UPSERT_CHUNK = 500;
 /** Sanity bound: JHCIS visitdrug.unit is an int; anything wilder is bad data. */
 const MAX_QUANTITY = 1_000_000;
 
