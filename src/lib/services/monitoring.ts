@@ -31,6 +31,8 @@ export interface AgentRow {
   hostname: string | null;
   jhcisVersion: string | null;
   lastHeartbeatAt: Date | null;
+  /** any authenticated request, which is what presence is judged on */
+  lastSeenAt: Date | null;
   lastSuccessfulSyncAt: Date | null;
   ownerUserId: string | null;
   ownerName: string | null;
@@ -48,15 +50,38 @@ export interface AgentRow {
   lastSyncedVisitDate: string | null;
 }
 
-/** Heartbeat age decides ONLINE vs OFFLINE; the stored status is a hint only. */
+/**
+ * When this agent last proved it was alive.
+ *
+ * Any authenticated request counts, not only the dedicated heartbeat: an agent
+ * part-way through a long backfill is sending signed uploads the server keeps
+ * accepting, and there is no honest way to call that machine offline. Agents
+ * enrolled before this was recorded have no lastSeenAt, so their heartbeat is
+ * used and they behave exactly as they did before.
+ */
+export function lastSeen(row: {
+  lastSeenAt?: Date | null;
+  lastHeartbeatAt: Date | null;
+}): Date | null {
+  const seen = row.lastSeenAt ?? null;
+  const beat = row.lastHeartbeatAt;
+  if (!seen) return beat;
+  if (!beat) return seen;
+  return seen > beat ? seen : beat;
+}
+
+/** Activity age decides ONLINE vs OFFLINE; the stored status is a hint only. */
 export function effectiveStatus(row: {
   status: AgentStatus;
+  lastSeenAt?: Date | null;
   lastHeartbeatAt: Date | null;
 }): AgentStatus {
   if (row.status === "DISABLED") return "DISABLED";
-  // Online means it reported in recently. A stored status of ONLINE from an
-  // agent that has since gone quiet is not evidence of anything.
-  if (!isFresh(row.lastHeartbeatAt)) return "OFFLINE";
+  // Online means it was heard from recently. A stored status of ONLINE from an
+  // agent that has since gone quiet is not evidence of anything - and neither
+  // is a batch left in RUNNING by an agent that crashed mid-upload, which is
+  // why this looks at requests the server actually authenticated.
+  if (!isFresh(lastSeen(row))) return "OFFLINE";
   return row.status === "OFFLINE" ? "ONLINE" : row.status;
 }
 
@@ -104,6 +129,7 @@ export async function listAgents(
       hostname: agents.hostname,
       jhcisVersion: agents.jhcisVersion,
       lastHeartbeatAt: agents.lastHeartbeatAt,
+      lastSeenAt: agents.lastSeenAt,
       lastSuccessfulSyncAt: agents.lastSuccessfulSyncAt,
       lastError: agents.lastError,
       lastErrorAt: agents.lastErrorAt,

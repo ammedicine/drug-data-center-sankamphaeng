@@ -400,9 +400,6 @@ async function run(): Promise<void> {
   writeStatus({ phase: "idle", message: "พร้อมทำงาน", lastError: null });
 
   await safeHeartbeat("ONLINE");
-  if (settings.autoSyncEnabled && settings.syncIntervalMinutes > 0) {
-    await runOnce("startup");
-  }
 
   // One ticker drives everything so settings changes take effect without a
   // restart: the file is re-read on every tick.
@@ -499,6 +496,16 @@ async function run(): Promise<void> {
   }, TICK_MS);
 
   lastIntervalRun = Date.now();
+
+  // The catch-up run starts only once the ticker above exists, and is not
+  // awaited. Awaiting it here meant no heartbeat could be sent until it
+  // finished - and the first run after enrolment reads the whole history, so
+  // the web called a machine offline for twenty minutes while its data was
+  // arriving. The `running` guard inside runOnce still keeps this from
+  // overlapping with a scheduled run.
+  if (settings.autoSyncEnabled && settings.syncIntervalMinutes > 0) {
+    void runOnce("startup");
+  }
 }
 
 function status(): void {

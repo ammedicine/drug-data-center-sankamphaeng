@@ -182,3 +182,103 @@ describe("the published next run", () => {
     expect(next!.getMinutes()).toBe(0);
   });
 });
+
+/**
+ * Presence: whether the web may call an agent online.
+ *
+ * The bug these pin down was visible on the operator's screen: a batch shown
+ * as running, rows arriving at the centre every second, and the agent beside
+ * it labelled OFFLINE. Presence was read from the dedicated heartbeat alone,
+ * and the first run after enrolment reads the whole history - so the heartbeat
+ * went quiet for twenty minutes while the agent was demonstrably working.
+ */
+describe("agent presence", () => {
+  // Relative to the real clock, because isFresh compares against it: a
+  // frozen "now" here would make every fixture look hours stale.
+  const ago = (seconds: number) => new Date(Date.now() - seconds * 1000);
+
+  async function monitoring() {
+    return import("@/lib/services/monitoring");
+  }
+
+  it("CASE A: a fresh heartbeat and no sync is online", async () => {
+    const { effectiveStatus } = await monitoring();
+    expect(
+      effectiveStatus({ status: "ONLINE", lastHeartbeatAt: ago(10), lastSeenAt: ago(10) }),
+    ).toBe("ONLINE");
+  });
+
+  it("CASE B: a stale heartbeat but an upload seconds ago is online", async () => {
+    const { effectiveStatus } = await monitoring();
+    // Exactly the reported bug: heartbeat 20 minutes behind because the run
+    // was busy, uploads still landing.
+    expect(
+      effectiveStatus({ status: "SYNCING", lastHeartbeatAt: ago(1200), lastSeenAt: ago(5) }),
+    ).toBe("SYNCING");
+  });
+
+  it("CASE D: a running batch alone is not evidence - a crashed agent is offline", async () => {
+    const { effectiveStatus } = await monitoring();
+    // The stored status still says SYNCING because nothing closed the batch.
+    // Nothing has been heard from the machine, so it is offline regardless.
+    expect(
+      effectiveStatus({ status: "SYNCING", lastHeartbeatAt: ago(1200), lastSeenAt: ago(1200) }),
+    ).toBe("OFFLINE");
+  });
+
+  it("CASE F: an agent that stopped goes offline once the threshold passes", async () => {
+    const { effectiveStatus } = await monitoring();
+    expect(
+      effectiveStatus({
+        status: "ONLINE",
+        lastHeartbeatAt: ago(STALE_AFTER_SECONDS + 5),
+        lastSeenAt: ago(STALE_AFTER_SECONDS + 5),
+      }),
+    ).toBe("OFFLINE");
+  });
+
+  it("CASE G: it comes back online on the next authenticated request", async () => {
+    const { effectiveStatus } = await monitoring();
+    expect(
+      effectiveStatus({ status: "OFFLINE", lastHeartbeatAt: ago(1200), lastSeenAt: ago(2) }),
+    ).toBe("ONLINE");
+  });
+
+  it("an agent enrolled before lastSeenAt existed still behaves as before", async () => {
+    const { effectiveStatus } = await monitoring();
+    expect(effectiveStatus({ status: "ONLINE", lastHeartbeatAt: ago(10), lastSeenAt: null })).toBe(
+      "ONLINE",
+    );
+    expect(
+      effectiveStatus({ status: "ONLINE", lastHeartbeatAt: ago(1200), lastSeenAt: null }),
+    ).toBe("OFFLINE");
+  });
+
+  it("uploads keep presence alive but never refresh what JHCIS said", async () => {
+    const { effectiveStatus, jhcisLinkState } = await monitoring();
+    const row = {
+      status: "SYNCING" as const,
+      lastHeartbeatAt: ago(1200),
+      lastSeenAt: ago(3),
+      jhcisConnected: true,
+    };
+    // Alive, because it is uploading.
+    expect(effectiveStatus(row)).toBe("SYNCING");
+    // But the last thing it said about JHCIS is twenty minutes old, and an
+    // upload is no evidence that the LAN database is still answering.
+    expect(jhcisLinkState(row)).toBe("UNKNOWN");
+  });
+
+  it("CASE H/I: every page asks the same function, whatever shape the row is", async () => {
+    const { effectiveStatus, lastSeen } = await monitoring();
+    // /sync, /admin/agents, /admin/monitoring and the live poll all read the
+    // rows listAgents returns, so one row can only produce one answer.
+    const recent = ago(4);
+    const old = ago(1200);
+    const row = { status: "ONLINE" as const, lastHeartbeatAt: old, lastSeenAt: recent };
+    expect(effectiveStatus(row)).toBe(effectiveStatus({ ...row }));
+    // The newer of the two timestamps is what counts, in either order.
+    expect(lastSeen(row)).toEqual(recent);
+    expect(lastSeen({ lastHeartbeatAt: recent, lastSeenAt: old })).toEqual(recent);
+  });
+});

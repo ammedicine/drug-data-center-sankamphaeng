@@ -148,10 +148,24 @@ export async function authenticateAgent(
 
   await consumeNonce(row.agentId, nonce);
 
+  const seenAt = new Date();
   await db
     .update(agentCredentials)
-    .set({ lastUsedAt: new Date() })
+    .set({ lastUsedAt: seenAt })
     .where(eq(agentCredentials.id, row.credentialId));
+
+  // Presence is recorded here rather than in the heartbeat route, because this
+  // is the one place every authenticated agent request passes through - and a
+  // signature this server has just verified is the strongest evidence there is
+  // that the machine is alive. An agent uploading a long backfill sends one of
+  // these every second while its dedicated heartbeat waits its turn; deciding
+  // presence from the heartbeat alone reported those agents as OFFLINE while
+  // their data was visibly arriving.
+  //
+  // lastHeartbeatAt is deliberately left to the heartbeat route. What the
+  // agent says about JHCIS only arrives on a heartbeat, so that answer has to
+  // go stale on the heartbeat's schedule and not be kept alive by uploads.
+  await db.update(agents).set({ lastSeenAt: seenAt }).where(eq(agents.id, row.agentId));
 
   return {
     agentId: row.agentId,

@@ -149,7 +149,23 @@ export const agents = mysqlTable(
     syncIntervalMinutes: int("sync_interval_minutes").notNull().default(60),
     /** how many days back an incremental run re-reads (late data protection) */
     reprocessDays: int("reprocess_days").notNull().default(7),
+    /**
+     * The last heartbeat specifically - what the agent said about itself and
+     * its JHCIS link. Kept separate from lastSeenAt because those answers go
+     * stale on their own schedule: an upload proves the agent is alive but
+     * says nothing about whether JHCIS is still reachable.
+     */
     lastHeartbeatAt: datetime("last_heartbeat_at"),
+    /**
+     * The last authenticated request of any kind from this agent.
+     *
+     * Presence is decided from this, not from the heartbeat alone. An agent
+     * uploading a long backfill is demonstrably alive - every chunk is a
+     * signed request the server accepted - and calling it OFFLINE because the
+     * dedicated heartbeat is a minute behind tells the operator the opposite
+     * of what is happening on their screen.
+     */
+    lastSeenAt: datetime("last_seen_at"),
     /**
      * What the agent reported about its own link to JHCIS on that heartbeat.
      *
@@ -190,6 +206,7 @@ export const agents = mysqlTable(
     facilityIdx: index("agents_facility_idx").on(t.facilityId, t.status),
     ownerIdx: index("agents_owner_idx").on(t.ownerUserId),
     heartbeatIdx: index("agents_heartbeat_idx").on(t.lastHeartbeatAt),
+    seenIdx: index("agents_seen_idx").on(t.lastSeenAt),
   }),
 );
 

@@ -64,6 +64,13 @@
       "when": 1788655279843,
       "tag": "0008_hard_kid_colt",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1788848434300,
+      "tag": "0009_regular_zeigeist",
+      "breakpoints": true
     }
   ]
 }

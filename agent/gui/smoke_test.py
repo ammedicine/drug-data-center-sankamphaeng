@@ -282,6 +282,21 @@ def main() -> int:
         print("   ! theme.py ไม่ตรงกับ src/lib/shared/agent-status.ts")
         return 1
 
+    # The address the operator types has to reach the agent. It used to be
+    # written into {app}\.env, which a staff account cannot write, so the error
+    # was swallowed and enrolment quietly used the old address instead.
+    args = bridge.enroll_command("synthetic-token", "https://example.test")
+    expected = ["enroll", "--token", "synthetic-token", "--url", "https://example.test"]
+    # Printed as a shape, not a value: a real token must never reach a log.
+    print("enroll args  :", ["<token>" if a == "synthetic-token" else a for a in args])
+    if args != expected:
+        print("   ! enroll ไม่ได้ส่ง --url ที่ผู้ใช้กรอก")
+        return 1
+    # No address means nothing to enrol against, so no --url is invented.
+    if bridge.enroll_command("synthetic-token", "") != ["enroll", "--token", "synthetic-token"]:
+        print("   ! ที่อยู่ว่างไม่ควรสร้าง --url")
+        return 1
+
     # Every state the window can be in, checked without opening one.
     failures = check(app.theme)
     print("สถานะหน้าจอที่ตรวจ :", "ผ่านทั้งหมด" if not failures else f"ไม่ผ่าน {len(failures)} ข้อ")

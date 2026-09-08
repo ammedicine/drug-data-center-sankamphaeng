@@ -213,6 +213,19 @@ class AgentBridge:
         except Exception as error:  # pragma: no cover - defensive
             return CommandResult(False, str(error))
 
+    def enroll_command(self, token: str, url: str) -> list[str]:
+        """
+        The agent arguments an enrolment turns into.
+
+        Separated so it can be checked without opening a window: the bug this
+        replaced was invisible on screen - the address field looked saved, and
+        the request went to whichever host the old .env happened to name.
+        """
+        args = ["enroll", "--token", token]
+        if url:
+            args += ["--url", url]
+        return args
+
     def agent_version(self) -> str | None:
         """
         Version reported by the agent itself.
@@ -1166,15 +1179,16 @@ class AgentApp(ctk.CTk):
         self.after(6000, lambda: self.settings_hint.configure(text=""))
 
     def _save_connection(self) -> CommandResult:
-        """Writes the Central URL, then hands JHCIS to the agent to store."""
-        try:
-            self.bridge.write_env(
-                {"CENTRAL_API_URL": self.env_entries["CENTRAL_API_URL"].get().strip()}
-            )
-        except OSError:
-            # .env lives in Program Files, which a staff account cannot write.
-            # After enrolment the central URL lives in agent.config.json anyway.
-            pass
+        """
+        Hands the JHCIS settings to the agent, which owns the file.
+
+        The Central address is not written here. It used to be pushed into
+        {app}\\.env, which a staff account cannot write, so the OSError was
+        swallowed and the address the operator typed went nowhere - and the
+        enrolment that followed used whatever the old file happened to say.
+        It is passed to `enroll --url` instead, and the agent stores it in
+        agent.config.json where it is writable and where it already belongs.
+        """
         return self._persist_jhcis()
 
     def _persist_jhcis(self) -> CommandResult:
@@ -1222,8 +1236,12 @@ class AgentApp(ctk.CTk):
         if not token:
             self.connection_hint.configure(text="กรุณากรอกรหัสลงทะเบียน", text_color=theme.DANGER)
             return
+        url = self.env_entries["CENTRAL_API_URL"].get().strip()
+        if not url:
+            self.connection_hint.configure(text="กรุณากรอกที่อยู่ศูนย์กลาง", text_color=theme.DANGER)
+            return
         self._save_connection()
-        self._run_async(["enroll", "--token", token], "กำลังลงทะเบียน...")
+        self._run_async(self.bridge.enroll_command(token, url), "กำลังลงทะเบียน...")
 
     def _action_buttons(self) -> list[ctk.CTkButton]:
         return [self.sync_button, self.verify_button, self.retry_button]
