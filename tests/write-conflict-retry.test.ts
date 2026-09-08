@@ -107,7 +107,11 @@ describe("running the write again", () => {
     const nominal = WRITE_CONFLICT_DELAYS_MS.reduce((a, b) => a + b, 0);
     expect(elapsed).toBeGreaterThanOrEqual(nominal * 0.5 - 15);
     expect(elapsed).toBeLessThan(nominal * 1.5 + 250);
-    expect(work).toHaveBeenCalledTimes(3);
+    expect(work).toHaveBeenCalledTimes(WRITE_CONFLICT_DELAYS_MS.length + 1);
+
+    // And the whole budget stays far inside the sixty seconds Vercel allows a
+    // request, so tuning it can never turn a conflict into a timeout.
+    expect(nominal).toBeLessThan(5_000);
   });
 
   it("does not touch a write that simply succeeds", async () => {

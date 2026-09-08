@@ -171,8 +171,13 @@ export async function upsertDrugMaster(
   records: DrugMasterRecord[],
   sourceVersion: string | null,
 ): Promise<number> {
+  // Same ordering argument as the usage upsert: this table's unique key is
+  // (facility_id, drug_code), the facility is fixed for one request, so
+  // ascending drug_code is ascending index order. Master uploads land at the
+  // same moment as everyone else's, which is when contention happens.
   const rows = records
     .filter((r) => r.drugCode?.trim())
+    .sort((a, b) => (a.drugCode.trim() < b.drugCode.trim() ? -1 : 1))
     .map((r) => ({
       facilityId: agent.facilityId,
       drugCode: r.drugCode.trim().slice(0, 24),
@@ -255,7 +260,22 @@ export async function ingestUsageRecords(input: {
   // in one statement deterministically.
   const byKey = new Map<string, ValidatedRecord>();
   for (const row of valid) byKey.set(row.recordKey, row);
-  const unique = [...byKey.values()];
+
+  // Written in record_key order: the same rows, in the same sequence, every
+  // time this chunk is delivered.
+  //
+  // The agent reads JHCIS by (visitdate, visitno, drugcode) and record_key is
+  // a hash, so without this the keys arrive as an arbitrary permutation and a
+  // re-sent chunk locks the unique index in a different order than it did the
+  // first time. Sorting removes that variable and costs nothing at 500 rows.
+  //
+  // Measured honestly: it did NOT reduce the deadlock rate on the fifteen-agent
+  // harness (15.3% before, 15.8% after - the same within noise). InnoDB named
+  // the real contention as insert intention locks on the PRIMARY index, which
+  // is ordered by the AUTO_INCREMENT id and so cannot be influenced from here.
+  // The ordering stays because determinism is worth having on its own, not
+  // because it fixed anything.
+  const unique = [...byKey.values()].sort((a, b) => (a.recordKey < b.recordKey ? -1 : 1));
 
   for (const part of chunk(unique, UPSERT_CHUNK)) {
     // Upserting by record_key is idempotent, so running it a second time after

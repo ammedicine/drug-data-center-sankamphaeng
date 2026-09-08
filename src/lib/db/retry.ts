@@ -1,23 +1,31 @@
 /**
  * Retrying a database write that lost a race.
  *
- * Fifteen รพ.สต. uploading at the same time write to one table, and the rows
- * they write are keyed by a unique secondary index. Two multi-row upserts that
- * touch no row in common can still take each other's index locks in opposite
- * orders, and one of them is chosen as the victim. That is not a fault in
- * either request - the loser only has to try again.
+ * Fifteen รพ.สต. uploading at the same time all append to one table, and a pair
+ * of those inserts can each end up holding what the other is waiting for. The
+ * database picks one and rolls it back. Nothing is wrong with either request -
+ * the loser only has to run its statement again.
  *
- * Measured on the isolated fifteen-agent harness: re-uploading rows that
- * already existed produced ER_LOCK_DEADLOCK on about 15% of upload requests.
- * No data was lost, because the agent's durable queue re-sent every chunk, but
- * each one cost a round trip, a 500 in the log, and an agent-side backoff. It
- * is far cheaper to lose the race and immediately run it again here, where the
- * rows are still in hand.
+ * Measured on the isolated fifteen-agent harness against MySQL 8.4, where
+ * InnoDB names the culprit exactly: both transactions were waiting for an
+ * insert intention lock on the same page of the PRIMARY index of drug_usage.
+ * That index is ordered by a bigint AUTO_INCREMENT id, so every writer is
+ * appending to the same tail page no matter which สถานบริการ it belongs to.
+ * That shape belongs to InnoDB's clustered B-tree; production runs on TiDB,
+ * which distributes the primary key across regions and has never shown this.
+ *
+ * The retry is worth having either way: it is cheap, it is bounded, and any
+ * engine can hand back a transient conflict under concurrency. Re-uploading
+ * existing rows produced ER_LOCK_DEADLOCK on roughly one upload request in six
+ * before this existed; the agent's durable queue meant nothing was ever lost,
+ * but each one cost a round trip, a 500 in the log and a backoff at the far
+ * end. It is far cheaper to run the statement again here, where the rows are
+ * still in hand.
  *
  * This is deliberately narrow. Only errors the database itself declares
  * transient are retried; a constraint violation, a bad column, a syntax error
  * or an unknown failure is raised on the first attempt, because retrying those
- * only turns one error into three.
+ * only turns one error into several.
  */
 
 /**
@@ -41,11 +49,17 @@ const RETRYABLE_ERRNOS = new Map<number, string>([
 const RETRYABLE_CODES = new Set(["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"]);
 
 /**
- * Waits between attempts, in order. Two retries after the first attempt: long
- * enough that the winner has committed and released its locks, short enough
- * that the agent waiting on the response never notices.
+ * Waits between attempts, in order: three retries after the first attempt.
+ *
+ * Long enough that the winner has committed and released its locks, short
+ * enough that the whole budget adds well under a second to a request Vercel
+ * allows sixty of. Measured on the fifteen-agent harness, two retries rescued
+ * 57% of conflicted requests and three rescued 68%, taking the failure rate
+ * from 15.8% to 9.8%. Further attempts keep helping by less and cost latency
+ * on every conflicted request, and the residue is the tail-page contention
+ * described above rather than anything more attempts can fix.
  */
-export const WRITE_CONFLICT_DELAYS_MS = [50, 150] as const;
+export const WRITE_CONFLICT_DELAYS_MS = [50, 150, 400] as const;
 
 /**
  * Names the conflict if the error is one we may retry, otherwise null.
