@@ -371,6 +371,24 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
   เคยซิงก์ทับกันได้ ตอนนี้ตัวที่สองเจอ `SyncLockedError` แล้วข้ามรอบ (lock ค้างเกิน 5 นาที
   หรือ pid ตายแล้ว = ยึดต่อได้ ไม่ค้างถาวร)
 
+## 8.5 การชนกันของการเขียนตอนหลาย Agent ส่งพร้อมกัน (v1.1.4)
+
+- ทดสอบ 15 agent จำลองบนเครื่องเดียว (harness อยู่ที่ `build/fleet/` ไม่เข้า git)
+  ยิงเข้า **route จริง + service จริง + drizzle จริง** ต่อฐานทดสอบ `sdc_fleet_central`
+  บน MySQL 8.4 (คนละ server กับ JHCIS ที่ port 3333 — **ห้ามแตะ 3333**)
+- **ต้นเหตุที่ยืนยันแล้วด้วย `SHOW ENGINE INNODB STATUS`**: deadlock อยู่ที่ **PRIMARY index**
+  ของ `drug_usage` ซึ่งเรียงตาม `id` แบบ AUTO_INCREMENT -> ทุก agent ต่อแถวลง **หน้าเดียวกัน**
+  แล้วรอ insert intention lock ของกันและกัน ไม่เกี่ยวกับ `record_key` เลย
+- สิ่งที่วัดแล้ว **ไม่ช่วย**: เรียง chunk ตาม record_key (15.3% -> 15.8% = เท่าเดิม)
+- สิ่งที่วัดแล้ว **แย่ลง**: ลด `UPSERT_CHUNK` (500 = 15.8% · 250 = 18.4% · 100 = 22.1%)
+  เพราะ 1 request แตกเป็นหลาย statement -> โอกาสแพ้เพิ่มขึ้นตามจำนวน statement
+  **ดังนั้น UPSERT_CHUNK ต้องคงที่ 500** ห้ามลดโดยไม่มีหลักฐานใหม่
+- สิ่งที่ **ช่วยจริง**: `withWriteConflictRetry` (`src/lib/db/retry.ts`) retry เฉพาะ error ที่
+  ฐานข้อมูลบอกเองว่า transient (1213/1205 + รหัส TiDB) 4 ครั้ง หน่วง 50/150/400 ms มี jitter
+  -> first insert 15 agent **ไม่มี 500 เลย** (0/185) · re-upload 15.8% -> 9.8%
+- **ห้ามอ้างว่า TiDB มีอาการนี้** — production ยังไม่เคยเจอ และ TiDB ไม่มี tail page แบบ InnoDB
+- ไม่ว่ากรณีไหน **ข้อมูลไม่เคยหาย**: คิวของ agent ส่งซ้ำจนครบทุกครั้ง (45,035/45,035, pending 0)
+
 ## 9. ท่อส่งข้อมูล (Phase 3) — วัดก่อนแก้เสมอ
 
 - อ่านกับส่ง**ทำงานพร้อมกัน**แล้ว (เดิมอ่านจนจบค่อยส่ง) รายละเอียดใน `docs/SYNC.md` §4.1-4.2, §7
