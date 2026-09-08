@@ -64,6 +64,17 @@ Name: "{commonappdata}\SDCAgent"; Permissions: users-modify
 Name: "{commonappdata}\SDCAgent\logs"; Permissions: users-modify
 Name: "{commonappdata}\SDCAgent\queue"; Permissions: users-modify
 
+; ทางลัดของเวอร์ชันก่อนหน้าที่ใช้ชื่อเดิม
+;
+; การอัปเกรดของ Inno เป็นการ "ติดตั้งทับ" ไม่ได้ถอนของเก่าออกก่อน (ในบันทึกจะเห็น
+; "Will append to existing uninstall log") ทางลัดชื่อเดิมจึงค้างอยู่คู่กับชื่อใหม่
+; -> เครื่องที่อัปเกรดจะมี 2 ทางลัดใน Startup ต้องลบชื่อเดิมทิ้งก่อนสร้างของใหม่
+; ห้ามลบทีหลัง เพราะ [InstallDelete] ทำงานก่อน [Icons] เสมอ
+[InstallDelete]
+Type: files; Name: "{commonstartup}\โปรแกรมเชื่อมข้อมูล JHCIS.lnk"
+Type: files; Name: "{autodesktop}\โปรแกรมเชื่อมข้อมูล JHCIS.lnk"
+Type: filesandordirs; Name: "{commonprograms}\โปรแกรมเชื่อมข้อมูล JHCIS"
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{group}\ถอนการติดตั้ง"; Filename: "{uninstallexe}"
