@@ -9,6 +9,7 @@ import type { AgentConfigResponse, DrugUsageRecord } from "@shared/canonical";
 
 import {
   AGENT_VERSION,
+  JHCIS_PROBE_TIMEOUT_MS,
   dataDir,
   loadState,
   loadStatus,
@@ -20,7 +21,7 @@ import {
   type AgentCredentialFile,
 } from "./config";
 import { CentralApiError, CentralClient, withRetry } from "./central/client";
-import { JhcisConnection } from "./jhcis/connection";
+import { JhcisConnection, withDeadline } from "./jhcis/connection";
 import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector, type SchemaMapping } from "./jhcis/schema-inspector";
 import { log } from "./logger";
@@ -1075,16 +1076,30 @@ export class SyncRunner {
     let jhcisConnected = false;
     let report = null;
 
+    // The whole health check is bounded, not just its parts. A JHCIS that
+    // accepts the connection and then stops answering used to hold this await
+    // open for as long as it liked, and because the heartbeat is sent further
+    // down, the agent went silent - process alive, nothing in the log, and the
+    // web calling it offline with no way to say why. The link being down is
+    // exactly what a heartbeat is for; it must never be what stops one.
     try {
-      await db.ping();
+      await db.probe(JHCIS_PROBE_TIMEOUT_MS);
       jhcisConnected = true;
-      report = (await new SchemaInspector(db).inspect()).report;
+      report = (
+        await withDeadline(
+          new SchemaInspector(db).inspect(),
+          JHCIS_PROBE_TIMEOUT_MS,
+          "อ่านโครงสร้าง JHCIS",
+        )
+      ).report;
     } catch (error) {
       log.warn("JHCIS not reachable during heartbeat", {
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      await db.close();
+      // Not awaited: closing waits on the same connection that just failed to
+      // answer, and the heartbeat below must go out now.
+      void db.close();
     }
 
     // Recorded whether or not JHCIS answered, so a screen can tell "checked a

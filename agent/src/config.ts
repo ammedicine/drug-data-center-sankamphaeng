@@ -37,6 +37,31 @@ dotenv.config();
  */
 export const AGENT_VERSION = "1.1.0";
 
+/**
+ * How long the agent will wait on JHCIS before giving up.
+ *
+ * Every one of these exists because an unbounded wait does not look like a
+ * failure: the process stays alive, the window keeps its last picture, and the
+ * machine simply stops reporting. That is worse than an error, because nobody
+ * is told. A รพ.สต. server that accepts the connection and then stops
+ * answering - a saturated MySQL, a wedged VM - produced exactly that.
+ *
+ * The values are generous on purpose. Killing a slow but healthy extraction is
+ * its own failure, and a รพ.สต. LAN is not a data centre.
+ */
+export const JHCIS_CONNECT_TIMEOUT_MS = 10_000;
+/** Waiting for a free connection when the pool is busy or wedged. */
+export const JHCIS_ACQUIRE_TIMEOUT_MS = 20_000;
+/** A single statement. Extraction pages are far quicker than this in practice. */
+export const JHCIS_QUERY_TIMEOUT_MS = 120_000;
+/**
+ * The whole health check a heartbeat makes - a ping plus the schema report.
+ * Short, because a heartbeat that waits for a sick database is a heartbeat
+ * that never arrives, and the answer "JHCIS is not responding" is the useful
+ * one.
+ */
+export const JHCIS_PROBE_TIMEOUT_MS = 20_000;
+
 export interface JhcisConfig {
   host: string;
   port: number;
