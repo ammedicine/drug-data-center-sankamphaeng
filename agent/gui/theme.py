@@ -120,6 +120,16 @@ class SyncView:
 # ---------------------------------------------------------------- time helpers
 
 
+#: Every moment shown on this screen is shown in Thai time.
+#:
+#: Fixed rather than taken from the machine: Thailand has no daylight saving,
+#: so +07:00 is always right, and a รพ.สต. PC with its clock set to the wrong
+#: region would otherwise put the whole window seven hours out without anything
+#: on screen admitting it. What is stored never changes - the agent and the
+#: server keep talking in UTC, and this is only how it is read out.
+THAI_TZ = timezone(timedelta(hours=7))
+
+
 def parse_iso(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -154,10 +164,27 @@ def relative(value: Any, now: datetime) -> str:
 
 
 def clock(value: Any) -> str:
+    """Time of day, in Thai time. `-` when there is nothing to show."""
     parsed = parse_iso(value)
     if parsed is None:
         return "-"
-    return parsed.astimezone().strftime("%H:%M:%S")
+    return parsed.astimezone(THAI_TZ).strftime("%H:%M:%S")
+
+
+def thai_datetime(value: Any) -> str:
+    """
+    A moment, written the way it is read here: 08/09/2026 13:35:30.
+
+    The one place a timestamp becomes text for the screen. Anything that
+    formats a date and time by slicing the ISO string instead - which is how
+    the log view and the last-sync line used to do it - shows UTC, and a
+    เจ้าหน้าที่ comparing it with the clock in the corner of their screen finds
+    the program seven hours behind.
+    """
+    parsed = parse_iso(value)
+    if parsed is None:
+        return "-"
+    return parsed.astimezone(THAI_TZ).strftime("%d/%m/%Y %H:%M:%S")
 
 
 def elapsed(value: Any, now: datetime) -> str:
@@ -364,11 +391,13 @@ def next_sync_text(
     settings rather than the schedule, so it does not know about the stagger
     and can be a few minutes optimistic.
     """
-    moment = (now or datetime.now(timezone.utc)).astimezone()
+    # Thai time throughout: the clock times an operator typed are Thai
+    # wall-clock times, so the comparison has to happen in that zone.
+    moment = (now or datetime.now(timezone.utc)).astimezone(THAI_TZ)
 
     published = parse_iso((status or {}).get("nextSyncAt"))
     if published is not None:
-        real = published.astimezone()
+        real = published.astimezone(THAI_TZ)
         if real <= moment:
             return "ถึงกำหนดแล้ว"
         # Seconds are shown when the stagger moved the run off the minute:
@@ -382,7 +411,7 @@ def next_sync_text(
     interval = int(settings.get("syncIntervalMinutes") or 0)
     if interval > 0:
         last = parse_iso(state.get("lastSyncAt"))
-        base = last.astimezone() if last else moment
+        base = last.astimezone(THAI_TZ) if last else moment
         candidates.append(base + timedelta(minutes=interval))
 
     for entry in settings.get("dailyTimes") or []:

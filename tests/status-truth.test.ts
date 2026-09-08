@@ -282,3 +282,51 @@ describe("agent presence", () => {
     expect(lastSeen({ lastHeartbeatAt: recent, lastSeenAt: old })).toEqual(recent);
   });
 });
+
+/**
+ * The zone these pages are read in.
+ *
+ * The status pages are server-rendered, and on Vercel that server runs in UTC.
+ * Formatting without naming a zone therefore showed every operator a time
+ * seven hours behind the clock on their own desk - the same fault the tray had,
+ * arrived at from the other direction.
+ */
+describe("times shown to a reader", () => {
+  async function primitives() {
+    return import("@/components/ui/primitives");
+  }
+
+  it("reads a UTC instant in Thai time wherever it is rendered", async () => {
+    const { formatDateTime } = await primitives();
+    // 06:00 UTC is 13:00 in Thailand, whatever the server's own clock says.
+    expect(formatDateTime("2026-09-08T06:00:00Z")).toContain("13:00");
+  });
+
+  it("rolls to the next day when the instant is late enough", async () => {
+    const { formatDateTime } = await primitives();
+    const text = formatDateTime("2026-09-08T18:30:00Z");
+    expect(text).toContain("01:30");
+    expect(text).toContain("9"); // the 9th, in Thailand
+  });
+
+  it("respects an offset that is already in the value", async () => {
+    const { formatDateTime } = await primitives();
+    // Adding seven hours again would read 06:59 the next morning.
+    expect(formatDateTime("2026-09-08T23:59:00+07:00")).toContain("23:59");
+  });
+
+  it("keeps a service date on its own day", async () => {
+    const { formatDate } = await primitives();
+    // "2026-08-08" is a day in the hospital's records, not a moment, and must
+    // not drift to the 7th or the 9th on its way to the screen.
+    expect(formatDate("2026-08-08")).toContain("8");
+    expect(formatDate("2026-08-08")).toContain("2569");
+  });
+
+  it("shows a placeholder rather than failing on nothing", async () => {
+    const { formatDateTime, formatDate } = await primitives();
+    expect(formatDateTime(null)).toBe("-");
+    expect(formatDate(undefined)).toBe("-");
+    expect(formatDateTime("ไม่ใช่เวลา")).toBe("-");
+  });
+});

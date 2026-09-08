@@ -350,8 +350,11 @@ class AgentBridge:
         for line in content[-lines:]:
             try:
                 entry = json.loads(line)
+                # The file keeps UTC and is never rewritten. Slicing the ISO
+                # string here showed that UTC straight to the operator, seven
+                # hours behind the clock in the corner of their screen.
                 readable.append(
-                    f"{entry.get('ts', '')[11:19]}  {entry.get('level', '').upper():5}  "
+                    f"{theme.clock(entry.get('ts'))}  {entry.get('level', '').upper():5}  "
                     f"{entry.get('message', '')}"
                 )
             except Exception:
@@ -1331,11 +1334,12 @@ class AgentApp(ctk.CTk):
             button.configure(state="disabled" if blocked else "normal")
         self.action_hint.configure(text=view.busy_reason if view.active else "")
 
+        last_sync = state.get("lastSyncAt") or status.get("lastSyncAt")
         self.summary_labels["last_sync"].configure(
-            text=(state.get("lastSyncAt") or status.get("lastSyncAt") or "ยังไม่เคยซิงก์")[:19].replace(
-                "T", " "
-            )
+            text=theme.thai_datetime(last_sync) if last_sync else "ยังไม่เคยซิงก์"
         )
+        # A service date, not a moment: 2026-08-08 means that day in the
+        # hospital's records and must not be shifted by a timezone.
         self.summary_labels["watermark"].configure(text=state.get("lastSyncedVisitDate") or "-")
         self.summary_labels["next_sync"].configure(
             text=(

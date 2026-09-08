@@ -389,18 +389,35 @@ export function formatNumber(value: number, digits = 0): string {
   });
 }
 
+/**
+ * The zone these pages are read in.
+ *
+ * Named rather than left to the machine, because these pages are rendered on
+ * the server: on Vercel that machine runs in UTC, so every time an operator
+ * saw was seven hours behind the clock on their own desk. Thailand has no
+ * daylight saving, and what is stored stays UTC - this is only how it is read.
+ */
+const DISPLAY_TIME_ZONE = "Asia/Bangkok";
+
 export function formatDateTime(value: Date | string | null | undefined): string {
   if (!value) return "-";
   const date = typeof value === "string" ? new Date(value) : value;
   if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" });
+  return date.toLocaleString("th-TH", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: DISPLAY_TIME_ZONE,
+  });
 }
 
 export function formatDate(value: Date | string | null | undefined): string {
   if (!value) return "-";
   const date = typeof value === "string" ? new Date(value) : value;
   if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleDateString("th-TH", { dateStyle: "medium" });
+  // A service date arrives as "2026-08-08" and parses as midnight UTC. Reading
+  // it in a zone ahead of UTC keeps it on the same day; a zone behind would
+  // move it to the 7th, which is why the zone is pinned rather than inherited.
+  return date.toLocaleDateString("th-TH", { dateStyle: "medium", timeZone: DISPLAY_TIME_ZONE });
 }
 
 export function relativeTime(value: Date | string | null | undefined): string {

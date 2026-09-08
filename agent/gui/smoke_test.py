@@ -183,6 +183,49 @@ def check(theme) -> list[str]:
     )
     expect(passed == "ถึงกำหนดแล้ว", f"a past nextSyncAt should say so, got {passed}")
 
+    # --- Thai time on screen, UTC on disk -----------------------------------
+    # The agent writes UTC and the screen reads Thai time. Everything below is
+    # a moment; the two cases after it are not, and must survive untouched.
+    expect(
+        theme.thai_datetime("2026-09-08T06:00:00Z") == "08/09/2026 13:00:00",
+        f"UTC should read as Thai time, got {theme.thai_datetime('2026-09-08T06:00:00Z')}",
+    )
+    # Crossing midnight: 18:30 UTC is the next day here.
+    expect(
+        theme.thai_datetime("2026-09-08T18:30:00Z") == "09/09/2026 01:30:00",
+        f"evening UTC should roll to the next Thai day, got {theme.thai_datetime('2026-09-08T18:30:00Z')}",
+    )
+    # Already Thai: adding seven hours again would read 06:59:59 tomorrow.
+    expect(
+        theme.thai_datetime("2026-09-08T23:59:59+07:00") == "08/09/2026 23:59:59",
+        f"an offset already in the value must be respected, got {theme.thai_datetime('2026-09-08T23:59:59+07:00')}",
+    )
+    expect(
+        theme.thai_datetime("2026-09-08T06:00:00.123456Z") == "08/09/2026 13:00:00",
+        "fractional seconds should not break the format",
+    )
+    expect(theme.thai_datetime(None) == "-", "a missing time shows a placeholder")
+    expect(theme.thai_datetime("ไม่ใช่เวลา") == "-", "an unreadable time must not crash the window")
+    expect(theme.clock("2026-09-08T06:35:30Z") == "13:35:30", "log times read in Thai time")
+
+    # An instant is one instant however it is written: the age behind
+    # "connected 5 seconds ago" must not move when the display zone does.
+    utc_now = datetime(2026, 9, 8, 6, 0, 0, tzinfo=timezone.utc)
+    expect(
+        theme.age_seconds("2026-09-08T05:59:30Z", utc_now)
+        == theme.age_seconds("2026-09-08T12:59:30+07:00", utc_now),
+        "the same moment written two ways must give the same age",
+    )
+
+    # Service dates are days, not moments. 2026-08-08 is that day in the
+    # hospital's records and must never shift to the 7th or the 9th.
+    view = theme.sync_view({"rangeFrom": "2026-08-08", "rangeTo": "2026-08-08"}, now)
+    expect("2026-08-08 ถึง 2026-08-08" in view.range_text, f"date range shifted: {view.range_text}")
+
+    # A time the operator typed is a wall-clock time: 08:15 stays 08:15.
+    daily_thai = theme.next_sync_text({"syncIntervalMinutes": 0, "dailyTimes": ["08:15"]}, {}, now)
+    expect("08:15" in daily_thai, f"a daily time must not be shifted, got {daily_thai}")
+
     # --- tokens are a system, not a pile of numbers -------------------------
     expect(sorted(theme.SPACE.values()) == [4, 8, 12, 16, 24, 32], "spacing scale changed")
     expect(theme.WINDOW_MIN[0] <= theme.WINDOW_DEFAULT[0], "default window smaller than minimum")
