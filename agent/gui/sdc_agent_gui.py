@@ -47,7 +47,11 @@ try:  # tray icon is optional so the app still opens on a machine without it
 except Exception:  # pragma: no cover - depends on the target machine
     TRAY_AVAILABLE = False
 
-APP_NAME = "ศูนย์ข้อมูลการใช้ยา - โปรแกรมเชื่อมข้อมูล JHCIS"
+# The name staff see: window title, tray tooltip, tray menu heading. Only the
+# display name - the executable, the data directory, the mutex and the
+# installer's AppId all keep their original identity so an existing 1.1.x
+# installation upgrades in place rather than appearing twice.
+APP_NAME = "Drug data center อำเภอสันกำแพง"
 APP_ID = "SankamphaengDrugAgent"
 POLL_SECONDS = 2
 
