@@ -9,6 +9,7 @@
 import { and, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { withWriteConflictRetry } from "@/lib/db/retry";
 import { invalidateUsageReports } from "./report-cache";
 import { agents, drugUsage, drugs, syncBatches, syncRejects } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
@@ -189,24 +190,36 @@ export async function upsertDrugMaster(
     }));
 
   for (const part of chunk(rows, UPSERT_CHUNK)) {
-    await db
-      .insert(drugs)
-      .values(part)
-      .onDuplicateKeyUpdate({
-        set: {
-          drugName: sql`VALUES(drug_name)`,
-          genericName: sql`VALUES(generic_name)`,
-          drugType: sql`VALUES(drug_type)`,
-          drugTypeSub: sql`VALUES(drug_type_sub)`,
-          drugFlag: sql`VALUES(drug_flag)`,
-          unitSell: sql`VALUES(unit_sell)`,
-          unitSellName: sql`VALUES(unit_sell_name)`,
-          unitUsage: sql`VALUES(unit_usage)`,
-          unitUsageName: sql`VALUES(unit_usage_name)`,
-          sourceVersion: sql`VALUES(source_version)`,
-          syncedAt: sql`VALUES(synced_at)`,
-        },
-      });
+    // Keyed by (facility_id, drug_code) and idempotent, so a lost lock race is
+    // safe to run again - and the master upload lands at the same moment as
+    // everyone else's usage rows, which is when races happen.
+    await withWriteConflictRetry(
+      {
+        statement: "drugs upsert",
+        agentId: agent.agentId,
+        facilityId: agent.facilityId,
+        rows: part.length,
+      },
+      () =>
+        db
+          .insert(drugs)
+          .values(part)
+          .onDuplicateKeyUpdate({
+            set: {
+              drugName: sql`VALUES(drug_name)`,
+              genericName: sql`VALUES(generic_name)`,
+              drugType: sql`VALUES(drug_type)`,
+              drugTypeSub: sql`VALUES(drug_type_sub)`,
+              drugFlag: sql`VALUES(drug_flag)`,
+              unitSell: sql`VALUES(unit_sell)`,
+              unitSellName: sql`VALUES(unit_sell_name)`,
+              unitUsage: sql`VALUES(unit_usage)`,
+              unitUsageName: sql`VALUES(unit_usage_name)`,
+              sourceVersion: sql`VALUES(source_version)`,
+              syncedAt: sql`VALUES(synced_at)`,
+            },
+          }),
+    );
   }
 
   // drug_flag, names and units all show up in the reports, so a refreshed
@@ -245,24 +258,35 @@ export async function ingestUsageRecords(input: {
   const unique = [...byKey.values()];
 
   for (const part of chunk(unique, UPSERT_CHUNK)) {
-    await db
-      .insert(drugUsage)
-      .values(part)
-      .onDuplicateKeyUpdate({
-        set: {
-          drugNameSnapshot: sql`VALUES(drug_name_snapshot)`,
-          drugType: sql`VALUES(drug_type)`,
-          usageDate: sql`VALUES(usage_date)`,
-          quantity: sql`VALUES(quantity)`,
-          unit: sql`VALUES(unit)`,
-          unitCode: sql`VALUES(unit_code)`,
-          clinic: sql`VALUES(clinic)`,
-          visitMissing: sql`VALUES(visit_missing)`,
-          sourceVersion: sql`VALUES(source_version)`,
-          syncBatchId: sql`VALUES(sync_batch_id)`,
-          agentId: sql`VALUES(agent_id)`,
-        },
-      });
+    // Upserting by record_key is idempotent, so running it a second time after
+    // a lock race costs nothing and cannot double count.
+    await withWriteConflictRetry(
+      {
+        statement: "drug_usage upsert",
+        agentId: input.agent.agentId,
+        facilityId: input.agent.facilityId,
+        rows: part.length,
+      },
+      () =>
+        db
+          .insert(drugUsage)
+          .values(part)
+          .onDuplicateKeyUpdate({
+            set: {
+              drugNameSnapshot: sql`VALUES(drug_name_snapshot)`,
+              drugType: sql`VALUES(drug_type)`,
+              usageDate: sql`VALUES(usage_date)`,
+              quantity: sql`VALUES(quantity)`,
+              unit: sql`VALUES(unit)`,
+              unitCode: sql`VALUES(unit_code)`,
+              clinic: sql`VALUES(clinic)`,
+              visitMissing: sql`VALUES(visit_missing)`,
+              sourceVersion: sql`VALUES(source_version)`,
+              syncBatchId: sql`VALUES(sync_batch_id)`,
+              agentId: sql`VALUES(agent_id)`,
+            },
+          }),
+    );
   }
 
   if (rejects.length) {
@@ -276,15 +300,27 @@ export async function ingestUsageRecords(input: {
     );
   }
 
-  await db
-    .update(syncBatches)
-    .set({
-      status: "UPLOADING",
-      recordsSent: sql`${syncBatches.recordsSent} + ${input.records.length}`,
-      recordsAccepted: sql`${syncBatches.recordsAccepted} + ${unique.length}`,
-      recordsRejected: sql`${syncBatches.recordsRejected} + ${rejects.length}`,
-    })
-    .where(eq(syncBatches.id, input.batchId));
+  // Counters, so not idempotent on their own - but a statement that lost a
+  // lock race was rolled back whole, so it applied nothing and running it
+  // again adds each amount exactly once.
+  await withWriteConflictRetry(
+    {
+      statement: "sync_batches counters",
+      agentId: input.agent.agentId,
+      facilityId: input.agent.facilityId,
+      rows: input.records.length,
+    },
+    () =>
+      db
+        .update(syncBatches)
+        .set({
+          status: "UPLOADING",
+          recordsSent: sql`${syncBatches.recordsSent} + ${input.records.length}`,
+          recordsAccepted: sql`${syncBatches.recordsAccepted} + ${unique.length}`,
+          recordsRejected: sql`${syncBatches.recordsRejected} + ${rejects.length}`,
+        })
+        .where(eq(syncBatches.id, input.batchId)),
+  );
 
   // The reports are cached until new rows land. They just did.
   if (unique.length) invalidateUsageReports();
