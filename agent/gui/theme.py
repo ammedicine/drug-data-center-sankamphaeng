@@ -103,39 +103,69 @@ WATCHDOG_SLEEP_JUMP_SECONDS = 120
 #: restarted every two seconds.
 WATCHDOG_COOLDOWN_SECONDS = 300
 
-#: After this many, restarting is plainly not the answer and the operator is
-#: better served by the message on screen than by another attempt.
+#: After this many inside the window below, restarting is plainly not the
+#: answer and the operator is better served by the message on screen.
 WATCHDOG_MAX_RESTARTS = 5
+
+#: The allowance is per half hour, not per lifetime. Five restarts in thirty
+#: minutes is a problem restarting will not solve; five over a week is a
+#: machine that recovered five times, and refusing the sixth would strand it.
+WATCHDOG_RESTART_WINDOW_SECONDS = 1800
 
 
 def watchdog_decision(
     *,
     child_running: bool,
+    should_run: bool,
     last_tick: Any,
     now: datetime,
     first_seen: datetime | None,
     last_checked: datetime | None,
-    last_restart: datetime | None,
-    restarts: int,
+    restarts: list[datetime],
 ) -> tuple[bool, str]:
     """
     Whether the tray should restart the worker it started, and why.
 
-    Pure so every awkward case can be checked without a window or a real
-    stalled process: a machine coming back from sleep, a worker that has only
-    just started, one from a version that does not stamp ticks, and a worker
-    that fails immediately and would otherwise be restarted for ever.
+    Two states need recovering and they used to be treated as one. A worker
+    that is alive but has stopped doing its rounds was handled; a worker that
+    exited was not - the answer was "the start path will deal with it", and no
+    start path runs while the tray is simply sitting there. A รพ.สต. stayed
+    offline until somebody thought to close and reopen the program.
 
-    Returns (restart?, reason). The reason is for the operator and the log, so
-    a restart is never something that just silently happened.
+    `should_run` is what stops recovery fighting intent: a tray that is closing,
+    an installer stopping the worker to replace it, or an operator who turned
+    syncing off must not have a worker handed back to them.
+
+    `restarts` is the times of recent restarts, not a lifetime count. Five
+    attempts in half an hour means something a restart cannot fix; five over a
+    week is a machine that recovered five times, and refusing the sixth would
+    strand it.
+
+    Pure, so every awkward case can be checked without a window or a real
+    stalled process. Returns (restart?, reason) - the reason is for the
+    operator, because a restart should never be something that just silently
+    happened.
     """
-    if not child_running:
-        return False, "ตัวทำงานไม่ได้รันอยู่"
+    if not should_run:
+        return False, "ไม่ได้ตั้งให้ทำงานอยู่"
 
     # A gap between checks this large means the machine was asleep. The wall
     # clock jumped; nothing stalled. Wait for an ordinary round before judging.
     if last_checked is not None and (now - last_checked).total_seconds() > WATCHDOG_SLEEP_JUMP_SECONDS:
         return False, "เครื่องเพิ่งกลับจากสถานะพัก"
+
+    recent = [t for t in restarts if (now - t).total_seconds() <= WATCHDOG_RESTART_WINDOW_SECONDS]
+    if recent:
+        newest = max(recent)
+        if (now - newest).total_seconds() < WATCHDOG_COOLDOWN_SECONDS:
+            return False, "เพิ่งเริ่มใหม่ไป รอสักครู่"
+    if len(recent) >= WATCHDOG_MAX_RESTARTS:
+        return False, "เริ่มใหม่หลายครั้งแล้วยังไม่ดีขึ้น"
+
+    if not child_running:
+        # It exited. Nothing else is watching for that, and the machine is
+        # offline until something starts it again.
+        return True, "ตัวทำงานเบื้องหลังหยุดไปเอง"
 
     stamp = parse_iso(last_tick)
     if stamp is None:
@@ -144,19 +174,12 @@ def watchdog_decision(
         started = first_seen or now
         if (now - started).total_seconds() < WATCHDOG_GRACE_SECONDS:
             return False, "เพิ่งเริ่มทำงาน"
-        age_text = "ไม่เคยรายงาน"
-    else:
-        age = (now - stamp).total_seconds()
-        if age < WATCHDOG_STALE_SECONDS:
-            return False, "ทำงานปกติ"
-        age_text = f"{int(age)} วินาที"
+        return True, "ตัวทำงานเบื้องหลังไม่รายงานจังหวะการทำงาน"
 
-    if last_restart is not None and (now - last_restart).total_seconds() < WATCHDOG_COOLDOWN_SECONDS:
-        return False, "เพิ่งเริ่มใหม่ไป รอสักครู่"
-    if restarts >= WATCHDOG_MAX_RESTARTS:
-        return False, "เริ่มใหม่หลายครั้งแล้วยังไม่ดีขึ้น"
-
-    return True, f"ตัวทำงานเบื้องหลังไม่ตอบสนอง ({age_text})"
+    age = (now - stamp).total_seconds()
+    if age < WATCHDOG_STALE_SECONDS:
+        return False, "ทำงานปกติ"
+    return True, f"ตัวทำงานเบื้องหลังไม่ตอบสนอง ({int(age)} วินาที)"
 
 
 # ----------------------------------------------------------------- view models

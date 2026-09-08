@@ -227,59 +227,77 @@ def check(theme) -> list[str]:
     expect("08:15" in daily_thai, f"a daily time must not be shifted, got {daily_thai}")
 
     # --- the worker watchdog ------------------------------------------------
-    # A worker can be alive and doing nothing, which looks identical from
-    # outside to a healthy one. These are the cases that decide whether the
-    # tray restarts the child it started.
+    # Two failures need recovering and they look nothing alike from outside: a
+    # worker that is alive and doing nothing, and a worker that has exited.
     fresh_tick = (now - timedelta(seconds=20)).isoformat()
     dead_tick = (now - timedelta(seconds=600)).isoformat()
-    base = dict(now=now, first_seen=now - timedelta(hours=1), last_checked=now - timedelta(seconds=2),
-                last_restart=None, restarts=0)
+    healthy = dict(
+        should_run=True, now=now, first_seen=now - timedelta(hours=1),
+        last_checked=now - timedelta(seconds=2), restarts=[],
+    )
 
     # CASE 9: a healthy worker is never restarted.
-    restart, why = theme.watchdog_decision(child_running=True, last_tick=fresh_tick, **base)
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=fresh_tick, **healthy)
     expect(not restart, f"healthy worker must be left alone, got {why}")
 
-    # CASE 10: alive but its rounds stopped - this is the failure being caught.
-    restart, why = theme.watchdog_decision(child_running=True, last_tick=dead_tick, **base)
+    # CASE 10: alive but its rounds stopped.
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=dead_tick, **healthy)
     expect(restart, "a worker that stopped ticking should be restarted")
     expect("ไม่ตอบสนอง" in why, f"the reason should say what happened, got {why}")
 
-    # CASE 11: a dead child is the start path's job, not the watchdog's.
-    restart, _ = theme.watchdog_decision(child_running=False, last_tick=dead_tick, **base)
-    expect(not restart, "a process that already exited is not the watchdog's to restart")
+    # CASE 11: it exited. Nothing else watches for this - v1.1.2 assumed the
+    # start path would, and no start path runs while the tray simply sits there.
+    restart, why = theme.watchdog_decision(child_running=False, last_tick=dead_tick, **healthy)
+    expect(restart, "a worker that exited must be started again")
+    expect("หยุดไปเอง" in why, f"the reason should name the exit, got {why}")
+
+    # CASE 25: intent wins. A tray that is closing, or an operator who stopped
+    # the worker, must not have one handed back.
+    restart, why = theme.watchdog_decision(
+        child_running=False, last_tick=dead_tick, should_run=False, now=now,
+        first_seen=None, last_checked=now - timedelta(seconds=2), restarts=[],
+    )
+    expect(not restart, f"a deliberate stop must be respected, got {why}")
 
     # CASE 14: waking from sleep looks exactly like a stall. It is not.
     restart, why = theme.watchdog_decision(
-        child_running=True, last_tick=dead_tick, now=now,
-        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(minutes=30),
-        last_restart=None, restarts=0,
+        child_running=True, last_tick=dead_tick, should_run=True, now=now,
+        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(minutes=30), restarts=[],
     )
     expect(not restart, f"a clock jump must not trigger a restart, got {why}")
 
-    # CASE 13: restarts are rate bounded, twice over.
+    # CASE 13: bounded, and bounded per window rather than per lifetime.
     restart, _ = theme.watchdog_decision(
-        child_running=True, last_tick=dead_tick, now=now,
-        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(seconds=2),
-        last_restart=now - timedelta(seconds=30), restarts=1,
+        child_running=False, last_tick=dead_tick, should_run=True, now=now,
+        first_seen=None, last_checked=now - timedelta(seconds=2),
+        restarts=[now - timedelta(seconds=30)],
     )
     expect(not restart, "a restart moments ago should be given time to take effect")
-    restart, _ = theme.watchdog_decision(
-        child_running=True, last_tick=dead_tick, now=now,
-        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(seconds=2),
-        last_restart=now - timedelta(hours=1), restarts=theme.WATCHDOG_MAX_RESTARTS,
-    )
-    expect(not restart, "restarting forever helps nobody")
 
-    # A worker with no stamp at all - just started, or an older version - gets
-    # room rather than a restart.
+    recent_five = [now - timedelta(minutes=m) for m in (6, 8, 10, 12, 14)]
     restart, _ = theme.watchdog_decision(
-        child_running=True, last_tick=None, now=now, first_seen=now - timedelta(seconds=30),
-        last_checked=now - timedelta(seconds=2), last_restart=None, restarts=0,
+        child_running=False, last_tick=dead_tick, should_run=True, now=now,
+        first_seen=None, last_checked=now - timedelta(seconds=2), restarts=recent_five,
+    )
+    expect(not restart, "five restarts in minutes means restarting is not the answer")
+
+    # ...but the same five spread over days must not strand the machine.
+    old_five = [now - timedelta(days=d) for d in (1, 2, 3, 4, 5)]
+    restart, _ = theme.watchdog_decision(
+        child_running=False, last_tick=dead_tick, should_run=True, now=now,
+        first_seen=None, last_checked=now - timedelta(seconds=2), restarts=old_five,
+    )
+    expect(restart, "an old restart history must not block recovery today")
+
+    # A worker with no stamp - just started, or an older version - gets room.
+    restart, _ = theme.watchdog_decision(
+        child_running=True, last_tick=None, should_run=True, now=now,
+        first_seen=now - timedelta(seconds=30), last_checked=now - timedelta(seconds=2), restarts=[],
     )
     expect(not restart, "a worker that has only just started must not be restarted")
     restart, _ = theme.watchdog_decision(
-        child_running=True, last_tick=None, now=now, first_seen=now - timedelta(minutes=30),
-        last_checked=now - timedelta(seconds=2), last_restart=None, restarts=0,
+        child_running=True, last_tick=None, should_run=True, now=now,
+        first_seen=now - timedelta(minutes=30), last_checked=now - timedelta(seconds=2), restarts=[],
     )
     expect(restart, "a worker that never reports a tick is not doing its rounds")
 
@@ -288,6 +306,10 @@ def check(theme) -> list[str]:
     expect(
         theme.WATCHDOG_STALE_SECONDS >= theme.STALE_AFTER_SECONDS,
         "the watchdog must be slower to act than the web is to call an agent offline",
+    )
+    expect(
+        theme.WATCHDOG_RESTART_WINDOW_SECONDS > theme.WATCHDOG_COOLDOWN_SECONDS,
+        "the restart window must be longer than the cooldown, or the cap never applies",
     )
 
     # --- tokens are a system, not a pile of numbers -------------------------

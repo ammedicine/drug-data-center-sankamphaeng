@@ -472,8 +472,13 @@ class AgentApp(ctk.CTk):
         # worker being restarted every two seconds.
         self._worker_seen_at: datetime | None = None
         self._watchdog_checked_at: datetime | None = None
-        self._watchdog_restarted_at: datetime | None = None
-        self._watchdog_restarts = 0
+        # Times of recent restarts, so the allowance is per window rather
+        # than per lifetime - a machine that recovered five times over a
+        # week must still be allowed a sixth.
+        self._watchdog_restarts: list[datetime] = []
+        # Recovery must never fight intent: a tray that is closing, or an
+        # operator who stopped the worker, does not want it handed back.
+        self._worker_should_run = True
 
         # The window must open even when the worker cannot start, otherwise the
         # operator has no way to fix the settings that caused it.
@@ -1278,22 +1283,23 @@ class AgentApp(ctk.CTk):
 
     def _watchdog(self) -> None:
         """
-        Restarts a worker that is alive but has stopped doing its rounds.
+        Restarts the worker this tray started, when it stops working.
 
-        A รพ.สต. was left silent for twenty-five minutes: the icon was in the
-        tray, the worker process was in the task list, and neither was doing
-        anything. Nothing detected it, because "the process exists" was the
-        only thing anybody checked. The worker now stamps every tick, and this
-        watches that stamp.
+        Two failures need this and they look nothing like each other from
+        outside. A worker can be alive with its process in the task list and
+        quietly doing nothing, and a worker can exit and leave the tray sitting
+        there with no worker at all. Neither used to be noticed: "the process
+        exists" was all anybody checked, and a รพ.สต. stayed offline until
+        somebody closed and reopened the program.
 
-        It lives here, in the tray, on purpose. A timer inside the worker
-        cannot notice that the worker's own timers have stopped; only another
-        process can. It restarts the child this tray started and nothing else -
-        never every node.exe on the machine, which would take down whatever
-        else the clinic runs.
+        It lives in the tray on purpose. A timer inside the worker cannot
+        notice that the worker's own timers have stopped, and nothing inside a
+        process that has exited can restart it. Only another process can.
 
-        The decision itself is in theme.watchdog_decision so every awkward case
-        can be checked without a window or a real stalled process.
+        The decision is in theme.watchdog_decision so every awkward case - a
+        machine waking from sleep, a worker that has only just started, an
+        operator deliberately closing the program - can be checked without a
+        window or a real stalled process.
         """
         now = datetime.now(timezone.utc)
         running = self.bridge.background_running()
@@ -1304,25 +1310,25 @@ class AgentApp(ctk.CTk):
 
         restart, reason = theme.watchdog_decision(
             child_running=running,
+            should_run=self._worker_should_run,
             last_tick=self.bridge.status().get("lastWorkerTickAt"),
             now=now,
             first_seen=self._worker_seen_at,
             last_checked=self._watchdog_checked_at,
-            last_restart=self._watchdog_restarted_at,
             restarts=self._watchdog_restarts,
         )
         self._watchdog_checked_at = now
         if not restart:
             return
 
-        self._watchdog_restarted_at = now
-        self._watchdog_restarts += 1
+        self._watchdog_restarts.append(now)
         self._worker_seen_at = None
-        # Only this tray's own child, by handle - never by image name.
+        # Only this tray's own child, by the handle it was started with - never
+        # by image name, which would take down whatever else the clinic runs.
         self.bridge.stop_background()
         self.worker_error = self.bridge.start_background()
         self.log_hint.configure(
-            text=f"{reason} เริ่มใหม่ให้แล้ว ครั้งที่ {self._watchdog_restarts}",
+            text=f"{reason} เริ่มใหม่ให้แล้ว ครั้งที่ {len(self._watchdog_restarts)}",
             text_color=theme.WARN,
         )
 
@@ -1501,6 +1507,9 @@ class AgentApp(ctk.CTk):
             self._quit()
 
     def _quit(self) -> None:
+        # Said before the worker is stopped, so a poll that lands mid-shutdown
+        # does not helpfully start it again on the way out.
+        self._worker_should_run = False
         self.bridge.stop_background()
         if self.tray_icon:
             self.tray_icon.stop()

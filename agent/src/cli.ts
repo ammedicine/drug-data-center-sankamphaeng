@@ -331,6 +331,32 @@ async function run(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
+  /**
+   * Last resort for a failure nothing expected.
+   *
+   * Not a way to keep running through anything: an unknown rejection can leave
+   * the process in a state nobody reasoned about, and carrying on from there is
+   * how a machine reports healthy while doing something wrong. The known
+   * transient failures - a status file that could not be renamed, a database
+   * that stopped answering - are handled where they happen and never reach
+   * this.
+   *
+   * So this records what happened somewhere an operator can find it, then
+   * exits deliberately. The tray notices its worker is gone and starts a fresh
+   * one, which is a state we can reason about.
+   */
+  let exiting = false;
+  const fatal = (kind: string) => (error: unknown) => {
+    if (exiting) return; // never recurse through our own handler
+    exiting = true;
+    const message = error instanceof Error ? error.message : String(error);
+    log.error("worker stopping after an unexpected failure", { kind, error: message });
+    writeStatus({ phase: "error", syncPhase: "ERROR", lastError: message });
+    setTimeout(() => process.exit(1), 250);
+  };
+  process.on("unhandledRejection", fatal("unhandledRejection"));
+  process.on("uncaughtException", fatal("uncaughtException"));
+
   const safeHeartbeat = async (
     state: "ONLINE" | "SYNCING" | "ERROR",
     error?: string,
@@ -417,7 +443,25 @@ async function run(): Promise<void> {
   let lastHeartbeat = Date.now();
 
   setInterval(() => {
+    // Every rejection is caught here. An unhandled one inside a `void`
+    // async call ends the Node process by default, and that is how a
+    // failed status write - a file rename losing a race with a virus
+    // scanner - took a whole agent down with it.
     void (async () => {
+      try {
+        await tick();
+      } catch (error) {
+        // Unexpected: the known transient failures are handled where they
+        // happen. Report it and carry on rather than exiting, because the
+        // next tick is thirty seconds away and usually succeeds.
+        log.error("scheduler tick failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+  }, TICK_MS);
+
+  async function tick(): Promise<void> {
       if (stopping) return;
       // Written first and unconditionally: this is what tells the tray the
       // worker is still making its rounds, and it must not depend on
@@ -506,8 +550,7 @@ async function run(): Promise<void> {
         lastIntervalRunAt: lastIntervalRun,
       });
       writeStatus({ nextSyncAt: next ? next.toISOString() : null });
-    })();
-  }, TICK_MS);
+  }
 
   lastIntervalRun = Date.now();
 

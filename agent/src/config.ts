@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -524,11 +525,93 @@ export function loadStatus(): AgentStatus {
   }
 }
 
+/** Windows hands these back while something else briefly holds the file. */
+const TRANSIENT_WRITE_CODES = new Set(["EPERM", "EBUSY", "EACCES", "ENOENT"]);
+
+/** Waits between attempts, growing a little each time. */
+const WRITE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
+
+/**
+ * Counted so an operator can tell a quiet machine from a struggling one.
+ *
+ * Kept here rather than logged from here: the logger writes into the data
+ * directory this module resolves, and importing it back would be a cycle.
+ * The worker reports these numbers on its rounds instead.
+ */
+export const statusWriteStats = { retries: 0, failures: 0, lastError: null as string | null };
+
+let statusWriteSequence = 0;
+
+/** Blocks briefly. Justified below: these writes are synchronous by design. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Records the agent's status for the screen to read.
+ *
+ * This is telemetry, not data. The queue, the watermark and the credential are
+ * what must never be lost; this file only decides what the window draws. It
+ * used to throw, and a throw from here killed the worker: an unhandled
+ * rejection inside the scheduler's tick ends the process, so a รพ.สต. went
+ * offline until somebody restarted the tray - because a status file could not
+ * be renamed.
+ *
+ * Two things caused those renames to fail. The temporary file had one fixed
+ * name shared by every process, so the worker and a manual sync started from
+ * the tray would write to the same path and take each other's file away. And
+ * on Windows a rename fails outright while anything else holds the target open
+ * for even a moment - a virus scanner reading a file that was just created is
+ * enough. Neither is worth an agent for.
+ *
+ * So the temporary name is unique per process and per write, the rename is
+ * retried briefly, and giving up leaves the previous status in place and
+ * returns rather than throwing. An old status on screen is a small problem; an
+ * agent that stopped is not.
+ */
 export function writeStatus(patch: Partial<AgentStatus>): AgentStatus {
   const next: AgentStatus = { ...loadStatus(), ...patch, updatedAt: new Date().toISOString() };
   const target = statusPath();
-  const temp = `${target}.tmp`;
-  writeFileSync(temp, JSON.stringify(next, null, 2), "utf8");
-  renameSync(temp, target);
+  // Same directory, so the rename stays on one volume; unique per process and
+  // per call, so two writers can never take each other's temporary file.
+  const temp = `${target}.${process.pid}.${++statusWriteSequence}.tmp`;
+
+  try {
+    writeFileSync(temp, JSON.stringify(next, null, 2), "utf8");
+  } catch (error) {
+    statusWriteStats.failures += 1;
+    statusWriteStats.lastError = describeWriteError(error);
+    return next;
+  }
+
+  for (let attempt = 0; attempt <= WRITE_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      renameSync(temp, target);
+      return next;
+    } catch (error) {
+      const code = (error as { code?: string }).code ?? "";
+      const last = attempt === WRITE_RETRY_DELAYS_MS.length;
+      if (!TRANSIENT_WRITE_CODES.has(code) || last) {
+        statusWriteStats.failures += 1;
+        statusWriteStats.lastError = describeWriteError(error);
+        // The previous status.json is untouched, which is the right
+        // outcome: slightly stale beats absent.
+        try {
+          unlinkSync(temp);
+        } catch {
+          /* the temporary file is the operating system's problem now */
+        }
+        return next;
+      }
+      statusWriteStats.retries += 1;
+      pause(WRITE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
   return next;
+}
+
+/** Error text with no file contents and no credentials in it. */
+function describeWriteError(error: unknown): string {
+  const code = (error as { code?: string }).code;
+  return code ?? (error instanceof Error ? error.message : String(error));
 }
