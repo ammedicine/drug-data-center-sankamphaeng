@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -151,6 +152,36 @@ def check(theme) -> list[str]:
     daily = theme.next_sync_text({"syncIntervalMinutes": 0, "dailyTimes": ["08:00"]}, {}, now)
     expect("08:00" in daily, f"a daily time should be reported, got {daily}")
 
+    # The scheduler staggers a nominal 08:00 to 08:00:27 so the district does
+    # not arrive in one second. The screen must report the moment the agent
+    # will actually run, not recompute the setting it was derived from.
+    staggered = now.astimezone().replace(hour=8, minute=0, second=27, microsecond=0) + timedelta(
+        days=1
+    )
+    published = theme.next_sync_text(
+        {"syncIntervalMinutes": 0, "dailyTimes": ["08:00"]},
+        {},
+        now,
+        status={"nextSyncAt": staggered.isoformat()},
+    )
+    expect("08:00:27" in published, f"nextSyncAt should win over the setting, got {published}")
+
+    # An agent old enough not to publish the field must still say something.
+    for stale_status in ({}, {"nextSyncAt": None}, {"nextSyncAt": "ไม่ใช่เวลา"}):
+        legacy = theme.next_sync_text(
+            {"syncIntervalMinutes": 60}, {"lastSyncAt": fresh}, now, status=stale_status
+        )
+        expect("น." in legacy, f"missing nextSyncAt should fall back, got {legacy}")
+
+    # A published time that has already passed is not a future promise.
+    passed = theme.next_sync_text(
+        {"syncIntervalMinutes": 60},
+        {"lastSyncAt": fresh},
+        now,
+        status={"nextSyncAt": (now - timedelta(minutes=5)).isoformat()},
+    )
+    expect(passed == "ถึงกำหนดแล้ว", f"a past nextSyncAt should say so, got {passed}")
+
     # --- tokens are a system, not a pile of numbers -------------------------
     expect(sorted(theme.SPACE.values()) == [4, 8, 12, 16, 24, 32], "spacing scale changed")
     expect(theme.WINDOW_MIN[0] <= theme.WINDOW_DEFAULT[0], "default window smaller than minimum")
@@ -187,6 +218,23 @@ def main() -> int:
     print("state        :", json.dumps(bridge.state(), ensure_ascii=False))
     print("status       :", json.dumps(bridge.status(), ensure_ascii=False)[:200])
     print("queue        :", bridge.queue_depth())
+
+    # The screen and the agent must land in one folder. An agent upgraded from
+    # an old release can still have {app}\.env saying AGENT_DATA_DIR=./data,
+    # which the agent would resolve against cwd={app}; passing the resolved
+    # folder to the child settles it before dotenv ever reads that file.
+    child_env = bridge._environment()
+    same = child_env.get("AGENT_DATA_DIR") == str(app.data_dir())
+    print("child env    :", child_env.get("AGENT_DATA_DIR"), "· ตรงกับหน้าจอ:", same)
+    if not same:
+        print("   ! หน้าจอกับ agent จะใช้คนละโฟลเดอร์")
+        return 1
+    # Only that one variable is decided here; everything else the machine set
+    # is passed through, so a custom PATH or proxy still reaches the agent.
+    leaked = [key for key in os.environ if key not in child_env]
+    if leaked:
+        print("   ! ตัวแปรสภาพแวดล้อมหายไป:", leaked)
+        return 1
 
     # The JHCIS target has to be readable and writable from the tray: a รพ.สต.
     # that moves its server, or an agent pointed at another LAN, is changed

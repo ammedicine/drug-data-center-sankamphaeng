@@ -98,3 +98,72 @@ describe("status.json compatibility", () => {
     expect(status.recordsRejected).toBe(2);
   });
 });
+
+/**
+ * Where an upgraded agent keeps its data.
+ *
+ * The installer writes {app}\.env only when the file is absent, so a machine
+ * upgraded from an old release can still carry AGENT_DATA_DIR=./data. The
+ * agent runs with cwd={app}, so that resolves inside Program Files - a folder
+ * no staff account may write to - while the tray falls back to ProgramData.
+ * Two processes, two folders, and a queue nobody can see.
+ *
+ * resolveDataDir is pure, so these can be checked without creating anything
+ * under Program Files.
+ */
+describe("data directory on an upgraded install", () => {
+  const APP = "C:\\Program Files\\SDC Agent";
+  const WINDOWS: NodeJS.ProcessEnv = {
+    NODE_ENV: "test",
+    ProgramData: "C:\\ProgramData",
+    ProgramFiles: "C:\\Program Files",
+    "ProgramFiles(x86)": "C:\\Program Files (x86)",
+  };
+
+  async function resolver() {
+    const module = await import(`../agent/src/config?datadir=${Date.now()}`);
+    return module.resolveDataDir as (
+      env: NodeJS.ProcessEnv,
+      platform: NodeJS.Platform,
+      base: string,
+    ) => string;
+  }
+
+  it("refuses a legacy relative setting that lands in Program Files", async () => {
+    const resolveDataDir = await resolver();
+    for (const legacy of ["./data", "data", ".\\data"]) {
+      expect(
+        resolveDataDir({ ...WINDOWS, AGENT_DATA_DIR: legacy }, "win32", APP),
+        `${legacy} must not be honoured inside Program Files`,
+      ).toBe("C:\\ProgramData\\SDCAgent");
+    }
+  });
+
+  it("keeps a deliberate absolute folder on another drive", async () => {
+    const resolveDataDir = await resolver();
+    expect(resolveDataDir({ ...WINDOWS, AGENT_DATA_DIR: "D:\\SDCAgentData" }, "win32", APP)).toBe(
+      "D:\\SDCAgentData",
+    );
+  });
+
+  it("uses the folder the tray passes, which is the one the tray reads", async () => {
+    const resolveDataDir = await resolver();
+    expect(resolveDataDir({ ...WINDOWS, AGENT_DATA_DIR: "C:\\ProgramData\\SDCAgent" }, "win32", APP)).toBe(
+      "C:\\ProgramData\\SDCAgent",
+    );
+  });
+
+  it("falls back to ProgramData when nothing is set", async () => {
+    const resolveDataDir = await resolver();
+    expect(resolveDataDir({ ...WINDOWS }, "win32", APP)).toBe("C:\\ProgramData\\SDCAgent");
+  });
+
+  it("leaves a developer checkout alone", async () => {
+    const resolveDataDir = await resolver();
+    // The same ./data that is refused inside Program Files is exactly how a
+    // developer runs the agent from the repository, and must keep working.
+    expect(resolveDataDir({ ...WINDOWS, AGENT_DATA_DIR: "./data" }, "win32", "C:\\repo\\agent")).toBe(
+      "C:\\repo\\agent\\data",
+    );
+  });
+});

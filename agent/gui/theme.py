@@ -344,17 +344,38 @@ def sync_view(status: dict[str, Any], now: datetime | None = None) -> SyncView:
 
 
 def next_sync_text(
-    settings: dict[str, Any], state: dict[str, Any], now: datetime | None = None
+    settings: dict[str, Any],
+    state: dict[str, Any],
+    now: datetime | None = None,
+    status: dict[str, Any] | None = None,
 ) -> str:
     """
-    When the schedule will fire next, in words.
+    When the next sync will actually happen.
 
-    The agent supports two schedules at once - an interval and a list of clock
-    times - so this reports whichever comes first. It is a description of the
-    settings, not a promise: a run already under way, or a machine that was
-    asleep, moves the real moment.
+    The scheduler in cli.ts already decides this - it applies the deterministic
+    stagger that keeps twenty clinics from arriving in the same second - and
+    publishes the answer as status.nextSyncAt. That value is the truth, and the
+    screen reads it rather than working it out again: a second implementation
+    here would drift from the first the moment either changed, and the operator
+    would be told a time the agent has no intention of keeping.
+
+    The calculation below is the fallback, for an agent old enough not to
+    publish the field, or a scheduler that has not ticked yet. It describes the
+    settings rather than the schedule, so it does not know about the stagger
+    and can be a few minutes optimistic.
     """
     moment = (now or datetime.now(timezone.utc)).astimezone()
+
+    published = parse_iso((status or {}).get("nextSyncAt"))
+    if published is not None:
+        real = published.astimezone()
+        if real <= moment:
+            return "ถึงกำหนดแล้ว"
+        # Seconds are shown when the stagger moved the run off the minute:
+        # 08:00:27 is the honest answer, and rounding it back to 08:00 would
+        # hide exactly the difference this field exists to report.
+        clock_text = real.strftime("%H:%M:%S" if real.second else "%H:%M")
+        return f"{clock_text} น. ({relative_future(real, moment)})"
 
     candidates: list[datetime] = []
 

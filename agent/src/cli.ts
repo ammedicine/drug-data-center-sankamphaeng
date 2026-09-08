@@ -453,7 +453,13 @@ async function run(): Promise<void> {
         }
       }
 
-      if (!current.autoSyncEnabled) return;
+      if (!current.autoSyncEnabled) {
+        // Nothing is scheduled, so the published time must say so. Leaving the
+        // last one in place would have the screen counting down to a run that
+        // is never going to happen.
+        writeStatus({ nextSyncAt: null });
+        return;
+      }
 
       const clock = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
       const dayKey = now.toISOString().slice(0, 10);

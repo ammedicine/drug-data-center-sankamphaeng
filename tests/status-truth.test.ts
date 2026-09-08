@@ -104,3 +104,81 @@ describe("JHCIS link seen from Central", () => {
     );
   });
 });
+
+/**
+ * The time the screen counts down to must be a time the agent intends to keep.
+ *
+ * nextScheduledRun is the only place that decides it - the tray reads the
+ * answer rather than working it out again - so a schedule with nothing in it
+ * has to say null instead of leaving yesterday's answer standing.
+ */
+describe("the published next run", () => {
+  const AGENT = "01m1t1rvwfnnm95qa85fg84tp6";
+  const NOW = new Date("2026-09-06T07:30:00.000Z");
+
+  async function schedule() {
+    return import("../agent/src/schedule");
+  }
+
+  it("gives a real moment when a schedule exists", async () => {
+    const { nextScheduledRun } = await schedule();
+    const next = nextScheduledRun({
+      agentId: AGENT,
+      now: NOW,
+      intervalMinutes: 60,
+      dailyTimes: [],
+      lastIntervalRunAt: NOW.getTime(),
+    });
+    expect(next).not.toBeNull();
+    // An hour away, plus this agent's own place in the queue - never before
+    // the interval it was told to keep.
+    const waited = next!.getTime() - NOW.getTime();
+    expect(waited).toBeGreaterThanOrEqual(60 * 60_000);
+    expect(waited).toBeLessThan(60 * 60_000 + 300_000);
+  });
+
+  it("says nothing is scheduled when nothing is", async () => {
+    const { nextScheduledRun } = await schedule();
+    expect(
+      nextScheduledRun({
+        agentId: AGENT,
+        now: NOW,
+        intervalMinutes: 0,
+        dailyTimes: [],
+        lastIntervalRunAt: null,
+      }),
+      "auto sync on, but no interval and no daily time",
+    ).toBeNull();
+  });
+
+  it("says nothing is scheduled while auto sync is off", async () => {
+    const { nextScheduledRun } = await schedule();
+    // This is the shape cli.ts passes once autoSyncEnabled is false: the
+    // schedule is emptied rather than the last answer being left in place.
+    expect(
+      nextScheduledRun({
+        agentId: AGENT,
+        now: NOW,
+        intervalMinutes: 0,
+        dailyTimes: [],
+        lastIntervalRunAt: NOW.getTime(),
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a fixed daily time inside its own minute", async () => {
+    const { nextScheduledRun } = await schedule();
+    const next = nextScheduledRun({
+      agentId: AGENT,
+      now: NOW,
+      intervalMinutes: 0,
+      dailyTimes: ["08:00"],
+      lastIntervalRunAt: null,
+    });
+    expect(next).not.toBeNull();
+    // 08:00 means 08:00. The stagger may move it by seconds so twenty clinics
+    // do not arrive together, never to 08:04.
+    expect(next!.getHours()).toBe(8);
+    expect(next!.getMinutes()).toBe(0);
+  });
+});

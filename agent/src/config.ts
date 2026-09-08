@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { hostname, userInfo } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative as relativePath, resolve, sep } from "node:path";
 
 import {
   HEARTBEAT_INTERVAL_SECONDS,
@@ -84,14 +84,67 @@ export interface AgentState {
  * where the installer creates the folder anyway.
  */
 export function dataDir(): string {
-  const configured = process.env.AGENT_DATA_DIR?.trim();
-  const fallback =
-    process.platform === "win32" && process.env.ProgramData
-      ? resolve(process.env.ProgramData, "SDCAgent")
-      : resolve("./data");
-  const dir = configured ? resolve(configured) : fallback;
+  const dir = resolveDataDir();
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/** True when `target` is the folder at `root`, or anything beneath it. */
+function isInside(target: string, root: string): boolean {
+  const step = relativePath(root, target);
+  // Across drives there is no relative route, and Windows answers with the
+  // target itself - D:\SDCAgentData is not below C:\Program Files, however
+  // little it looks like a way back up.
+  if (isAbsolute(step)) return false;
+  return step === "" || (!step.startsWith("..") && !step.startsWith(sep));
+}
+
+/**
+ * Decides the data folder from an environment, without touching the disk.
+ *
+ * Separated from dataDir() so the upgrade cases can be tested: the interesting
+ * ones are about which environment the agent was started with, and creating
+ * folders under Program Files to find out is not a test anyone wants to run.
+ *
+ * The guard is one rule: on Windows, a data folder inside a Program Files root
+ * is refused, whatever asked for it. An agent upgraded from an old release can
+ * still have {app}\.env saying AGENT_DATA_DIR=./data, which resolves against
+ * cwd={app} to a folder no staff account may write to - the tray would look
+ * fine for the administrator who installed it and save nothing for anybody
+ * else. ProgramData is where the installer grants write access, so that is
+ * where the refusal lands.
+ *
+ * The roots are read from the environment rather than spelled out, because
+ * "Program Files" is not the folder's name on every Windows installation.
+ *
+ * Trade-off: an agent deliberately installed outside Program Files - say
+ * D:\Apps\SDCAgent - with a legacy relative setting is not caught, and keeps
+ * its {app}\data folder. Detecting that would mean reasoning about where the
+ * bundled node.exe lives, which is more machinery than the case deserves: the
+ * installer puts the agent in Program Files, and the tray now passes an
+ * absolute AGENT_DATA_DIR anyway. This is the second line of defence, for an
+ * agent started outside the tray.
+ */
+export function resolveDataDir(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  base: string = process.cwd(),
+): string {
+  const windows = platform === "win32";
+  const fallback =
+    windows && env.ProgramData ? resolve(env.ProgramData, "SDCAgent") : resolve(base, "data");
+
+  const configured = env.AGENT_DATA_DIR?.trim();
+  if (!configured) return fallback;
+
+  const target = resolve(base, configured);
+  if (windows) {
+    const roots = [env.ProgramFiles, env["ProgramFiles(x86)"], env.ProgramW6432].filter(
+      (root): root is string => Boolean(root && root.trim()),
+    );
+    if (roots.some((root) => isInside(target, resolve(root)))) return fallback;
+  }
+  return target;
 }
 
 /**

@@ -148,11 +148,34 @@ class AgentBridge:
                     return found
         return program
 
+    def _environment(self) -> dict[str, str]:
+        """
+        Environment for every agent process this screen starts.
+
+        The screen and the agent must agree on one data folder, and until now
+        they could disagree. The agent runs with cwd={app} and calls
+        dotenv.config(), so it reads {app}\\.env - and the installer only writes
+        that file when it is absent, so a machine upgraded from an old release
+        still has one saying AGENT_DATA_DIR=./data. That resolves to
+        {app}\\data inside Program Files, while this screen falls back to
+        ProgramData: two processes, two folders, and a queue the screen cannot
+        see.
+
+        Passing the resolved folder explicitly settles it. The child's
+        AGENT_DATA_DIR is already set when dotenv runs, and dotenv does not
+        overwrite a variable that exists, so the stale file loses without being
+        touched - the JHCIS credentials beside it are left exactly as they are.
+        """
+        child = os.environ.copy()
+        child["AGENT_DATA_DIR"] = str(data_dir())
+        return child
+
     def _popen(self, args: list[str]) -> subprocess.Popen[str]:
         creation = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         return subprocess.Popen(
             self._command(args),
             cwd=str(self.root),
+            env=self._environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -172,6 +195,7 @@ class AgentBridge:
             process = subprocess.Popen(
                 self._command(args),
                 cwd=str(self.root),
+                env=self._environment(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1299,7 +1323,7 @@ class AgentApp(ctk.CTk):
             text=(
                 "ปิดการซิงก์อัตโนมัติ"
                 if not settings.get("autoSyncEnabled", True)
-                else theme.next_sync_text(settings, state)
+                else theme.next_sync_text(settings, state, status=status)
             )
         )
 
