@@ -84,6 +84,80 @@ LABEL_WIDTH = 150
 #: connected - the same rule the server applies, so the two screens agree.
 STALE_AFTER_SECONDS = 90
 
+# ------------------------------------------------------------------- watchdog
+
+#: How long the worker may go without stamping a tick before the tray restarts
+#: it. Several times the 30-second heartbeat, so an ordinary slow moment - a
+#: long extraction page, a busy PC - is never mistaken for a stall.
+WATCHDOG_STALE_SECONDS = 180
+
+#: Room for a worker that has only just started, or one from a version that
+#: does not stamp ticks at all. Restarting either would be wrong.
+WATCHDOG_GRACE_SECONDS = 240
+
+#: A gap this large between two checks means the machine was asleep, not that
+#: the worker stopped. The wall clock jumped; nothing was wrong.
+WATCHDOG_SLEEP_JUMP_SECONDS = 120
+
+#: Quiet period after a restart, so a worker that fails on startup is not
+#: restarted every two seconds.
+WATCHDOG_COOLDOWN_SECONDS = 300
+
+#: After this many, restarting is plainly not the answer and the operator is
+#: better served by the message on screen than by another attempt.
+WATCHDOG_MAX_RESTARTS = 5
+
+
+def watchdog_decision(
+    *,
+    child_running: bool,
+    last_tick: Any,
+    now: datetime,
+    first_seen: datetime | None,
+    last_checked: datetime | None,
+    last_restart: datetime | None,
+    restarts: int,
+) -> tuple[bool, str]:
+    """
+    Whether the tray should restart the worker it started, and why.
+
+    Pure so every awkward case can be checked without a window or a real
+    stalled process: a machine coming back from sleep, a worker that has only
+    just started, one from a version that does not stamp ticks, and a worker
+    that fails immediately and would otherwise be restarted for ever.
+
+    Returns (restart?, reason). The reason is for the operator and the log, so
+    a restart is never something that just silently happened.
+    """
+    if not child_running:
+        return False, "ตัวทำงานไม่ได้รันอยู่"
+
+    # A gap between checks this large means the machine was asleep. The wall
+    # clock jumped; nothing stalled. Wait for an ordinary round before judging.
+    if last_checked is not None and (now - last_checked).total_seconds() > WATCHDOG_SLEEP_JUMP_SECONDS:
+        return False, "เครื่องเพิ่งกลับจากสถานะพัก"
+
+    stamp = parse_iso(last_tick)
+    if stamp is None:
+        # No stamp at all: either brand new, or an older worker that never
+        # reports one. Both deserve room rather than a restart.
+        started = first_seen or now
+        if (now - started).total_seconds() < WATCHDOG_GRACE_SECONDS:
+            return False, "เพิ่งเริ่มทำงาน"
+        age_text = "ไม่เคยรายงาน"
+    else:
+        age = (now - stamp).total_seconds()
+        if age < WATCHDOG_STALE_SECONDS:
+            return False, "ทำงานปกติ"
+        age_text = f"{int(age)} วินาที"
+
+    if last_restart is not None and (now - last_restart).total_seconds() < WATCHDOG_COOLDOWN_SECONDS:
+        return False, "เพิ่งเริ่มใหม่ไป รอสักครู่"
+    if restarts >= WATCHDOG_MAX_RESTARTS:
+        return False, "เริ่มใหม่หลายครั้งแล้วยังไม่ดีขึ้น"
+
+    return True, f"ตัวทำงานเบื้องหลังไม่ตอบสนอง ({age_text})"
+
 
 # ----------------------------------------------------------------- view models
 

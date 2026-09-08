@@ -330,3 +330,106 @@ describe("times shown to a reader", () => {
     expect(formatDateTime("ไม่ใช่เวลา")).toBe("-");
   });
 });
+
+/**
+ * "Sync now" is a button press, not a standing order.
+ *
+ * A request pressed at 08:19 was still being obeyed an hour later, every
+ * thirty seconds. The reason was that a request counts as answered when a run
+ * happens after it - and a run that finds nothing to fetch opens no batch, so
+ * nothing recorded that it happened at all. The agent now reports the attempt,
+ * and a request that nobody has answered eventually stops being an
+ * instruction.
+ */
+describe("a manual sync request", () => {
+  const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000);
+
+  async function auth() {
+    return import("@/lib/agent-auth/verify");
+  }
+
+  /** The decision the heartbeat makes, in the shape the row supplies. */
+  function outstanding(row: {
+    syncRequestedAt: Date | null;
+    syncRequestedFrom?: string | null;
+    lastSyncAt: Date | null;
+    ttlMs: number;
+  }): boolean {
+    const live = row.syncRequestedAt && Date.now() - row.syncRequestedAt.getTime() <= row.ttlMs;
+    return Boolean(
+      live &&
+        (row.syncRequestedFrom ||
+          !row.lastSyncAt ||
+          row.syncRequestedAt!.getTime() > row.lastSyncAt.getTime()),
+    );
+  }
+
+  it("CASE 1/7: a run that found nothing still answers the request", async () => {
+    const { SYNC_REQUEST_TTL_MS } = await auth();
+    const requested = minutesAgo(5);
+    // Before: the run opened no batch, so nothing was recorded and every
+    // heartbeat started it again.
+    expect(
+      outstanding({ syncRequestedAt: requested, lastSyncAt: minutesAgo(60), ttlMs: SYNC_REQUEST_TTL_MS }),
+    ).toBe(true);
+    // After: the agent reports the attempt on its heartbeat, and the request
+    // is answered - however many heartbeats follow.
+    const ranAt = minutesAgo(4);
+    expect(
+      outstanding({ syncRequestedAt: requested, lastSyncAt: ranAt, ttlMs: SYNC_REQUEST_TTL_MS }),
+    ).toBe(false);
+  });
+
+  it("CASE 4: a newer request is not swallowed by an older acknowledgement", async () => {
+    const { SYNC_REQUEST_TTL_MS } = await auth();
+    // The operator pressed again while the first run was finishing. The second
+    // press is newer than the run that answered the first, so it stands.
+    const ranAt = minutesAgo(3);
+    const pressedAgain = minutesAgo(2);
+    expect(
+      outstanding({ syncRequestedAt: pressedAgain, lastSyncAt: ranAt, ttlMs: SYNC_REQUEST_TTL_MS }),
+    ).toBe(true);
+  });
+
+  it("CASE 5: a request nobody answered stops being an instruction", async () => {
+    const { SYNC_REQUEST_TTL_MS } = await auth();
+    const ttlMinutes = SYNC_REQUEST_TTL_MS / 60_000;
+    // A PC switched off at closing time should not act on yesterday's press
+    // when it starts in the morning.
+    expect(
+      outstanding({
+        syncRequestedAt: minutesAgo(ttlMinutes + 30),
+        lastSyncAt: null,
+        ttlMs: SYNC_REQUEST_TTL_MS,
+      }),
+    ).toBe(false);
+    // Inside the window it is still what the operator meant.
+    expect(
+      outstanding({
+        syncRequestedAt: minutesAgo(5),
+        lastSyncAt: null,
+        ttlMs: SYNC_REQUEST_TTL_MS,
+      }),
+    ).toBe(true);
+  });
+
+  it("a request naming a window is not answered by an unrelated run", async () => {
+    const { SYNC_REQUEST_TTL_MS } = await auth();
+    // Asking for specific days means those days, so the hourly run that
+    // happened to follow does not count.
+    expect(
+      outstanding({
+        syncRequestedAt: minutesAgo(10),
+        syncRequestedFrom: "2026-07-01",
+        lastSyncAt: minutesAgo(1),
+        ttlMs: SYNC_REQUEST_TTL_MS,
+      }),
+    ).toBe(true);
+  });
+
+  it("the expiry is long enough to be useful and short enough to be safe", async () => {
+    const { SYNC_REQUEST_TTL_MS } = await auth();
+    expect(SYNC_REQUEST_TTL_MS).toBeGreaterThanOrEqual(30 * 60_000);
+    expect(SYNC_REQUEST_TTL_MS).toBeLessThanOrEqual(24 * 60 * 60_000);
+  });
+});

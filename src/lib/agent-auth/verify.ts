@@ -56,6 +56,23 @@ export interface AuthenticatedAgent {
   verifyRequested: boolean;
 }
 
+/**
+ * How long a button press stays a live instruction.
+ *
+ * A machine switched off at closing time and started the next morning should
+ * not act on what somebody asked for yesterday: they wanted data then, not a
+ * surprise run now, and by the morning the schedule has usually done it
+ * anyway. Two hours covers a รพ.สต. PC that was asleep over lunch while
+ * refusing anything that has clearly been forgotten about.
+ */
+export const SYNC_REQUEST_TTL_MS = 2 * 60 * 60 * 1000;
+
+/** True when a request exists and is recent enough to still mean something. */
+function isLive(requestedAt: Date | null | undefined): boolean {
+  if (!requestedAt) return false;
+  return Date.now() - requestedAt.getTime() <= SYNC_REQUEST_TTL_MS;
+}
+
 function maxSkewSeconds(): number {
   return Number(process.env.AGENT_SIGNATURE_MAX_SKEW_SECONDS ?? 300);
 }
@@ -187,13 +204,14 @@ export async function authenticateAgent(
     // launch, or the hourly schedule - would otherwise consume the request
     // without ever looking at the days that were asked for.
     syncRequested: Boolean(
-      row.syncRequestedFrom ||
-        (row.syncRequestedAt &&
-          (!row.lastSyncAt || row.syncRequestedAt.getTime() > row.lastSyncAt.getTime())),
+      isLive(row.syncRequestedAt) &&
+        (row.syncRequestedFrom ||
+          !row.lastSyncAt ||
+          row.syncRequestedAt!.getTime() > row.lastSyncAt.getTime()),
     ),
     verifyRequested: Boolean(
-      row.verifyRequestedAt &&
-        (!row.lastSyncAt || row.verifyRequestedAt.getTime() > row.lastSyncAt.getTime()),
+      isLive(row.verifyRequestedAt) &&
+        (!row.lastSyncAt || row.verifyRequestedAt!.getTime() > row.lastSyncAt.getTime()),
     ),
   };
 }

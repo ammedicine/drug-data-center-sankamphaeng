@@ -463,6 +463,16 @@ export interface AgentStatus {
   lastProgressAt: string | null;
   /** when the schedule fires next, so the tray can say so */
   nextSyncAt: string | null;
+  /**
+   * The last time the worker's own loop ran, and nothing more.
+   *
+   * Deliberately says nothing about JHCIS or Central: it is the one signal
+   * that separates "this process is still doing its rounds" from "this
+   * process is alive but has stopped" - a state that looked identical from
+   * outside and left a รพ.สต. silent for twenty-five minutes with its icon
+   * still in the tray.
+   */
+  lastWorkerTickAt: string | null;
 }
 
 export function statusPath(): string {
@@ -504,6 +514,7 @@ export function loadStatus(): AgentStatus {
     syncStartedAt: null,
     lastProgressAt: null,
     nextSyncAt: null,
+    lastWorkerTickAt: null,
   };
   if (!existsSync(path)) return empty;
   try {

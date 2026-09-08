@@ -161,6 +161,17 @@ export interface HeartbeatRequest {
   lastError?: string | null;
   pendingBatches?: number;
   /**
+   * Set when a sync run has just finished, whatever it found.
+   *
+   * "Sync now" is satisfied by comparing the request against the last run, and
+   * the last run used to be stamped only when a batch was opened. A run that
+   * found nothing to fetch opens no batch, so the request stayed outstanding
+   * and every heartbeat started it again - for ever, thirty seconds apart.
+   * Reporting the attempt is what closes that loop: the operator asked for a
+   * sync, and a sync happened, even though there was nothing to carry.
+   */
+  syncRanAt?: string | null;
+  /**
    * The network card this agent actually reaches Central through. Reported so
    * an operator can tell which physical machine a สถานบริการ is syncing from -
    * useful when a clinic has several PCs and one of them is stale.

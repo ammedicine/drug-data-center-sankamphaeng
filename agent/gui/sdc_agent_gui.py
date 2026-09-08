@@ -467,6 +467,14 @@ class AgentApp(ctk.CTk):
         self._load_settings_into_form()
         self._select_page("overview")
 
+        # Watchdog bookkeeping. Held here rather than inside the check so a
+        # restart is remembered across polls - that is what stops a failing
+        # worker being restarted every two seconds.
+        self._worker_seen_at: datetime | None = None
+        self._watchdog_checked_at: datetime | None = None
+        self._watchdog_restarted_at: datetime | None = None
+        self._watchdog_restarts = 0
+
         # The window must open even when the worker cannot start, otherwise the
         # operator has no way to fix the settings that caused it.
         self.worker_error = self.bridge.start_background()
@@ -1265,7 +1273,58 @@ class AgentApp(ctk.CTk):
 
     def _schedule_poll(self) -> None:
         self._refresh()
+        self._watchdog()
         self.after(POLL_SECONDS * 1000, self._schedule_poll)
+
+    def _watchdog(self) -> None:
+        """
+        Restarts a worker that is alive but has stopped doing its rounds.
+
+        A รพ.สต. was left silent for twenty-five minutes: the icon was in the
+        tray, the worker process was in the task list, and neither was doing
+        anything. Nothing detected it, because "the process exists" was the
+        only thing anybody checked. The worker now stamps every tick, and this
+        watches that stamp.
+
+        It lives here, in the tray, on purpose. A timer inside the worker
+        cannot notice that the worker's own timers have stopped; only another
+        process can. It restarts the child this tray started and nothing else -
+        never every node.exe on the machine, which would take down whatever
+        else the clinic runs.
+
+        The decision itself is in theme.watchdog_decision so every awkward case
+        can be checked without a window or a real stalled process.
+        """
+        now = datetime.now(timezone.utc)
+        running = self.bridge.background_running()
+        if running and self._worker_seen_at is None:
+            self._worker_seen_at = now
+        if not running:
+            self._worker_seen_at = None
+
+        restart, reason = theme.watchdog_decision(
+            child_running=running,
+            last_tick=self.bridge.status().get("lastWorkerTickAt"),
+            now=now,
+            first_seen=self._worker_seen_at,
+            last_checked=self._watchdog_checked_at,
+            last_restart=self._watchdog_restarted_at,
+            restarts=self._watchdog_restarts,
+        )
+        self._watchdog_checked_at = now
+        if not restart:
+            return
+
+        self._watchdog_restarted_at = now
+        self._watchdog_restarts += 1
+        self._worker_seen_at = None
+        # Only this tray's own child, by handle - never by image name.
+        self.bridge.stop_background()
+        self.worker_error = self.bridge.start_background()
+        self.log_hint.configure(
+            text=f"{reason} เริ่มใหม่ให้แล้ว ครั้งที่ {self._watchdog_restarts}",
+            text_color=theme.WARN,
+        )
 
     def _refresh(self) -> None:
         while not self.messages.empty():

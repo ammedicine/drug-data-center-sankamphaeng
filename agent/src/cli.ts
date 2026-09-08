@@ -331,9 +331,13 @@ async function run(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  const safeHeartbeat = async (state: "ONLINE" | "SYNCING" | "ERROR", error?: string) => {
+  const safeHeartbeat = async (
+    state: "ONLINE" | "SYNCING" | "ERROR",
+    error?: string,
+    syncRanAt?: string,
+  ) => {
     try {
-      const config = await runner.heartbeat(state, error);
+      const config = await runner.heartbeat(state, error, syncRanAt);
       writeStatus({ centralConnected: true });
       return config;
     } catch (heartbeatError) {
@@ -363,7 +367,13 @@ async function run(): Promise<void> {
             : { mode: "INCREMENTAL" },
         ),
       );
-      await safeHeartbeat(result.pendingChunks ? "ERROR" : "ONLINE");
+      // Reports that a run happened, so an operator's "sync now" is counted
+      // even when there was nothing to carry.
+      await safeHeartbeat(
+        result.pendingChunks ? "ERROR" : "ONLINE",
+        undefined,
+        new Date().toISOString(),
+      );
     } catch (error) {
       if (error instanceof SyncLockedError) {
         // The tray started a sync by hand while the schedule came due. Skip
@@ -409,6 +419,10 @@ async function run(): Promise<void> {
   setInterval(() => {
     void (async () => {
       if (stopping) return;
+      // Written first and unconditionally: this is what tells the tray the
+      // worker is still making its rounds, and it must not depend on
+      // anything that can hang - not JHCIS, not Central, not a sync.
+      writeStatus({ lastWorkerTickAt: new Date().toISOString() });
       const current = loadSettings();
       const now = new Date();
 

@@ -23,6 +23,7 @@ const schema = z.object({
   schemaReport: z.record(z.unknown()).nullable().optional(),
   lastError: z.string().max(2000).nullable().optional(),
   pendingBatches: z.number().int().min(0).optional(),
+  syncRanAt: z.string().datetime().nullable().optional(),
   network: z
     .object({
       macAddress: z.string().max(32).nullable(),
@@ -62,6 +63,11 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       jhcisConnected: body.jhcisConnected,
       lastJhcisCheckAt: now,
       pendingBatches: body.pendingBatches ?? 0,
+      // A run that finished, whatever it found. "Sync now" is satisfied by
+      // comparing the request against this, and it used to be stamped only
+      // when a batch was opened - so a run that found nothing left the
+      // request outstanding and every heartbeat started it again.
+      ...(body.syncRanAt ? { lastSyncAt: new Date(body.syncRanAt) } : {}),
       // Only overwrite what the agent could actually determine, so a heartbeat
       // sent while the network is confused does not erase a known-good card.
       ...(body.network?.macAddress ? { macAddress: body.network.macAddress } : {}),

@@ -226,6 +226,70 @@ def check(theme) -> list[str]:
     daily_thai = theme.next_sync_text({"syncIntervalMinutes": 0, "dailyTimes": ["08:15"]}, {}, now)
     expect("08:15" in daily_thai, f"a daily time must not be shifted, got {daily_thai}")
 
+    # --- the worker watchdog ------------------------------------------------
+    # A worker can be alive and doing nothing, which looks identical from
+    # outside to a healthy one. These are the cases that decide whether the
+    # tray restarts the child it started.
+    fresh_tick = (now - timedelta(seconds=20)).isoformat()
+    dead_tick = (now - timedelta(seconds=600)).isoformat()
+    base = dict(now=now, first_seen=now - timedelta(hours=1), last_checked=now - timedelta(seconds=2),
+                last_restart=None, restarts=0)
+
+    # CASE 9: a healthy worker is never restarted.
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=fresh_tick, **base)
+    expect(not restart, f"healthy worker must be left alone, got {why}")
+
+    # CASE 10: alive but its rounds stopped - this is the failure being caught.
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=dead_tick, **base)
+    expect(restart, "a worker that stopped ticking should be restarted")
+    expect("ไม่ตอบสนอง" in why, f"the reason should say what happened, got {why}")
+
+    # CASE 11: a dead child is the start path's job, not the watchdog's.
+    restart, _ = theme.watchdog_decision(child_running=False, last_tick=dead_tick, **base)
+    expect(not restart, "a process that already exited is not the watchdog's to restart")
+
+    # CASE 14: waking from sleep looks exactly like a stall. It is not.
+    restart, why = theme.watchdog_decision(
+        child_running=True, last_tick=dead_tick, now=now,
+        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(minutes=30),
+        last_restart=None, restarts=0,
+    )
+    expect(not restart, f"a clock jump must not trigger a restart, got {why}")
+
+    # CASE 13: restarts are rate bounded, twice over.
+    restart, _ = theme.watchdog_decision(
+        child_running=True, last_tick=dead_tick, now=now,
+        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(seconds=2),
+        last_restart=now - timedelta(seconds=30), restarts=1,
+    )
+    expect(not restart, "a restart moments ago should be given time to take effect")
+    restart, _ = theme.watchdog_decision(
+        child_running=True, last_tick=dead_tick, now=now,
+        first_seen=now - timedelta(hours=1), last_checked=now - timedelta(seconds=2),
+        last_restart=now - timedelta(hours=1), restarts=theme.WATCHDOG_MAX_RESTARTS,
+    )
+    expect(not restart, "restarting forever helps nobody")
+
+    # A worker with no stamp at all - just started, or an older version - gets
+    # room rather than a restart.
+    restart, _ = theme.watchdog_decision(
+        child_running=True, last_tick=None, now=now, first_seen=now - timedelta(seconds=30),
+        last_checked=now - timedelta(seconds=2), last_restart=None, restarts=0,
+    )
+    expect(not restart, "a worker that has only just started must not be restarted")
+    restart, _ = theme.watchdog_decision(
+        child_running=True, last_tick=None, now=now, first_seen=now - timedelta(minutes=30),
+        last_checked=now - timedelta(seconds=2), last_restart=None, restarts=0,
+    )
+    expect(restart, "a worker that never reports a tick is not doing its rounds")
+
+    # The threshold has to be well clear of the heartbeat, or an ordinary slow
+    # moment becomes a restart.
+    expect(
+        theme.WATCHDOG_STALE_SECONDS >= theme.STALE_AFTER_SECONDS,
+        "the watchdog must be slower to act than the web is to call an agent offline",
+    )
+
     # --- tokens are a system, not a pile of numbers -------------------------
     expect(sorted(theme.SPACE.values()) == [4, 8, 12, 16, 24, 32], "spacing scale changed")
     expect(theme.WINDOW_MIN[0] <= theme.WINDOW_DEFAULT[0], "default window smaller than minimum")

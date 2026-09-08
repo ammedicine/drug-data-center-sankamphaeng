@@ -1071,6 +1071,14 @@ export class SyncRunner {
   async heartbeat(
     status: "ONLINE" | "SYNCING" | "ERROR",
     lastError?: string,
+    /**
+     * Set when a sync run has just finished, whatever it found. Central
+     * decides whether a "sync now" is still outstanding by comparing the
+     * request against the last run, and a run that found nothing to fetch
+     * opens no batch - so without this it was never counted, and the same
+     * request started a sync again on every heartbeat.
+     */
+    syncRanAt?: string,
   ): Promise<AgentConfigResponse> {
     const db = new JhcisConnection();
     let jhcisConnected = false;
@@ -1131,6 +1139,7 @@ export class SyncRunner {
       schemaReport: report,
       lastError: lastError ?? null,
       pendingBatches: queue.count("PENDING"),
+      ...(syncRanAt ? { syncRanAt } : {}),
       network: await resolveNetworkIdentity(this.credential.centralApiUrl),
       });
     } catch (error) {
