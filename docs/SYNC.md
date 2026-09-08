@@ -32,10 +32,23 @@ Extract → Validate → Normalize → Batch → Upload → Verify → Commit
 
 ผู้ที่มีสิทธิ์ (SUPER_ADMIN / FACILITY_ADMIN ของสถานบริการนั้น) กดปุ่มบนเว็บ →
 ระบบตั้ง `agents.sync_requested_at` → Agent เห็น `syncRequested: true` ใน heartbeat รอบถัดไป
-(≤ 5 นาที) แล้วเริ่มซิงก์ทันที
+แล้วเริ่มซิงก์ทันที **ถ้า agent ออนไลน์ ปกติเห็นภายใน 30 วินาที**
 
 ออกแบบเช่นนี้เพราะ Central **ไม่สามารถ** เรียกเข้า LAN ของ รพ.สต. ได้ตาม architecture
 (ไม่มี inbound port) การสั่งงานจึงต้องเป็นแบบ pull เท่านั้น
+เครื่องที่หลับ ปิด หรือเน็ตหลุด **ไม่มีการรับประกันเวลา** — คำสั่งค้างรออยู่จนกว่า agent จะกลับมา
+
+### จังหวะเวลาของสถานะ (ค่ากลางอยู่ที่ `src/lib/shared/agent-status.ts` ที่เดียว)
+
+| ค่า | ปัจจุบัน | ใช้ทำอะไร |
+|---|---|---|
+| `HEARTBEAT_INTERVAL_SECONDS` | 30 วินาที | agent รายงานตัวถี่แค่ไหน |
+| `STALE_AFTER_SECONDS` | 90 วินาที | เว็บถือว่าออฟไลน์เมื่อไม่มี heartbeat นานเท่านี้ (พลาดได้ 3 ครั้ง) |
+| `LIVE_POLL_SECONDS` | 5 วินาที | หน้าเว็บที่เปิดอยู่ถาม `/api/sync/live` ถี่แค่ไหน |
+| `LIVE_POLL_HIDDEN_SECONDS` | 30 วินาที | แท็บที่ถูกซ่อนไว้ (กลับมาดูเมื่อไรถามทันที) |
+
+**ห้ามเขียนตัวเลขพวกนี้ซ้ำที่อื่น** ฝั่ง Python มีสำเนาเดียวที่ `gui/theme.py` เพราะ import
+TypeScript ไม่ได้ — `gui/smoke_test.py` ตรวจให้ว่ายังตรงกับไฟล์ต้นทาง
 
 ## 2.2 ความครบถ้วน: ยึด visitdrug เป็นตัวตั้ง
 

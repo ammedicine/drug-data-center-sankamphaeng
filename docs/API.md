@@ -69,7 +69,9 @@ Error: `INVALID_TOKEN` 401 · `TOKEN_USED` 409 · `TOKEN_EXPIRED` 410 · `PCUCOD
 ตอบ `AgentConfigResponse`: facility, `expectedPcucode`, `syncIntervalMinutes`,
 `reprocessDays`, `lastSyncedVisitDate` (watermark), `uploadChunkSize`, `disabled`,
 `syncRequested` — เป็น true เมื่อผู้ดูแลกด "สั่งซิงก์เดี๋ยวนี้" บนเว็บ Agent จะเห็นค่านี้จาก
-heartbeat รอบถัดไป (ภายใน 5 นาที) แล้วเริ่มซิงก์ทันที — Central เรียกเข้า LAN ของ รพ.สต. ไม่ได้
+heartbeat รอบถัดไป (**ปกติภายใน 30 วินาที** ตาม `HEARTBEAT_INTERVAL_SECONDS`) แล้วเริ่มซิงก์ทันที
+— Central เรียกเข้า LAN ของ รพ.สต. ไม่ได้ จึงต้องเป็น pull เท่านั้น
+ถ้าเครื่องหลับ ปิด หรือเน็ตหลุด ไม่มีการรับประกัน 30 วินาที คำสั่งจะค้างรอจนกว่า agent จะกลับมา
 
 ### POST /api/agent/sync/start
 

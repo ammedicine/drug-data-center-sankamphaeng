@@ -16,8 +16,10 @@ import { requireAllFacilityViewer } from "@/lib/auth/rbac";
 import {
   getFleetSummary,
   listAgents,
+  listRunningBatches,
   listSyncBatches,
 } from "@/lib/services/monitoring";
+import { liveSignature } from "@/lib/shared/live-signature";
 
 export const metadata = { title: "การเฝ้าระวังระบบ" };
 export const dynamic = "force-dynamic";
@@ -25,11 +27,15 @@ export const dynamic = "force-dynamic";
 export default async function MonitoringPage() {
   await requireAllFacilityViewer();
 
-  const [fleet, agentRows, failed, recent] = await Promise.all([
+  const [fleet, agentRows, failed, recent, running] = await Promise.all([
     getFleetSummary(null),
     listAgents(null),
     listSyncBatches(null, 25, true),
     listSyncBatches(null, 25, false),
+    // Not rendered here, but the poll reports it, and a signature that omits
+    // it would differ from the poll's on every load while a sync is running -
+    // a page rebuild with nothing behind it.
+    listRunningBatches(null),
   ]);
 
   const stale = agentRows.filter((a) => a.effectiveStatus === "OFFLINE" || a.effectiveStatus === "ERROR");
@@ -39,7 +45,14 @@ export default async function MonitoringPage() {
       <PageHeader
         title="การเฝ้าระวังระบบ"
         subtitle={`Agent ถือว่าออฟไลน์เมื่อไม่มี heartbeat เกิน ${STALE_AFTER_SECONDS} วินาที`}
-        actions={<LiveStatusBadge />}
+        actions={
+          <LiveStatusBadge
+            initialSignature={liveSignature({
+              agents: agentRows.map((agent) => ({ ...agent, status: agent.effectiveStatus })),
+              running,
+            })}
+          />
+        }
       />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">

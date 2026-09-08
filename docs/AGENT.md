@@ -63,7 +63,7 @@ AGENT_DATA_DIR=C:\ProgramData\sdc-agent\data
 | `enroll --token <TOKEN> [--url <CENTRAL>]` | แลก token เป็น credential |
 | `sync [--mode INITIAL\|INCREMENTAL\|MANUAL_RANGE] [--from] [--to] [--dry-run]` | ซิงก์หนึ่งรอบ |
 | `retry` | ส่ง chunk ที่ค้าง/ล้มเหลวใหม่ |
-| `run` | heartbeat ทุก 5 นาที + ซิงก์ตามรอบที่ Central กำหนด |
+| `run` | heartbeat ทุก **30 วินาที** + ซิงก์ตามรอบที่ Central กำหนด |
 | `status` | สรุปสถานะในเครื่อง (watermark, คิวค้าง) |
 | `settings [--interval N] [--times 08:00,16:30] [--auto true\|false]` | ดู/ตั้งตารางซิงก์ในเครื่อง |
 | `verify [--from] [--to] [--check-only]` | เทียบจำนวนแถวรายเดือนกับศูนย์กลาง แล้วซ่อมส่วนที่ขาด |

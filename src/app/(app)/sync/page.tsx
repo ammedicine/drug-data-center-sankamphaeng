@@ -12,6 +12,7 @@ import {
 import { LiveStatusBadge } from "@/components/ui/live-refresh";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
 import { JHCIS_LINK_LABELS } from "@/lib/shared/agent-status";
+import { liveSignature } from "@/lib/shared/live-signature";
 import { ROLE_LABELS } from "@/lib/shared/roles";
 import { lookupLatestAgentRelease } from "@/lib/services/agent-release";
 import { Building2, Download, RefreshCcw, Server, TriangleAlert } from "lucide-react";
@@ -64,7 +65,14 @@ export default async function SyncPage() {
       <PageHeader
         title="สถานะการซิงก์ข้อมูล"
         subtitle="ข้อมูลถูกดึงจาก JHCIS โดย Agent ที่ติดตั้งในเครือข่ายของสถานบริการ และส่งออกทาง HTTPS เท่านั้น"
-        actions={<LiveStatusBadge />}
+        actions={
+          <LiveStatusBadge
+            initialSignature={liveSignature({
+              agents: agentRows.map((agent) => ({ ...agent, status: agent.effectiveStatus })),
+              running,
+            })}
+          />
+        }
       />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

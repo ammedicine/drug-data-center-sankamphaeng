@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -263,6 +264,22 @@ def main() -> int:
     version = bridge.agent_version()
     print("version      :", version or "อ่านไม่ได้")
     if not version:
+        return 1
+
+    # theme.py has to repeat STALE_AFTER_SECONDS because Python cannot import
+    # the TypeScript the rest of the system reads it from. A comment saying
+    # "must match" is not a check, so this is: the two disagreeing would have
+    # the tray and the website calling the same agent by different names.
+    shared = (HERE / ".." / ".." / "src" / "lib" / "shared" / "agent-status.ts").resolve()
+    declared = re.search(
+        r"STALE_AFTER_SECONDS\s*=\s*(\d+)", shared.read_text(encoding="utf-8")
+    )
+    print(
+        "stale seconds:",
+        f"{app.theme.STALE_AFTER_SECONDS} (agent-status.ts: {declared.group(1) if declared else '?'})",
+    )
+    if not declared or int(declared.group(1)) != app.theme.STALE_AFTER_SECONDS:
+        print("   ! theme.py ไม่ตรงกับ src/lib/shared/agent-status.ts")
         return 1
 
     # Every state the window can be in, checked without opening one.

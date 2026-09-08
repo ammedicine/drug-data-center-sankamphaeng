@@ -7,6 +7,7 @@ import {
   LIVE_POLL_SECONDS,
   isFresh,
 } from "@/lib/shared/agent-status";
+import { liveSignature, shouldRefresh } from "@/lib/shared/live-signature";
 
 export interface LiveAgent {
   id: string;
@@ -168,37 +169,30 @@ export function LiveIndicator({
  * This deliberately does not take over the rendering. The tables stay server
  * components; this only decides when they are worth rebuilding.
  */
-export function LiveRefresh({ router }: { router: { refresh: () => void } }) {
+export function LiveRefresh({
+  router,
+  initialSignature,
+}: {
+  router: { refresh: () => void };
+  /**
+   * What the server-rendered page on screen is actually showing.
+   *
+   * Without it the first poll had nothing to compare against and was only
+   * recorded as a baseline, so a change that happened between rendering the
+   * page and hydrating it was never picked up: an agent that went offline in
+   * that gap, or a run that finished in it, stayed on screen until something
+   * else changed - and if nothing else ever changed, indefinitely.
+   */
+  initialSignature?: string | null;
+}) {
   const { snapshot, stale } = useLiveStatus();
-  const lastSignature = useRef<string | null>(null);
+  const lastSignature = useRef<string | null>(initialSignature ?? null);
 
   useEffect(() => {
     if (!snapshot) return;
-    // Everything a reader would notice: which agents are up, whether JHCIS is
-    // reachable, how far each run has got, and what is queued.
-    const signature = JSON.stringify([
-      snapshot.agents.map((a) => [
-        a.id,
-        a.status,
-        a.jhcisState,
-        a.lastHeartbeatAt,
-        a.lastSuccessfulSyncAt,
-        a.lastSyncedVisitDate,
-        a.pendingBatches,
-        a.version,
-        a.lastError,
-      ]),
-      snapshot.running.map((b) => [
-        b.batchRef,
-        b.recordsAccepted,
-        b.recordsRejected,
-        b.progress,
-      ]),
-    ]);
+    const signature = liveSignature(snapshot);
 
-    if (lastSignature.current !== null && lastSignature.current !== signature) {
-      router.refresh();
-    }
+    if (shouldRefresh(lastSignature.current, signature)) router.refresh();
     lastSignature.current = signature;
   }, [snapshot, router]);
 
