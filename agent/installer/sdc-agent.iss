@@ -63,6 +63,12 @@ Source: "..\..\docs\AGENT.md";          DestDir: "{app}"; DestName: "คู่�
 Name: "{commonappdata}\SDCAgent"; Permissions: users-modify
 Name: "{commonappdata}\SDCAgent\logs"; Permissions: users-modify
 Name: "{commonappdata}\SDCAgent\queue"; Permissions: users-modify
+; โฟลเดอร์ไฟล์อัปเดต **ห้าม** ให้ผู้ใช้ทั่วไปเขียน
+;
+; ตัวอัปเดตทำงานด้วยสิทธิ์ผู้ดูแล ถ้าผู้ใช้ทั่วไปเขียนโฟลเดอร์นี้ได้ จะสลับไฟล์ติดตั้ง
+; หลังตรวจ SHA-256 แต่ก่อนสั่งรันได้ กลายเป็นช่องยกระดับสิทธิ์ในเครื่อง
+; ไม่ใส่ users-modify = ใช้สิทธิ์ที่ ProgramData กำหนด (ผู้ดูแล/SYSTEM เขียนได้เท่านั้น)
+Name: "{commonappdata}\SDCAgent\updates"
 
 ; ทางลัดของเวอร์ชันก่อนหน้าที่ใช้ชื่อเดิม
 ;
@@ -92,6 +98,15 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
   Flags: preservestringtype
 
 [Run]
+; งานตามเวลาสองตัวที่ต้องใช้สิทธิ์ผู้ดูแล — คำสั่งตายตัวทั้งคู่ ไม่รับ argument จากภายนอก
+;
+; หน้าจอที่เจ้าหน้าที่เปิดอยู่ไม่มีสิทธิ์ตั้งเวลาเครื่องหรือเขียน Program Files
+; งานสองตัวนี้จึงมี **ตารางเวลาของตัวเอง** ไม่ต้องรอให้หน้าจอสั่ง เครื่องที่เวลาเพี้ยน
+; จะถูกแก้ภายในหนึ่งชั่วโมงแม้ไม่มีใครแตะเครื่อง (ปุ่มบนหน้าจอเป็นแค่ตัวเร่ง)
+; /RU SYSTEM /RL HIGHEST = สิทธิ์สูงสุด · /F = เขียนทับของเดิมตอนอัปเกรด
+; **ห้าม** เปลี่ยนให้รับ path/argument จากภายนอก มิฉะนั้นกลายเป็นช่องยกระดับสิทธิ์
+Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""SDCAgentTimeSync"" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 1 /TR ""\"{app}\runtime\node.exe\" \"{app}\app\agent.js\" time-sync"""; Flags: runhidden; StatusMsg: "ตั้งงานซิงก์เวลา..."
+Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""SDCAgentAutoUpdate"" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 4 /TR ""\"{app}\runtime\node.exe\" \"{app}\app\agent.js\" auto-update"""; Flags: runhidden; StatusMsg: "ตั้งงานอัปเดตอัตโนมัติ..."
 Filename: "{app}\{#AppExe}"; Description: "เปิดโปรแกรมทันที"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -158,6 +173,18 @@ begin
 end;
 
 // เตือนก่อนถอนการติดตั้งว่าข้อมูลที่ยังส่งไม่สำเร็จจะค้างอยู่
+// ลบงานตามเวลาที่ตัวติดตั้งสร้างไว้ ตอนถอนการติดตั้ง
+// (ตอนอัปเกรดไม่ต้องลบ เพราะ [Run] ใช้ /F เขียนทับให้อยู่แล้ว)
+procedure RemoveScheduledTasks();
+var
+  code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "SDCAgentTimeSync" /F',
+       '', SW_HIDE, ewWaitUntilTerminated, code);
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "SDCAgentAutoUpdate" /F',
+       '', SW_HIDE, ewWaitUntilTerminated, code);
+end;
+
 function InitializeUninstall(): Boolean;
 begin
   Result := MsgBox('ต้องการถอนการติดตั้ง Drug data center อำเภอสันกำแพง หรือไม่?' + #13#10 +
@@ -166,5 +193,8 @@ begin
   // ปิดโปรแกรมก่อนลบไฟล์ ไม่งั้นไฟล์ที่ถูกล็อกจะค้างอยู่จนกว่าจะรีสตาร์ตเครื่อง
   // (การถอนแบบเงียบตอนอัปเกรดก็เข้าทางนี้เหมือนกัน)
   if Result then
+  begin
     StopRunningAgent();
+    RemoveScheduledTasks();
+  end;
 end;

@@ -1,0 +1,440 @@
+/**
+ * A wrong clock, and updating fifteen clinics without visiting them.
+ *
+ * Both halves exist because of the same afternoon. A รพ.สต. PC whose Windows
+ * clock had drifted 41 minutes could not sign a request the centre would
+ * accept, and the window told whoever was looking at it that the Agent's
+ * credential had been cancelled and to contact the administrator. Nothing was
+ * wrong with the credential. The machine needed its clock set, and somebody
+ * had to drive there to find that out.
+ *
+ * So: say which of those two things happened, fix the one that can be fixed,
+ * and - since the fix ships as a new installer - make new installers reach the
+ * clinics on their own. That last part runs elevated, which is why so much of
+ * this file is about refusing to run the wrong file.
+ */
+import { createHash, randomBytes } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import {
+  classifyCentralFailure,
+  clockStateFor,
+  CLOCK_HEALTHY_SECONDS,
+  CLOCK_SKEW_LIMIT_SECONDS,
+} from "@/lib/shared/agent-status";
+import { compareVersions, isNewerVersion, parseVersion } from "@/lib/shared/version";
+
+let workDir: string;
+let server: Server;
+let baseUrl = "";
+
+/** What the fake centre is pretending right now. */
+const central = {
+  offsetMs: 0,
+  manifest: {} as Record<string, unknown>,
+  asset: Buffer.alloc(0),
+  downloads: 0,
+};
+
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    const path = (req.url ?? "").split("?")[0];
+    if (path === "/api/time") {
+      const now = Date.now() + central.offsetMs;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ serverTime: new Date(now).toISOString(), serverUnixMs: now }));
+      return;
+    }
+    if (path === "/api/agent/update") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(central.manifest));
+      return;
+    }
+    if (path === "/download/agent") {
+      central.downloads += 1;
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(central.asset);
+      return;
+    }
+    res.writeHead(404).end("{}");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address();
+  baseUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+});
+
+afterAll(() => server?.close());
+
+beforeEach(() => {
+  workDir = mkdtempSync(resolve(tmpdir(), "sdc-clock-"));
+  process.env.AGENT_DATA_DIR = workDir;
+  central.offsetMs = 0;
+  central.downloads = 0;
+});
+
+afterEach(() => {
+  rmSync(workDir, { recursive: true, force: true });
+  delete process.env.AGENT_DATA_DIR;
+});
+
+let counter = 0;
+const clockModule = () => import(`../agent/src/clock?c=${counter++}`);
+const updaterModule = () => import(`../agent/src/updater?u=${counter++}`);
+const configModule = () => import(`../agent/src/config?k=${counter++}`);
+
+const sha256 = (buffer: Buffer) => createHash("sha256").update(buffer).digest("hex");
+
+// --------------------------------------------------------------------- clock
+
+describe("telling a wrong clock from a cancelled credential", () => {
+  it("TEST 7: only an explicit code means the credential is gone", () => {
+    // The whole incident in one assertion: a refusal for a timestamp is not a
+    // revoked credential, and must never be shown as one.
+    expect(classifyCentralFailure({ status: 401, code: "TIMESTAMP_SKEW" })).toBe("CLOCK_SKEW");
+    expect(classifyCentralFailure({ status: 401, code: "BAD_TIMESTAMP" })).toBe("CLOCK_SKEW");
+    expect(classifyCentralFailure({ status: 403, code: "AGENT_DISABLED" })).toBe("CREDENTIAL_REVOKED");
+    expect(classifyCentralFailure({ status: 401, code: "UNKNOWN_KEY" })).toBe("CREDENTIAL_REVOKED");
+    // Refused, but we cannot say why - honest rather than alarming.
+    expect(classifyCentralFailure({ status: 401, code: "BAD_SIGNATURE" })).toBe("AUTH_ERROR");
+    expect(classifyCentralFailure({ status: 403, code: null })).toBe("AUTH_ERROR");
+    expect(classifyCentralFailure({ status: 500, code: "BOOM" })).toBe("NETWORK_ERROR");
+    expect(classifyCentralFailure({ status: 0, code: null })).toBe("NETWORK_ERROR");
+  });
+
+  it("TEST 1/2/3: the thresholds sit inside the replay window", () => {
+    expect(clockStateFor(0)).toBe("HEALTHY");
+    expect(clockStateFor(119)).toBe("HEALTHY");
+    expect(clockStateFor(-119)).toBe("HEALTHY");
+    // TEST 2: 200 seconds warns and repairs before signatures start failing.
+    expect(clockStateFor(200)).toBe("WARNING");
+    expect(clockStateFor(-200)).toBe("WARNING");
+    // TEST 3: at the window itself it is an error.
+    expect(clockStateFor(301)).toBe("CLOCK_SKEW");
+    expect(clockStateFor(-301)).toBe("CLOCK_SKEW");
+    // The security control is untouched, and the policy stays inside it.
+    expect(CLOCK_SKEW_LIMIT_SECONDS).toBe(300);
+    expect(CLOCK_HEALTHY_SECONDS).toBeLessThan(CLOCK_SKEW_LIMIT_SECONDS);
+  });
+
+  it("TEST 1: a healthy clock is measured and left alone", async () => {
+    const { readCentralClock, healClock } = await clockModule();
+    const reading = await readCentralClock(baseUrl);
+    expect(reading.state).toBe("HEALTHY");
+    expect(Math.abs(reading.skewSeconds)).toBeLessThan(5);
+
+    let syncs = 0;
+    const healed = await healClock(baseUrl, {
+      sync: async () => {
+        syncs += 1;
+        return { ok: true, detail: "" };
+      },
+      wait: async () => undefined,
+    });
+    // Nothing to fix, so Windows Time is never invoked.
+    expect(syncs).toBe(0);
+    expect(healed.attempts).toBe(0);
+    expect(healed.reading.state).toBe("HEALTHY");
+  });
+
+  it("TEST 4/5: the real incident - 41 minutes out, repaired, then reconnects", async () => {
+    const { healClock } = await clockModule();
+    // The PC is 41 minutes behind the centre, exactly as production was.
+    central.offsetMs = 41 * 60_000;
+
+    let syncs = 0;
+    const healed = await healClock(baseUrl, {
+      sync: async () => {
+        syncs += 1;
+        // Windows Time does its job on the first attempt.
+        central.offsetMs = 0;
+        return { ok: true, detail: "resync ok" };
+      },
+      wait: async () => undefined,
+    });
+
+    expect(syncs).toBe(1);
+    expect(healed.reading.state).toBe("HEALTHY");
+    expect(healed.attempts).toBe(1);
+    // TEST 5: nothing here re-enrols, reinstalls or restarts anything - the
+    // next signed request simply succeeds.
+  });
+
+  it("TEST 6: a clock that cannot be fixed stops trying, and says so", async () => {
+    const { healClock, CLOCK_SYNC_MAX_ATTEMPTS } = await clockModule();
+    central.offsetMs = 41 * 60_000; // and Windows Time never fixes it
+
+    let syncs = 0;
+    const healed = await healClock(baseUrl, {
+      sync: async () => {
+        syncs += 1;
+        return { ok: false, detail: "The service has not been started." };
+      },
+      wait: async () => undefined,
+    });
+
+    // Bounded: three attempts, not a loop that runs w32tm for ever.
+    expect(syncs).toBe(CLOCK_SYNC_MAX_ATTEMPTS);
+    expect(healed.reading.state).toBe("CLOCK_SYNC_FAILED");
+    expect(healed.detail).toContain("service");
+  });
+
+  it("TEST K: a clock error never touches identity, config or the queue", async () => {
+    const { writeStatus, loadStatus } = await configModule();
+    const credential = {
+      agentId: "agent-1",
+      keyId: "key-1",
+      secret: "s".repeat(40),
+      centralApiUrl: baseUrl,
+      facilityId: "fac-1",
+    };
+    writeFileSync(join(workDir, "agent.config.json"), JSON.stringify(credential), "utf8");
+    writeFileSync(
+      join(workDir, "state.json"),
+      JSON.stringify({ lastSyncedVisitDate: "2026-08-08", batchSequence: 41, lastSyncAt: null }),
+      "utf8",
+    );
+
+    writeStatus({ centralState: "CLOCK_SKEW", clockState: "CLOCK_SKEW", clockSkewSeconds: -2460 });
+
+    expect(JSON.parse(readFileSync(join(workDir, "agent.config.json"), "utf8"))).toEqual(credential);
+    const state = JSON.parse(readFileSync(join(workDir, "state.json"), "utf8"));
+    expect(state.lastSyncedVisitDate).toBe("2026-08-08");
+    expect(state.batchSequence).toBe(41);
+    expect(loadStatus().centralState).toBe("CLOCK_SKEW");
+  });
+});
+
+// -------------------------------------------------------------------- update
+
+describe("deciding whether to install an update", () => {
+  const good = {
+    available: true,
+    version: "1.1.8",
+    assetName: "SDCAgent-Setup-1.1.8.exe",
+    size: 100,
+    sha256: "a".repeat(64),
+    autoInstall: true,
+  };
+
+  it("compares versions as numbers, not as text", () => {
+    // The bug that would have stopped the fleet at the ninth patch.
+    expect(isNewerVersion("1.1.10", "1.1.9")).toBe(true);
+    expect(compareVersions("1.1.9", "1.1.10")).toBe(-1);
+    expect(compareVersions("1.2.0", "1.10.0")).toBe(-1);
+    expect(parseVersion("v1.1.7")).toEqual([1, 1, 7]);
+    expect(parseVersion("latest")).toBeNull();
+  });
+
+  it("TEST 8: the same version does nothing at all", async () => {
+    const { decideUpdate } = await updaterModule();
+    expect(decideUpdate({ ...good, version: "1.1.7" }, "1.1.7").action).toBe("none");
+    // and never a downgrade, however it got offered
+    expect(decideUpdate({ ...good, version: "1.1.6" }, "1.1.7").action).toBe("none");
+    expect(decideUpdate({ available: false, reason: "none-published" }, "1.1.7").action).toBe("none");
+  });
+
+  it("TEST 10: refuses to install anything it cannot verify", async () => {
+    const { decideUpdate } = await updaterModule();
+    // No hash: shown to the operator, never installed unattended.
+    expect(decideUpdate({ ...good, sha256: null }, "1.1.7")).toMatchObject({ action: "blocked" });
+    expect(decideUpdate({ ...good, sha256: "" }, "1.1.7")).toMatchObject({ action: "blocked" });
+    expect(decideUpdate({ ...good, sha256: "short" }, "1.1.7")).toMatchObject({ action: "blocked" });
+    // The server says the digest could not be trusted.
+    expect(decideUpdate({ ...good, autoInstall: false }, "1.1.7")).toMatchObject({ action: "blocked" });
+    // Something that is not our installer.
+    expect(decideUpdate({ ...good, assetName: "payload.exe" }, "1.1.7")).toMatchObject({
+      action: "blocked",
+    });
+    // The good case still works, or the test above proves nothing.
+    expect(decideUpdate(good, "1.1.7").action).toBe("install");
+  });
+
+  it("TEST 9: downloads, verifies and keeps the file", async () => {
+    const { downloadVerified } = await updaterModule();
+    central.asset = randomBytes(2048);
+
+    const path = await downloadVerified({
+      baseUrl,
+      version: "1.1.8",
+      assetName: "SDCAgent-Setup-1.1.8.exe",
+      sha256: sha256(central.asset),
+      size: central.asset.length,
+    });
+
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path)).toEqual(central.asset);
+    expect(path.includes(join("updates", "1.1.8"))).toBe(true);
+  });
+
+  it("TEST 10: a tampered download is deleted, never left to be run", async () => {
+    const { downloadVerified } = await updaterModule();
+    central.asset = randomBytes(2048);
+
+    await expect(
+      downloadVerified({
+        baseUrl,
+        version: "1.1.8",
+        assetName: "SDCAgent-Setup-1.1.8.exe",
+        // The hash of what was published, not of what the server just sent.
+        sha256: sha256(Buffer.from("something else entirely")),
+        size: central.asset.length,
+      }),
+    ).rejects.toThrow(/SHA-256/);
+
+    // Nothing executable survives a failed verification - not the finished
+    // name and not the partial one.
+    const folder = join(workDir, "updates", "1.1.8");
+    const left = existsSync(folder) ? readdirSync(folder) : [];
+    expect(left).toEqual([]);
+  });
+
+  it("refuses a file of the wrong length before it even hashes it", async () => {
+    const { downloadVerified } = await updaterModule();
+    central.asset = randomBytes(100);
+    await expect(
+      downloadVerified({
+        baseUrl,
+        version: "1.1.8",
+        assetName: "SDCAgent-Setup-1.1.8.exe",
+        sha256: sha256(central.asset),
+        size: 999_999,
+      }),
+    ).rejects.toThrow(/ขนาดไฟล์/);
+  });
+
+  it("TEST 11: an interrupted download leaves only a .part, and retrying works", async () => {
+    const { downloadVerified } = await updaterModule();
+    central.asset = randomBytes(4096);
+    const folder = join(workDir, "updates", "1.1.8");
+    const target = join(folder, "SDCAgent-Setup-1.1.8.exe");
+
+    // Half a file, named the way an interrupted attempt leaves it.
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(`${target}.part`, central.asset.subarray(0, 1000));
+
+    const path = await downloadVerified({
+      baseUrl,
+      version: "1.1.8",
+      assetName: "SDCAgent-Setup-1.1.8.exe",
+      sha256: sha256(central.asset),
+      size: central.asset.length,
+    });
+
+    expect(readFileSync(path)).toEqual(central.asset);
+    expect(existsSync(`${target}.part`)).toBe(false);
+  });
+
+  it("does not download again when the verified file is already there", async () => {
+    const { downloadVerified } = await updaterModule();
+    central.asset = randomBytes(1024);
+    const args = {
+      baseUrl,
+      version: "1.1.8",
+      assetName: "SDCAgent-Setup-1.1.8.exe",
+      sha256: sha256(central.asset),
+      size: central.asset.length,
+    };
+    await downloadVerified(args);
+    expect(central.downloads).toBe(1);
+    await downloadVerified(args);
+    // Second call verified what was on disk instead of fetching it again.
+    expect(central.downloads).toBe(1);
+  });
+
+
+  it("TEST 13/14: an update that fails leaves the queue and the credential alone", async () => {
+    // A failed update must never cost a clinic its unsent rows. Nothing in the
+    // updater writes to the queue, the credential or the watermark - proven by
+    // running a download that fails and then reading them back.
+    const { downloadVerified } = await updaterModule();
+    const queue = join(workDir, "queue", "pending");
+    mkdirSync(queue, { recursive: true });
+    writeFileSync(join(queue, "chunk-1.json"), JSON.stringify({ records: [1, 2, 3] }), "utf8");
+    const credential = { agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl };
+    writeFileSync(join(workDir, "agent.config.json"), JSON.stringify(credential), "utf8");
+    writeFileSync(
+      join(workDir, "state.json"),
+      JSON.stringify({ lastSyncedVisitDate: "2026-08-08", batchSequence: 41 }),
+      "utf8",
+    );
+
+    central.asset = randomBytes(512);
+    await expect(
+      downloadVerified({
+        baseUrl,
+        version: "1.1.8",
+        assetName: "SDCAgent-Setup-1.1.8.exe",
+        sha256: sha256(Buffer.from("wrong")),
+        size: central.asset.length,
+      }),
+    ).rejects.toThrow();
+
+    expect(readdirSync(queue)).toEqual(["chunk-1.json"]);
+    expect(JSON.parse(readFileSync(join(workDir, "agent.config.json"), "utf8"))).toEqual(credential);
+    expect(JSON.parse(readFileSync(join(workDir, "state.json"), "utf8")).batchSequence).toBe(41);
+  });
+
+  it("TEST 12: waits for a sync that is mid-flight", async () => {
+    const { syncIsBusy } = await updaterModule();
+    const { writeStatus } = await configModule();
+
+    for (const phase of ["READING", "UPLOADING", "VERIFYING"] as const) {
+      writeStatus({ syncPhase: phase });
+      expect(syncIsBusy(), `${phase} should block an install`).toBe(true);
+    }
+    for (const phase of ["IDLE", "SUCCESS", "ERROR"] as const) {
+      writeStatus({ syncPhase: phase });
+      expect(syncIsBusy(), `${phase} should not block an install`).toBe(false);
+    }
+  });
+});
+
+describe("fifteen clinics updating at once", () => {
+  it("TEST 16: installs are spread, deterministically and without collisions", async () => {
+    const { updateOffsetSeconds, UPDATE_STAGGER_SECONDS } = await import(
+      `../agent/src/schedule?s=${counter++}`
+    );
+
+    const ids = Array.from({ length: 15 }, (_, i) => `01m2agent${String(i).padStart(4, "0")}xyz`);
+    const offsets = ids.map((id) => updateOffsetSeconds(id));
+
+    // Inside the window, and not all in the same minute.
+    for (const offset of offsets) {
+      expect(offset).toBeGreaterThanOrEqual(0);
+      expect(offset).toBeLessThan(UPDATE_STAGGER_SECONDS);
+    }
+    expect(UPDATE_STAGGER_SECONDS).toBe(30 * 60);
+    expect(new Set(offsets).size).toBeGreaterThanOrEqual(14);
+    expect(Math.max(...offsets) - Math.min(...offsets)).toBeGreaterThan(5 * 60);
+
+    // Stable: the same clinic takes the same slot on every release, so two of
+    // them cannot drift into restarting together.
+    expect(ids.map((id) => updateOffsetSeconds(id))).toEqual(offsets);
+  });
+
+  it("TEST 15: one clinic's clock says nothing about another's", async () => {
+    // Each agent keeps its clock reading in its own data directory, so a
+    // skewed PC cannot mark the other fourteen as skewed.
+    const homes = Array.from({ length: 3 }, () => mkdtempSync(resolve(tmpdir(), "sdc-fleet-clock-")));
+    try {
+      const states: string[] = [];
+      for (const [index, home] of homes.entries()) {
+        process.env.AGENT_DATA_DIR = home;
+        const { writeStatus, loadStatus } = await configModule();
+        writeStatus({
+          clockState: index === 1 ? "CLOCK_SKEW" : "HEALTHY",
+          clockSkewSeconds: index === 1 ? -2460 : 1,
+        });
+        states.push(loadStatus().clockState);
+      }
+      expect(states).toEqual(["HEALTHY", "CLOCK_SKEW", "HEALTHY"]);
+    } finally {
+      for (const home of homes) rmSync(home, { recursive: true, force: true });
+      process.env.AGENT_DATA_DIR = workDir;
+    }
+  });
+});

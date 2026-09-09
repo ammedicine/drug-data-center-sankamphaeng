@@ -19,6 +19,7 @@ import {
   loadJhcisOverride,
   loadSettings,
   loadState,
+  loadStatus,
   machineHostname,
   saveCredential,
   saveJhcisOverride,
@@ -38,6 +39,14 @@ import {
 } from "./schedule";
 import { OfflineQueue } from "./queue/queue";
 import { SyncRunner, type SyncMode } from "./sync";
+import { CLOCK_CHECK_MIN_INTERVAL_MS, CLOCK_SYNC_COOLDOWN_MS, healClock } from "./clock";
+import {
+  decideUpdate,
+  downloadVerified,
+  fetchManifest,
+  installUpdate,
+  syncIsBusy,
+} from "./updater";
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -357,6 +366,49 @@ async function run(): Promise<void> {
   process.on("unhandledRejection", fatal("unhandledRejection"));
   process.on("uncaughtException", fatal("uncaughtException"));
 
+  /**
+   * Checks this PC's clock and asks Windows to fix it, at most so often.
+   *
+   * Rate limited because the situations that call it - a refused heartbeat, a
+   * machine waking up, a network coming back - can arrive together, and asking
+   * an unauthenticated endpoint what the time is on every one of them would be
+   * its own small denial of service. After the repair attempts are exhausted
+   * it backs off for half an hour: Windows Time either has a source or it does
+   * not, and a person has to look.
+   */
+  let clockCheckedAt = 0;
+  let clockCooldownUntil = 0;
+  const maybeHealClock = async (reason: string): Promise<void> => {
+    const now = Date.now();
+    if (now < clockCooldownUntil) return;
+    if (now - clockCheckedAt < CLOCK_CHECK_MIN_INTERVAL_MS) return;
+    clockCheckedAt = now;
+
+    try {
+      writeStatus({ clockState: "SYNCING" });
+      const { reading, attempts } = await healClock(credential.centralApiUrl);
+      writeStatus({
+        clockState: reading.state,
+        clockSkewSeconds: reading.skewSeconds,
+        lastClockCheckAt: reading.checkedAt,
+      });
+      if (reading.state === "CLOCK_SYNC_FAILED") clockCooldownUntil = Date.now() + CLOCK_SYNC_COOLDOWN_MS;
+      if (reading.state === "HEALTHY" && attempts > 0) {
+        // The next heartbeat will now be signed with a timestamp Central
+        // accepts, so it recovers on its own; nothing here re-enrols anything.
+        log.info("เวลาเครื่องถูกต้องแล้ว จะเชื่อมต่อศูนย์กลางใหม่เอง", { reason });
+      }
+    } catch (error) {
+      // Cannot even ask what the time is - that is a network problem, and the
+      // ordinary connection handling already reports it.
+      log.warn("ตรวจเวลากับศูนย์กลางไม่สำเร็จ", {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      writeStatus({ clockState: "UNKNOWN" });
+    }
+  };
+
   const safeHeartbeat = async (
     state: "ONLINE" | "SYNCING" | "ERROR",
     error?: string,
@@ -371,6 +423,10 @@ async function run(): Promise<void> {
         heartbeatError instanceof Error ? heartbeatError.message : String(heartbeatError);
       log.warn("heartbeat failed", { error: message });
       writeStatus({ centralConnected: false, lastError: message });
+      // A refusal because this PC's clock is out of the replay window is the
+      // one authentication failure that fixes itself, so it is the one worth
+      // acting on rather than only reporting.
+      if (loadStatus().centralState === "CLOCK_SKEW") void maybeHealClock("heartbeat refused");
       return null;
     }
   };
@@ -663,6 +719,119 @@ async function jhcis(): Promise<void> {
   console.log(`บันทึกการเชื่อมต่อแล้ว: ${user}@${host}:${port}`);
 }
 
+/**
+ * `agent time-sync` - what the elevated scheduled task runs.
+ *
+ * Setting the system clock needs rights the signed-in member of staff does not
+ * have, so the installer registers a task that runs this, elevated, with a
+ * fixed action and no arguments to steer. It measures, asks Windows to
+ * resynchronise, measures again, and writes what it found where the window can
+ * read it. It changes nothing else about the machine's time configuration.
+ */
+async function timeSync(): Promise<void> {
+  const credential = loadCredential();
+  const baseUrl = credential?.centralApiUrl ?? centralApiUrl();
+  const { reading, attempts, detail } = await healClock(baseUrl);
+  writeStatus({
+    clockState: reading.state,
+    clockSkewSeconds: reading.skewSeconds,
+    lastClockCheckAt: reading.checkedAt,
+  });
+  console.log(
+    `เวลาเครื่องต่างจากศูนย์กลาง ${reading.skewSeconds} วินาที · สถานะ ${reading.state}` +
+      (attempts ? ` · สั่งซิงก์ ${attempts} ครั้ง` : "") +
+      (detail ? ` · ${detail}` : ""),
+  );
+  if (reading.state !== "HEALTHY") process.exitCode = 1;
+}
+
+/**
+ * `agent auto-update` - the other elevated task.
+ *
+ * Everything it acts on it fetches itself: the manifest from Central, the
+ * hash from that manifest, the file from the fixed download route. It accepts
+ * no path, no version and no URL from the caller, because the caller is an
+ * unprivileged tray and this process is not. It also refuses to install while
+ * a sync is mid-flight - the queue would survive, but there is no reason to
+ * interrupt a run that is nearly done.
+ */
+async function autoUpdate(): Promise<void> {
+  const credential = loadCredential();
+  const baseUrl = credential?.centralApiUrl ?? centralApiUrl();
+
+  const manifest = await fetchManifest(baseUrl);
+  const decision = decideUpdate(manifest, AGENT_VERSION);
+  const checkedAt = new Date().toISOString();
+  if (decision.action === "none") {
+    writeStatus({
+      updateState: "NONE",
+      updateLatestVersion: manifest.version ?? AGENT_VERSION,
+      updateCheckedAt: checkedAt,
+      updateDetail: null,
+    });
+    console.log(decision.reason);
+    return;
+  }
+  if (decision.action === "blocked") {
+    writeStatus({
+      updateState: "BLOCKED",
+      updateLatestVersion: decision.version,
+      updateCheckedAt: checkedAt,
+      updateDetail: decision.reason,
+    });
+    log.warn("มีรุ่นใหม่แต่ติดตั้งอัตโนมัติไม่ได้", {
+      version: decision.version,
+      reason: decision.reason,
+    });
+    console.log(`พบรุ่น ${decision.version} แต่ ${decision.reason}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (syncIsBusy() && !has("force")) {
+    // The queue would survive an interruption, but there is no reason to cut
+    // a run short when the next scheduled check is only hours away.
+    writeStatus({
+      updateState: "READY",
+      updateLatestVersion: decision.version,
+      updateCheckedAt: checkedAt,
+      updateDetail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง",
+    });
+    console.log("กำลังซิงก์อยู่ จะติดตั้งรุ่นใหม่รอบถัดไป");
+    return;
+  }
+
+  try {
+    writeStatus({
+      updateState: "DOWNLOADING",
+      updateLatestVersion: decision.version,
+      updateCheckedAt: checkedAt,
+      updateDetail: null,
+    });
+    const installer = await downloadVerified({
+      baseUrl,
+      version: decision.version,
+      assetName: decision.assetName,
+      sha256: decision.sha256,
+      size: decision.size,
+    });
+    await installUpdate(installer, decision.version);
+    console.log(`ติดตั้งรุ่น ${decision.version} แล้ว`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // A failed update must never make the thing it was updating unusable.
+    // Nothing here touches the queue, the credential or the watermark.
+    log.warn("อัปเดตไม่สำเร็จ จะใช้รุ่นเดิมต่อไป", { version: decision.version, error: message });
+    writeStatus({
+      updateState: "FAILED",
+      updateLatestVersion: decision.version,
+      updateCheckedAt: checkedAt,
+      updateDetail: message.slice(0, 200),
+    });
+    process.exitCode = 1;
+  }
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "help";
   switch (command) {
@@ -685,6 +854,10 @@ async function main(): Promise<void> {
       return settings();
     case "jhcis":
       return jhcis();
+    case "time-sync":
+      return timeSync();
+    case "auto-update":
+      return autoUpdate();
     default:
       console.log(
         [

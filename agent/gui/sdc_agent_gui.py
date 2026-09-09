@@ -1007,6 +1007,37 @@ class AgentApp(ctk.CTk):
             side="left", padx=(theme.SPACE["sm"], 0)
         )
 
+        # Time and updates: both are about this PC keeping itself usable
+        # without anyone driving out to it, and both are read-only here - the
+        # buttons only ask a task that already exists to run now.
+        upkeep = self._card(body, "เวลาเครื่องและการอัปเดต")
+        upkeep.pack(fill="x", pady=(theme.SPACE["md"], 0))
+        ugrid = ctk.CTkFrame(upkeep, fg_color="transparent")
+        ugrid.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["sm"]))
+        ugrid.grid_columnconfigure(1, weight=1)
+        self.upkeep_labels = {
+            key: self._kv(ugrid, row, label)
+            for row, (key, label) in enumerate(
+                (
+                    ("clock", "เวลาเครื่อง"),
+                    ("clock_detail", ""),
+                    ("update", "อัปเดตอัตโนมัติ"),
+                    ("update_detail", ""),
+                    ("versions", "เวอร์ชัน"),
+                )
+            )
+        }
+
+        upkeep_row = ctk.CTkFrame(upkeep, fg_color="transparent")
+        upkeep_row.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
+        self._secondary(upkeep_row, "ซิงก์เวลา Windows", self._sync_windows_time).pack(side="left")
+        self._secondary(upkeep_row, "ตรวจสอบอัปเดตตอนนี้", self._check_updates).pack(
+            side="left", padx=(theme.SPACE["sm"], 0)
+        )
+        self._secondary(
+            upkeep_row, "เปิดการตั้งค่าเวลา Windows", self._open_time_settings
+        ).pack(side="left", padx=(theme.SPACE["sm"], 0))
+
         self.connection_hint = ctk.CTkLabel(
             body, text="", font=self._font("caption"), text_color=theme.MUTED, anchor="w"
         )
@@ -1300,6 +1331,61 @@ class AgentApp(ctk.CTk):
                 text_color=theme.DANGER,
             )
 
+    # -- time and updates ------------------------------------------------------
+
+    def _run_task(self, name: str) -> tuple[bool, str]:
+        """
+        Asks Windows to run one of the two tasks the installer registered.
+
+        The names are literals in this file and the tasks' actions are fixed in
+        the installer, so there is nothing here for a caller to steer: this
+        cannot be talked into running an arbitrary program as SYSTEM. A member
+        of staff signed in normally may not be allowed to start a task that
+        runs as SYSTEM at all, which is fine - both tasks have their own
+        schedule and will come round on their own.
+        """
+        try:
+            result = subprocess.run(
+                ["schtasks", "/Run", "/TN", name],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return True, ""
+            return False, (result.stderr or result.stdout or "").strip()[:200]
+        except Exception as error:  # pragma: no cover - depends on the machine
+            return False, str(error)[:200]
+
+    def _sync_windows_time(self) -> None:
+        ok, detail = self._run_task("SDCAgentTimeSync")
+        self.connection_hint.configure(
+            text=(
+                "สั่งซิงก์เวลา Windows แล้ว ระบบจะตรวจอีกครั้งในไม่กี่วินาที"
+                if ok
+                else f"สั่งซิงก์เวลาเองไม่ได้ ({detail}) ระบบจะซิงก์ให้อัตโนมัติภายในหนึ่งชั่วโมง"
+            ),
+            text_color=theme.OK if ok else theme.WARN,
+        )
+
+    def _check_updates(self) -> None:
+        ok, detail = self._run_task("SDCAgentAutoUpdate")
+        self.connection_hint.configure(
+            text=(
+                "กำลังตรวจสอบรุ่นใหม่ ถ้ามีจะดาวน์โหลดและติดตั้งให้เอง"
+                if ok
+                else f"สั่งตรวจอัปเดตเองไม่ได้ ({detail}) ระบบจะตรวจให้อัตโนมัติทุก 4 ชั่วโมง"
+            ),
+            text_color=theme.OK if ok else theme.WARN,
+        )
+
+    def _open_time_settings(self) -> None:
+        """Windows' own date and time page - we never edit those settings for them."""
+        try:
+            os.startfile("ms-settings:dateandtime")  # noqa: S606 - fixed URI
+        except Exception:
+            webbrowser.open("ms-settings:dateandtime")
+
     def _enroll(self) -> None:
         token = self.token_entry.get().strip()
         if not token:
@@ -1500,6 +1586,24 @@ class AgentApp(ctk.CTk):
         )
         self.central_labels["ack"].configure(
             text=theme.relative(status.get("centralAckAt"), datetime.now(timezone.utc))
+        )
+
+        # Both of these are pure view-models in theme.py, so the smoke test
+        # covers every state without a window.
+        now = datetime.now(timezone.utc)
+        clock_item = theme.clock_status(status, now)
+        update_item = theme.update_status(status, self.app_version, now)
+        self.upkeep_labels["clock"].configure(
+            text=clock_item.text, text_color=theme.TONE_COLOURS[clock_item.tone]
+        )
+        self.upkeep_labels["clock_detail"].configure(text=clock_item.detail)
+        self.upkeep_labels["update"].configure(
+            text=update_item.text, text_color=theme.TONE_COLOURS[update_item.tone]
+        )
+        self.upkeep_labels["update_detail"].configure(text=update_item.detail)
+        latest = status.get("updateLatestVersion") or self.app_version
+        self.upkeep_labels["versions"].configure(
+            text=f"ปัจจุบัน {self.app_version} · ล่าสุด {latest}"
         )
 
         if self.current_page == "sync":

@@ -68,10 +68,53 @@ def check(theme) -> list[str]:
     expect(items["jhcis"].tone == "ok", "JHCIS must stay green while Central is down")
 
     # --- credential revoked -------------------------------------------------
-    status = {"centralState": "AUTH_ERROR", "centralAckAt": stale}
+    status = {"centralState": "CREDENTIAL_REVOKED", "centralAckAt": stale}
     item = theme.central_status(status, enrolled, now)
     expect(item.tone == "danger", "revoked credential should be red")
     expect("ลงทะเบียนใหม่" in item.detail, "revoked credential should say what to do about it")
+
+    # --- a wrong clock is NOT a revoked credential --------------------------
+    # The whole reason 1.1.7 exists: this used to render as "สิทธิ์ถูกเพิกถอน"
+    # and sent someone to re-enrol a machine that only needed its clock set.
+    status = {"centralState": "CLOCK_SKEW", "centralAckAt": stale}
+    item = theme.central_status(status, enrolled, now)
+    expect("เพิกถอน" not in item.text, "a clock error must not say the credential was revoked")
+    expect("ยกเลิก" not in item.text, "a clock error must not say the credential was cancelled")
+    expect("ลงทะเบียนใหม่" not in item.detail, "a clock error must not ask for re-enrolment")
+    expect("เวลา" in item.text, "a clock error should say it is about the clock")
+
+    # --- the clock card ------------------------------------------------------
+    healthy = theme.clock_status({"clockState": "HEALTHY", "clockSkewSeconds": 2}, now)
+    expect(healthy.tone == "ok", "a good clock is green")
+    expect(healthy.text == "ปกติ", "a good clock reads ปกติ")
+
+    skewed = theme.clock_status(
+        {"clockState": "CLOCK_SKEW", "clockSkewSeconds": -2460}, now
+    )
+    expect(skewed.tone == "danger", "a skewed clock is red")
+    expect("41 นาที" in skewed.detail, "the skew is shown in minutes and seconds")
+    expect("เวลาศูนย์กลาง" in skewed.detail, "both clocks are shown side by side")
+
+    failed = theme.clock_status({"clockState": "CLOCK_SYNC_FAILED", "clockSkewSeconds": 2460}, now)
+    expect("ตั้งค่าวันที่และเวลา" in failed.detail, "a failed sync tells the operator what to check")
+
+    # --- the update card -----------------------------------------------------
+    latest = theme.update_status({"updateState": "NONE", "updateCheckedAt": fresh}, "1.1.7", now)
+    expect(latest.tone == "ok", "being up to date is green")
+    expect(latest.text == "เป็นเวอร์ชันล่าสุดแล้ว", "being up to date says so")
+
+    blocked = theme.update_status(
+        {"updateState": "BLOCKED", "updateLatestVersion": "1.1.8", "updateDetail": "ไม่มี SHA-256"},
+        "1.1.7",
+        now,
+    )
+    expect(blocked.tone == "warn", "an update that cannot be verified is a warning")
+    expect("1.1.8" in blocked.text, "the blocked update names the version")
+
+    waiting = theme.update_status(
+        {"updateState": "READY", "updateLatestVersion": "1.1.8"}, "1.1.7", now
+    )
+    expect("รอการซิงก์" in waiting.detail, "an update waits for the current sync")
 
     # --- said connected, but long ago ---------------------------------------
     status = {"centralState": "CONNECTED", "centralAckAt": stale}
