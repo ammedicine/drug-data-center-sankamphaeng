@@ -31,7 +31,7 @@ import { JhcisConnection } from "./jhcis/connection";
 import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector } from "./jhcis/schema-inspector";
 import { log } from "./logger";
-import { SyncLockedError, withSyncLock } from "./lock";
+import { SyncLockedError, WorkerAlreadyRunningError, acquireWorkerLock, withSyncLock } from "./lock";
 import {
   dailyOffsetSeconds,
   intervalOffsetSeconds,
@@ -317,6 +317,38 @@ async function retry(): Promise<void> {
  * desktop app) and falls back to the interval the central server approved.
  */
 async function run(): Promise<void> {
+  // One worker per data directory, for the whole life of the process.
+  //
+  // A tray that is closed while its worker is syncing leaves the worker
+  // orphaned, and the next tray starts another one. Both would then heartbeat
+  // and both would schedule, which makes the fleet page disagree with itself
+  // and doubles every request the clinic sends. The second one stops here.
+  //
+  // Scoped to the data directory: fifteen สถานบริการ have fifteen of them, and
+  // the test harness runs fifteen workers on one machine.
+  let releaseWorkerLock: () => void;
+  try {
+    releaseWorkerLock = acquireWorkerLock();
+  } catch (error) {
+    if (error instanceof WorkerAlreadyRunningError) {
+      log.warn("worker already running for data directory", {
+        pid: error.holder.pid,
+        startedAt: error.holder.startedAt,
+      });
+      console.log(error.message);
+      return;
+    }
+    throw error;
+  }
+  const releaseOnExit = () => {
+    try {
+      releaseWorkerLock();
+    } catch {
+      /* nothing useful to do while exiting */
+    }
+  };
+  process.on("exit", releaseOnExit);
+
   const runner = new SyncRunner();
   const credential = loadCredential();
   if (!credential) throw new Error("ยังไม่ได้ลงทะเบียน Agent (sdc-agent enroll)");

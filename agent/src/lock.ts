@@ -14,6 +14,7 @@
  * writes its pid and refreshes a timestamp, and a lock whose owner is gone or
  * silent is taken over rather than obeyed.
  */
+import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
@@ -144,4 +145,131 @@ export async function withSyncLock<T>(
       // An unlink that fails leaves a lock that the next run will find stale.
     }
   }
+}
+
+/* -------------------------------------------------------- one worker per home */
+
+/**
+ * The worker holds this for its whole life, not just while syncing.
+ *
+ * sync.lock serialises sync *runs*. Nothing stopped two `agent run` workers
+ * existing at once against the same data directory: both would tick, both
+ * would heartbeat, both would schedule, and only the moment they tried to sync
+ * would one of them lose. Two heartbeats for one agent make the fleet page lie
+ * about which one is current, and two schedulers double every request the
+ * clinic makes.
+ *
+ * It happened for real. A tray was closed while its worker was mid-sync; the
+ * worker survived as an orphan, and the next tray started a second one.
+ */
+interface WorkerLockFile {
+  pid: number;
+  hostname: string;
+  startedAt: string;
+  /** milliseconds since the epoch, from the OS, to survive pid reuse */
+  processStartedAtMs: number | null;
+  dataDir: string;
+}
+
+export function workerLockPath(): string {
+  return resolve(dataDir(), "worker.lock");
+}
+
+/**
+ * When the process holding a pid actually started.
+ *
+ * A pid on its own is not an identity: Windows reuses them, and a lock file
+ * naming a pid that now belongs to Notepad would keep a clinic's agent from
+ * ever starting again. Comparing start times makes the check specific to the
+ * process that wrote the lock.
+ */
+function processStartedAtMs(pid: number): number | null {
+  if (process.platform !== "win32") return null;
+  try {
+    const out = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$p = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; ` +
+          "if ($p) { [int64]($p.StartTime.ToUniversalTime() - [datetime]'1970-01-01').TotalMilliseconds }",
+      ],
+      { encoding: "utf8", timeout: 20_000, windowsHide: true },
+    ).trim();
+    const value = Number(out);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export class WorkerAlreadyRunningError extends Error {
+  constructor(readonly holder: WorkerLockFile) {
+    super(
+      `worker already running for data directory (pid ${holder.pid}, เริ่ม ${holder.startedAt})`,
+    );
+    this.name = "WorkerAlreadyRunningError";
+  }
+}
+
+/**
+ * Claims the right to be this data directory's worker.
+ *
+ * Scoped to the data directory, deliberately: fifteen รพ.สต. each have their
+ * own, and on the test harness fifteen workers share one machine. A guard on
+ * the machine rather than on the directory would break that.
+ *
+ * Returns a release function. Throws WorkerAlreadyRunningError when a live
+ * worker already holds it - the caller exits, it does not take over. Killing
+ * the incumbent would be a cure worse than the disease.
+ */
+export function acquireWorkerLock(): () => void {
+  const path = workerLockPath();
+  const existing = ((): WorkerLockFile | null => {
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as WorkerLockFile;
+    } catch {
+      return null;
+    }
+  })();
+
+  if (existing) {
+    const sameMachine = existing.hostname === hostname();
+    const alive = sameMachine && processAlive(existing.pid);
+    // A live pid is not enough. If the lock recorded when its process began,
+    // the process holding that pid now has to be the same one.
+    const startedNow = alive ? processStartedAtMs(existing.pid) : null;
+    const sameProcess =
+      existing.processStartedAtMs === null ||
+      startedNow === null ||
+      Math.abs(startedNow - existing.processStartedAtMs) < 2000;
+
+    if (alive && sameProcess) throw new WorkerAlreadyRunningError(existing);
+
+    log.warn("พบ worker.lock ที่ถูกทิ้งไว้ จะยึดมาใช้", {
+      pid: existing.pid,
+      processAlive: alive,
+      samePid: sameProcess,
+    });
+  }
+
+  const claim: WorkerLockFile = {
+    pid: process.pid,
+    hostname: hostname(),
+    startedAt: new Date().toISOString(),
+    processStartedAtMs: processStartedAtMs(process.pid),
+    dataDir: dataDir(),
+  };
+  writeFileSync(path, JSON.stringify(claim, null, 2), "utf8");
+
+  return () => {
+    try {
+      const current = JSON.parse(readFileSync(path, "utf8")) as WorkerLockFile;
+      // Only ever remove our own claim.
+      if (current.pid === process.pid) unlinkSync(path);
+    } catch {
+      /* already gone, which is the outcome we wanted */
+    }
+  };
 }
