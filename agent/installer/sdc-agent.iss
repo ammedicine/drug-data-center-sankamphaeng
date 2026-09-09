@@ -143,44 +143,29 @@ end;
 procedure StopRunningAgent();
 var
   code: Integer;
+  script: String;
 begin
   // /T ปิดลูกทั้งหมดด้วย ซึ่งก็คือ node.exe ที่หน้าจอสั่งให้ซิงก์อยู่
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM {#AppExe}',
        '', SW_HIDE, ewWaitUntilTerminated, code);
   Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "{#AppNameEn}" /F',
        '', SW_HIDE, ewWaitUntilTerminated, code);
-end;
 
-// สร้างงานตามเวลาสองตัวที่ต้องใช้สิทธิ์ผู้ดูแล
-//
-// เขียนใน [Code] ไม่ใช่ [Run] เพราะ /TR ต้องมีเครื่องหมายคำพูดซ้อนอยู่ข้างใน
-// (path มีช่องว่าง) ซึ่งใน [Run] ต้อง escape จนอ่านไม่ออกและพลาดง่าย
-// สตริงเดี่ยวของ Pascal เก็บ " และ \ ตามตัวอักษร จึงเห็นคำสั่งจริงได้ชัด
-//
-// **คำสั่งตายตัวทั้งคู่ ไม่รับ argument จากภายนอก** ถ้าเปลี่ยนให้รับ path
-// จากที่อื่นเมื่อไร จะกลายเป็นช่องยกระดับสิทธิ์ในเครื่องทันที
-procedure CreateScheduledTasks();
-var
-  app, node, script, code: String;
-  ok: Integer;
-begin
-  app := ExpandConstant('{app}');
-  node := '\"' + app + '\runtime\node.exe\"';
-  script := '\"' + app + '\app\agent.js\"';
-
-  code := '/Create /F /TN "SDCAgentTimeSync" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 1' +
-          ' /TR "' + node + ' ' + script + ' time-sync"';
-  Exec(ExpandConstant('{sys}\schtasks.exe'), code, '', SW_HIDE, ewWaitUntilTerminated, ok);
-
-  code := '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 4' +
-          ' /TR "' + node + ' ' + script + ' auto-update"';
-  Exec(ExpandConstant('{sys}\schtasks.exe'), code, '', SW_HIDE, ewWaitUntilTerminated, ok);
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
-    CreateScheduledTasks();
+  // ตัวทำงานเบื้องหลังที่ "กำพร้า" — หน้าจอตายไปแล้วแต่ node.exe ยังอยู่
+  //
+  // /T ข้างบนไล่ปิดได้เฉพาะลูกของหน้าจอที่ยัง**มีชีวิต**อยู่ ถ้าหน้าจอตายไปก่อน
+  // (ซึ่งเป็นสถานการณ์ที่ watchdog มีไว้รับมือพอดี) node.exe จะค้างถือไฟล์
+  // {app}\runtime\node.exe ไว้ แล้วตัวติดตั้งจะขึ้นกล่อง "unable to close
+  // applications" ค้างรอคนกด — การอัปเดตอัตโนมัติจะค้างตรงนี้ทั้งอำเภอ
+  //
+  // ปิดเฉพาะ node.exe ที่รันจากโฟลเดอร์ติดตั้งนี้เท่านั้น
+  // **ห้าม taskkill /IM node.exe เฉย ๆ** เพราะจะฆ่า Node ของโปรแกรมอื่นในเครื่องด้วย
+  script := '-NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter ''Name=''''node.exe'''''' | ' +
+            'Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith(''' +
+            ExpandConstant('{app}') + ''', ''OrdinalIgnoreCase'') } | ' +
+            'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), script,
+       '', SW_HIDE, ewWaitUntilTerminated, code);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -205,6 +190,65 @@ end;
 // เตือนก่อนถอนการติดตั้งว่าข้อมูลที่ยังส่งไม่สำเร็จจะค้างอยู่
 // ลบงานตามเวลาที่ตัวติดตั้งสร้างไว้ ตอนถอนการติดตั้ง
 // (ตอนอัปเกรดไม่ต้องลบ เพราะ [Run] ใช้ /F เขียนทับให้อยู่แล้ว)
+procedure RunTool(exe, args, what: String);
+var
+  ok: Integer;
+begin
+  ok := 0;
+  if not Exec(ExpandConstant(exe), args, '', SW_HIDE, ewWaitUntilTerminated, ok) then
+    Log('!! ' + what + ': เรียกใช้ไม่ได้')
+  else if ok <> 0 then
+    Log('!! ' + what + ': exit ' + IntToStr(ok))
+  else
+    Log('ok ' + what);
+end;
+
+// สร้างงานตามเวลาสองตัวที่ต้องใช้สิทธิ์ผู้ดูแล + ล็อกสิทธิ์โฟลเดอร์อัปเดต
+//
+// เขียนใน [Code] ไม่ใช่ [Run] เพราะ /TR ต้องมีเครื่องหมายคำพูดซ้อนอยู่ข้างใน
+// (path มีช่องว่าง) ซึ่งใน [Run] ต้อง escape จนอ่านไม่ออกและ Inno ตีความผิด
+// สตริงเดี่ยวของ Pascal เก็บเครื่องหมายคำพูดกับ backslash ตามตัวอักษร อ่านออกกว่า
+//
+// **คำสั่งตายตัวทั้งคู่ ไม่รับ argument จากภายนอก** ถ้าเปลี่ยนให้รับ path
+// จากที่อื่นเมื่อไร จะกลายเป็นช่องยกระดับสิทธิ์ในเครื่องทันที
+procedure CreateScheduledTasks();
+var
+  app, node, script, updates: String;
+begin
+  app := ExpandConstant('{app}');
+  node := '\"' + app + '\runtime\node.exe\"';
+  script := '\"' + app + '\app\agent.js\"';
+
+  RunTool('{sys}\schtasks.exe',
+    '/Create /F /TN "SDCAgentTimeSync" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 1 /TR "'
+      + node + ' ' + script + ' time-sync"',
+    'สร้างงาน SDCAgentTimeSync');
+
+  RunTool('{sys}\schtasks.exe',
+    '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 4 /TR "'
+      + node + ' ' + script + ' auto-update"',
+    'สร้างงาน SDCAgentAutoUpdate');
+
+  // โฟลเดอร์อัปเดตต้องไม่ให้ผู้ใช้ทั่วไปเขียน
+  //
+  // [Dirs] สร้างโฟลเดอร์ให้ แต่มัน **สืบทอด** สิทธิ์ users-modify มาจาก SDCAgent
+  // ข้างบน (ตรวจของจริงแล้วเจอ BUILTIN\Users : Modify) ถ้าปล่อยไว้ ผู้ใช้ทั่วไป
+  // จะสลับไฟล์ติดตั้งหลังตรวจ SHA-256 แต่ก่อนที่ตัวอัปเดตสิทธิ์ผู้ดูแลจะสั่งรันได้
+  // = ช่องยกระดับสิทธิ์ในเครื่อง
+  // /inheritance:r ตัดการสืบทอด แล้วให้เฉพาะ Administrators (S-1-5-32-544)
+  // และ SYSTEM (S-1-5-18) — ใช้ SID เพราะชื่อกลุ่มเปลี่ยนตามภาษาของ Windows
+  updates := ExpandConstant('{commonappdata}\SDCAgent\updates');
+  RunTool('{sys}\icacls.exe',
+    '"' + updates + '" /inheritance:r /grant *S-1-5-32-544:(OI)(CI)F /grant *S-1-5-18:(OI)(CI)F',
+    'ล็อกสิทธิ์โฟลเดอร์อัปเดต');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    CreateScheduledTasks();
+end;
+
 procedure RemoveScheduledTasks();
 var
   code: Integer;
