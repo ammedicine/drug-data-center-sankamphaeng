@@ -277,7 +277,7 @@ export async function listRunningBatches(facilityIds: string[] | null): Promise<
     .limit(10);
 
   const cutoff = Date.now() - STALE_BATCH_MINUTES * 60_000;
-  return rows
+  const live = rows
     .map((row) => ({
       ...row,
       progress:
@@ -290,6 +290,45 @@ export async function listRunningBatches(facilityIds: string[] | null): Promise<
       const heardFrom = (row.updatedAt ?? row.startedAt)?.getTime() ?? 0;
       return heardFrom >= cutoff;
     });
+
+  // One Agent imports one thing at a time.
+  //
+  // A worker stopped mid-run leaves its batch UPLOADING for ever, and the
+  // thirty-minute rule alone kept showing it beside the run that replaced it:
+  // a สถานบริการ saw two "กำลังนำเข้าข้อมูล" cards with different date ranges and
+  // no way to tell which was real. Observed on 05957 with four such rows at
+  // once, only one of them advancing.
+  //
+  // The newest batch for an agent is the one that is happening; anything older
+  // from the same agent has been superseded, whatever its status column still
+  // says. The old rows stay in the database as evidence of the interruption -
+  // they are simply not in progress.
+  const newestPerAgent = new Map<string, (typeof live)[number]>();
+  for (const row of live) {
+    const held = newestPerAgent.get(row.agentId);
+    if (!held) {
+      newestPerAgent.set(row.agentId, row);
+      continue;
+    }
+    const rowIsNewer = (row.startedAt?.getTime() ?? 0) > (held.startedAt?.getTime() ?? 0);
+    const keep = rowIsNewer ? row : held;
+    const drop = rowIsNewer ? held : row;
+    newestPerAgent.set(row.agentId, keep);
+
+    // Two batches both being written to right now is not a stale row - it is
+    // two workers, which the Agent is meant to make impossible. Say so rather
+    // than quietly showing one of them.
+    const dropHeardFrom = (drop.updatedAt ?? drop.startedAt)?.getTime() ?? 0;
+    if (Date.now() - dropHeardFrom < 2 * 60_000) {
+      console.warn("[monitoring] MULTIPLE_ACTIVE_BATCHES", {
+        agentId: row.agentId,
+        facilityCode: row.facilityCode,
+        batches: [keep.batchRef, drop.batchRef],
+      });
+    }
+  }
+
+  return [...newestPerAgent.values()];
 }
 
 export interface FleetSummary {
