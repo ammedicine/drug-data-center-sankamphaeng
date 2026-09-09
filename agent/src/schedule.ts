@@ -41,6 +41,24 @@ export function agentSlot(agentId: string, buckets: number): number {
   return digest.readUInt32BE(0) % buckets;
 }
 
+/**
+ * How long this agent waits before installing an update everyone can see.
+ *
+ * Fifteen รพ.สต. watching the same release would otherwise all install within
+ * a minute of each other and all restart together, and for that minute the
+ * district has no agents reporting. Spread over half an hour, from the same
+ * stable hash as the sync schedule, so a given clinic always takes the same
+ * slot and two of them never collide by accident.
+ *
+ * Downloading is not staggered - it is idle bandwidth and hurts nobody. Only
+ * the install and the restart wait.
+ */
+export const UPDATE_STAGGER_SECONDS = 30 * 60;
+
+export function updateOffsetSeconds(agentId: string, window = UPDATE_STAGGER_SECONDS): number {
+  return agentSlot(agentId, Math.max(1, window));
+}
+
 /** Seconds this agent waits after an interval becomes due. */
 export function intervalOffsetSeconds(
   agentId: string,

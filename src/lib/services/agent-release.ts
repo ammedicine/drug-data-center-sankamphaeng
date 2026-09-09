@@ -26,12 +26,25 @@ export interface AgentRelease {
   /** GitHub's numeric asset id - the only thing the download route needs */
   assetId: number;
   notes: string | null;
+  /**
+   * Lowercase hex SHA-256 of the asset, as GitHub computed it when the file
+   * was uploaded, or null when GitHub did not supply one.
+   *
+   * This is what makes unattended installation safe to allow at all: it is
+   * read here, server side, from the release API - never sent by the machine
+   * that wants to update, and never derived from the file being offered. An
+   * Agent that cannot be given this hash is told an update exists and refuses
+   * to install it by itself.
+   */
+  sha256: string | null;
 }
 
 interface GitHubAsset {
   id: number;
   name: string;
   size: number;
+  /** "sha256:<hex>" on releases published since GitHub added asset digests */
+  digest?: string | null;
 }
 
 interface GitHubRelease {
@@ -39,7 +52,15 @@ interface GitHubRelease {
   published_at: string | null;
   body: string | null;
   draft: boolean;
+  prerelease: boolean;
   assets: GitHubAsset[];
+}
+
+/** Accepts only a full lowercase hex SHA-256 announced as such. */
+function sha256Of(asset: GitHubAsset): string | null {
+  const raw = asset.digest?.trim().toLowerCase() ?? "";
+  const match = /^sha256:([0-9a-f]{64})$/.exec(raw);
+  return match ? match[1] : null;
 }
 
 function token(): string | null {
@@ -104,7 +125,10 @@ export async function lookupLatestAgentRelease(
     }
 
     const release = (await response.json()) as GitHubRelease;
-    if (release.draft) return { status: "none-published" };
+    // /releases/latest already excludes drafts and prereleases, and a tag with
+    // no release of its own is invisible to it - v1.1.4 exists as a tag and
+    // must never be offered to anybody. Checked again rather than assumed.
+    if (release.draft || release.prerelease) return { status: "none-published" };
 
     const asset = release.assets?.find((item) => INSTALLER_PATTERN.test(item.name));
     if (!asset) {
@@ -123,6 +147,7 @@ export async function lookupLatestAgentRelease(
         sizeBytes: asset.size,
         assetId: asset.id,
         notes: release.body?.trim() || null,
+        sha256: sha256Of(asset),
       },
     };
   } catch (error) {
