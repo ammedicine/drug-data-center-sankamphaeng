@@ -54,8 +54,28 @@ export class JhcisConnection {
         // Bounded on purpose rather than left to the driver's default, so the
         // limit is visible next to the others and moves with them.
         connectTimeout: JHCIS_CONNECT_TIMEOUT_MS,
-        // JHCIS stores Thai text as UTF-8 even on utf8-declared columns
-        charset: "utf8mb4_general_ci",
+        // The connection charset, and why it is this one.
+        //
+        // JHCIS stores Thai as UTF-8 in utf8-declared columns. Asking for
+        // utf8mb4_general_ci reads it correctly on MySQL 5.6 and 8 - and
+        // silently destroys it on 5.1, which has no utf8mb4 at all. The driver
+        // does not fail: the unknown charset leaves the session at the server
+        // default, which on a JHCIS box is latin1, so the server replaces every
+        // Thai character with a literal "?" on its way out. By the time the row
+        // arrives the text is gone, and no amount of decoding brings it back.
+        //
+        // Measured against the reference installation (MySQL 5.1.73, server
+        // charset latin1, columns utf8_general_ci):
+        //   utf8mb4_general_ci -> results latin1 -> "????????????-?????????? 60 ML"
+        //   utf8_general_ci    -> results utf8   -> "ยกเลิกการใช้-ขวดพลาสติก 60 ML"
+        //
+        // utf8_general_ci exists on every version we support: 5.1 through 8.x,
+        // where it is accepted as the three-byte utf8mb3 family. JHCIS holds no
+        // four-byte characters - Thai is entirely inside the basic plane - so
+        // nothing is lost by not asking for utf8mb4, and a clinic on 5.1 keeps
+        // working. utf8mb3_general_ci is NOT usable: 5.1 does not know that
+        // name either.
+        charset: "utf8_general_ci",
         dateStrings: true,
         timezone: "local",
         supportBigNumbers: true,
