@@ -309,7 +309,9 @@ def number(value: Any) -> str:
 _CENTRAL_TEXT = {
     "CONNECTED": ("ok", "เชื่อมต่อแล้ว"),
     "NETWORK_ERROR": ("danger", "ติดต่อไม่ได้"),
-    "AUTH_ERROR": ("danger", "สิทธิ์ถูกเพิกถอน"),
+    "CLOCK_SKEW": ("danger", "เวลาเครื่องไม่ตรง"),
+    "CREDENTIAL_REVOKED": ("danger", "สิทธิ์ของ Agent นี้ถูกยกเลิก"),
+    "AUTH_ERROR": ("danger", "ศูนย์กลางปฏิเสธคำขอ"),
     "STALE": ("warn", "ไม่ได้ติดต่อมานาน"),
     "UNKNOWN": ("muted", "ยังไม่ทราบ"),
 }
@@ -363,8 +365,14 @@ def central_status(
 
     tone, text = _CENTRAL_TEXT.get(state, _CENTRAL_TEXT["UNKNOWN"])
     detail = f"ยืนยันล่าสุด {relative(ack, now)}" if ack else "ยังไม่เคยติดต่อสำเร็จ"
-    if state == "AUTH_ERROR":
+    if state == "CREDENTIAL_REVOKED":
         detail = "ต้องลงทะเบียนใหม่กับผู้ดูแลระบบ"
+    elif state == "CLOCK_SKEW":
+        # Never "re-enrol": the credential is fine, the clock is not. Saying
+        # otherwise is what sent someone to re-register a working machine.
+        detail = "ระบบหยุดส่งข้อมูลชั่วคราวเพื่อความปลอดภัย กำลังซิงก์เวลาให้อัตโนมัติ"
+    elif state == "AUTH_ERROR":
+        detail = "ศูนย์กลางไม่รับคำขอนี้ ดูรายละเอียดในบันทึกการทำงาน"
     return StatusItem("central", "ศูนย์กลาง", tone, text, detail)
 
 
@@ -465,6 +473,114 @@ def sync_view(status: dict[str, Any], now: datetime | None = None) -> SyncView:
         active=active,
         busy_reason="กำลังซิงก์อยู่ ต้องรอให้รอบนี้เสร็จก่อน" if active else "",
     )
+
+
+# ------------------------------------------------------------------ the clock
+
+CLOCK_HEALTHY_SECONDS = 120
+CLOCK_SKEW_LIMIT_SECONDS = 300
+
+_CLOCK_TEXT = {
+    "HEALTHY": ("ok", "ปกติ"),
+    "WARNING": ("warn", "คลาดเคลื่อนเล็กน้อย"),
+    "SYNCING": ("warn", "กำลังซิงก์เวลา"),
+    "CLOCK_SKEW": ("danger", "เวลาเครื่องคลาดเคลื่อน"),
+    "CLOCK_SYNC_FAILED": ("danger", "ซิงก์เวลา Windows ไม่สำเร็จ"),
+    "UNKNOWN": ("muted", "ยังไม่ทราบ"),
+}
+
+
+def skew_text(seconds: Any) -> str:
+    """"X นาที Y วินาที", without a sign - the direction is in the detail line."""
+    try:
+        total = abs(int(seconds))
+    except (TypeError, ValueError):
+        return "-"
+    minutes, remainder = divmod(total, 60)
+    if minutes:
+        return f"{minutes} นาที {remainder} วินาที"
+    return f"{remainder} วินาที"
+
+
+def clock_status(status: dict[str, Any], now: datetime | None = None) -> StatusItem:
+    """
+    The clock card.
+
+    Shows both times when they disagree, because "your clock is wrong" is not
+    something a person can act on, and "this PC says 12:47, the centre says
+    13:28" is. The centre's time is reconstructed from the measured difference
+    rather than stored separately - one number, no chance of the two drifting
+    apart in the file.
+    """
+    moment = now or datetime.now(timezone.utc)
+    state = str(status.get("clockState") or "UNKNOWN")
+    tone, text = _CLOCK_TEXT.get(state, _CLOCK_TEXT["UNKNOWN"])
+    checked = status.get("lastClockCheckAt")
+    skew = status.get("clockSkewSeconds")
+
+    if state in ("HEALTHY", "UNKNOWN") or skew is None:
+        detail = f"ตรวจล่าสุด {relative(checked, moment)}" if checked else "ยังไม่เคยตรวจ"
+        return StatusItem("clock", "เวลาเครื่อง", tone, text, detail)
+
+    try:
+        offset = int(skew)
+    except (TypeError, ValueError):
+        offset = 0
+    central = moment - timedelta(seconds=offset)
+    detail = (
+        f"เวลาเครื่องนี้ {thai_time(moment)} · เวลาศูนย์กลาง {thai_time(central)}"
+        f" · คลาดเคลื่อน {skew_text(offset)}"
+    )
+    if state == "CLOCK_SYNC_FAILED":
+        detail += " · กรุณาตรวจสอบการตั้งค่าวันที่และเวลาของ Windows"
+    return StatusItem("clock", "เวลาเครื่อง", tone, text, detail)
+
+
+def thai_time(value: datetime) -> str:
+    return value.astimezone(THAI_TZ).strftime("%H:%M:%S")
+
+
+# ----------------------------------------------------------------- the updater
+
+
+def update_status(
+    status: dict[str, Any], installed: str, now: datetime | None = None
+) -> StatusItem:
+    """
+    The update card.
+
+    "เป็นเวอร์ชันล่าสุดแล้ว" is the normal state and the boring one, which is
+    the point: staff should never have to think about this. When an update is
+    found but cannot be installed unattended - no published hash to check it
+    against - it says so rather than pretending it will happen on its own.
+    """
+    moment = now or datetime.now(timezone.utc)
+    latest = str(status.get("updateLatestVersion") or "")
+    state = str(status.get("updateState") or "UNKNOWN")
+    checked = status.get("updateCheckedAt")
+
+    if state == "BLOCKED":
+        return StatusItem(
+            "update", "สถานะอัปเดต", "warn", f"พบรุ่น {latest} แต่ติดตั้งอัตโนมัติไม่ได้",
+            str(status.get("updateDetail") or "ต้องติดตั้งด้วยตนเอง"),
+        )
+    if state == "DOWNLOADING":
+        return StatusItem("update", "สถานะอัปเดต", "warn", f"กำลังดาวน์โหลดรุ่น {latest}", "")
+    if state == "READY":
+        return StatusItem(
+            "update", "สถานะอัปเดต", "warn", f"ดาวน์โหลดอัปเดตแล้ว (รุ่น {latest})",
+            "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง",
+        )
+    if state == "AVAILABLE" and latest:
+        return StatusItem("update", "สถานะอัปเดต", "warn", f"มีรุ่นใหม่ {latest}", "จะติดตั้งให้อัตโนมัติ")
+    if state == "FAILED":
+        return StatusItem(
+            "update", "สถานะอัปเดต", "danger", "อัปเดตไม่สำเร็จ",
+            str(status.get("updateDetail") or "จะลองใหม่ในรอบถัดไป"),
+        )
+
+    detail = f"ตรวจล่าสุด {relative(checked, moment)}" if checked else "ยังไม่เคยตรวจ"
+    return StatusItem("update", "สถานะอัปเดต", "ok", "เป็นเวอร์ชันล่าสุดแล้ว", detail)
 
 
 def next_sync_text(

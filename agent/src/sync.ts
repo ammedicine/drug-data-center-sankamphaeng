@@ -6,6 +6,7 @@
  * network outage or a crash only delays delivery - it never loses data.
  */
 import type { AgentConfigResponse, DrugUsageRecord } from "@shared/canonical";
+import { classifyCentralFailure } from "@shared/agent-status";
 
 import {
   AGENT_VERSION,
@@ -210,11 +211,24 @@ export class SyncRunner {
    * machine's credential is no longer accepted. centralAckAt is left alone -
    * it still says when the link last genuinely worked.
    */
+  /**
+   * Why the centre would not talk to us.
+   *
+   * Every 401 used to become AUTH_ERROR, which the window rendered as "สิทธิ์
+   * ถูกเพิกถอน" - the credential has been cancelled, contact the administrator.
+   * A รพ.สต. whose clock had drifted 41 minutes was told exactly that, about a
+   * machine that was working and needed its clock set. The signature check
+   * refuses a request whose timestamp is outside the replay window, and that
+   * refusal is a 401 like any other; only the error code separates them.
+   */
   private centralFailure(error: unknown): Partial<AgentStatus> {
-    const status = error instanceof CentralApiError ? error.status : 0;
-    const auth = status === 401 || status === 403;
+    const api = error instanceof CentralApiError ? error : null;
+    const centralState = classifyCentralFailure({
+      status: api?.status ?? 0,
+      code: api?.code ?? null,
+    });
     return {
-      centralState: auth ? "AUTH_ERROR" : "NETWORK_ERROR",
+      centralState,
       centralConnected: false,
       centralAttemptAt: new Date().toISOString(),
     };

@@ -21,6 +21,7 @@ import { dirname, isAbsolute, relative as relativePath, resolve, sep } from "nod
 import {
   HEARTBEAT_INTERVAL_SECONDS,
   type CentralLinkState,
+  type ClockState,
   type JhcisLinkState,
   type SyncPhase,
 } from "@shared/agent-status";
@@ -436,6 +437,16 @@ export interface AgentStatus {
   /* ---------------------------------------------------- connection truth */
   centralState: CentralLinkState;
   jhcisState: JhcisLinkState;
+  /** what the Agent last measured about this PC's clock */
+  clockState: ClockState;
+  /** what the last update check found: NONE / AVAILABLE / DOWNLOADING / READY / BLOCKED / FAILED */
+  updateState: string;
+  updateLatestVersion: string | null;
+  updateCheckedAt: string | null;
+  updateDetail: string | null;
+  /** local minus central, in seconds; positive means this PC is ahead */
+  clockSkewSeconds: number | null;
+  lastClockCheckAt: string | null;
   syncPhase: SyncPhase;
   /** when a heartbeat was last attempted, whether or not it worked */
   centralAttemptAt: string | null;
@@ -500,6 +511,13 @@ export function loadStatus(): AgentStatus {
     // never heard of simply keep these values.
     centralState: "UNKNOWN",
     jhcisState: "UNKNOWN",
+    clockState: "UNKNOWN",
+    updateState: "NONE",
+    updateLatestVersion: null,
+    updateCheckedAt: null,
+    updateDetail: null,
+    clockSkewSeconds: null,
+    lastClockCheckAt: null,
     syncPhase: "IDLE",
     centralAttemptAt: null,
     centralAckAt: null,
