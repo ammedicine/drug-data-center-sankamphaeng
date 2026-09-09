@@ -119,6 +119,7 @@ class AgentBridge:
     def __init__(self) -> None:
         self.root = app_dir()
         self.background: subprocess.Popen[str] | None = None
+        self._background_started: datetime | None = None
 
     # -- how to invoke the agent ------------------------------------------------
     def _command(self, args: list[str]) -> list[str]:
@@ -284,10 +285,58 @@ class AgentBridge:
             return None
         try:
             self.background = self._popen(["run"])
+            self._background_started = datetime.now(timezone.utc)
             return None
         except Exception as error:
             self.background = None
             return f"เริ่มตัวทำงานเบื้องหลังไม่สำเร็จ: {error}"
+
+    def consume_worker_exit(self) -> dict[str, Any] | None:
+        """
+        Reports a worker that has exited, once, and forgets it.
+
+        The exit code was previously read by poll() and thrown away, so a
+        worker that died on its own left nothing behind on this side at all -
+        which is precisely the position we were in when one did. Whatever the
+        cause, the parent is the only thing still running afterwards, so it is
+        the only thing that can say what it saw.
+        """
+        if not self.background or self.background.poll() is None:
+            return None
+        code = self.background.returncode
+        started = self._background_started
+        ran = int((datetime.now(timezone.utc) - started).total_seconds()) if started else None
+        detail = {"pid": self.background.pid, "exitCode": code, "ranSeconds": ran}
+        self.background = None
+        self._background_started = None
+        return detail
+
+    def note(self, message: str, meta: dict[str, Any]) -> None:
+        """
+        Appends one line to today's log, in the shape the worker writes.
+
+        Same file, because an operator looking for what happened should not
+        have to know which process noticed it. Never raises: this is a
+        diagnostic, and losing it must not disturb the window.
+        """
+        try:
+            folder = data_dir() / "logs"
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc)
+            line = json.dumps(
+                {
+                    "ts": stamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{stamp.microsecond // 1000:03d}Z",
+                    "level": "warn",
+                    "message": message,
+                    "meta": {**meta, "source": "tray"},
+                },
+                ensure_ascii=False,
+            )
+            path = folder / f"agent-{stamp.strftime('%Y-%m-%d')}.log"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except Exception:  # pragma: no cover - a lost diagnostic is not an error
+            pass
 
     def stop_background(self) -> None:
         if self.background and self.background.poll() is None:
@@ -1307,6 +1356,14 @@ class AgentApp(ctk.CTk):
         """
         now = datetime.now(timezone.utc)
         running = self.bridge.background_running()
+
+        # Whatever killed it, this is the only process left to say so. Written
+        # before the restart decision, so the log shows the death and the
+        # recovery in that order.
+        exited = self.bridge.consume_worker_exit()
+        if exited is not None and self._worker_should_run:
+            self.bridge.note("worker exited unexpectedly", exited)
+
         if running and self._worker_seen_at is None:
             self._worker_seen_at = now
         if not running:
@@ -1327,6 +1384,10 @@ class AgentApp(ctk.CTk):
 
         self._watchdog_restarts.append(now)
         self._worker_seen_at = None
+        self.bridge.note(
+            "watchdog restarting worker",
+            {"reason": reason, "restartsInWindow": len(self._watchdog_restarts)},
+        )
         # Only this tray's own child, by the handle it was started with - never
         # by image name, which would take down whatever else the clinic runs.
         self.bridge.stop_background()

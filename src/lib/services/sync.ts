@@ -10,6 +10,7 @@ import { and, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import { withWriteConflictRetry } from "@/lib/db/retry";
+import { isIneligibleSourceRow } from "@/lib/shared/ingest-rules";
 import { invalidateUsageReports } from "./report-cache";
 import { agents, drugUsage, drugs, syncBatches, syncRejects } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
@@ -61,12 +62,18 @@ function validate(
   record: DrugUsageRecord,
   ctx: { agent: AuthenticatedAgent; batchId: string; pcucode: string; sourceVersion: string | null },
 ): { ok: true; value: ValidatedRecord } | { ok: false; reason: string; recordKey: string | null } {
+  // The two conditions that make a source row permanently unstorable are
+  // shared with the agent, which counts by them when it compares its months
+  // against ours. If they ever disagree, a month that can never match is
+  // repaired on every schedule for ever - which is exactly what happened.
   const drugCode = (record.drugCode ?? "").trim();
-  if (!drugCode) return { ok: false, reason: "drug_code ว่าง", recordKey: null };
-
   const visitNo = Number(record.visitNo);
-  if (!Number.isInteger(visitNo) || visitNo <= 0) {
-    return { ok: false, reason: "visit_no ไม่ถูกต้อง", recordKey: null };
+  if (isIneligibleSourceRow({ drugCode, visitNo })) {
+    return {
+      ok: false,
+      reason: drugCode ? "visit_no ไม่ถูกต้อง" : "drug_code ว่าง",
+      recordKey: null,
+    };
   }
 
   const recordKey = drugUsageRecordKey({

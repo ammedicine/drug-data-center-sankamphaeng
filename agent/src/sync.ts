@@ -512,6 +512,23 @@ export class SyncRunner {
           lastProgressAt: new Date().toISOString(),
         });
         const flushed = await this.flushQueue();
+
+        // Checking every month and finding nothing missing is progress, and it
+        // has to be recorded as such. It was not: the run returned here without
+        // opening a batch, so nothing ever advanced the watermark, and an agent
+        // whose สถานบริการ was already complete - a re-enrolled one, for
+        // instance - would verify the same span again on every schedule and
+        // never move forward.
+        //
+        // A batch of nothing, closed as completed, says exactly that: this
+        // range was verified, no rows needed moving. It goes through the same
+        // authenticated start/complete pair as any other batch, so the centre
+        // decides what to record and the agent cannot assert progress it has
+        // not demonstrated.
+        if (!options.dryRun && flushed.remaining === 0) {
+          await this.recordVerifiedRange(pcucode, requested, options.mode);
+        }
+
         return {
           batchRef: "",
           mode: options.mode,
@@ -720,6 +737,20 @@ export class SyncRunner {
 
       const complete =
         flushed.remaining === 0 && (reconciliation === null || reconciliation.gap === 0);
+
+      // How far this run has actually verified.
+      //
+      // `range` is only the part that needed reading. When months were skipped
+      // they were skipped because they were compared and found complete, so
+      // the run has verified everything up to the end of what was asked for,
+      // not merely up to the end of the last month it happened to upload.
+      // Reporting `range.to` pinned the watermark to that month and the next
+      // run started from there again.
+      //
+      // Only when the run succeeded: a failed or partial run has verified
+      // nothing, and `complete` already carries the queue and the post-sync
+      // count comparison.
+      const verifiedThrough = range === requested ? range.to : requested.to;
       await withRetry(
         () =>
           this.client.completeSync({
@@ -727,7 +758,7 @@ export class SyncRunner {
             status: complete ? "COMPLETED" : "FAILED",
             recordsRead,
             recordsSent,
-            lastVisitDate: complete ? range.to : null,
+            lastVisitDate: complete ? verifiedThrough : null,
             errorMessage: complete
               ? null
               : flushed.remaining
@@ -743,7 +774,7 @@ export class SyncRunner {
         const state = loadState();
         saveState({
           ...state,
-          lastSyncedVisitDate: range.to,
+          lastSyncedVisitDate: verifiedThrough,
           lastSyncAt: new Date().toISOString(),
         });
       }
@@ -916,6 +947,60 @@ export class SyncRunner {
    * A failure to reach Central is not a reason to skip: it falls back to
    * reading the whole range, which is what would have happened anyway.
    */
+  /**
+   * Records that a range was checked and needed nothing, so progress moves.
+   *
+   * Uses the ordinary start/complete pair rather than anything new: the centre
+   * still decides whether to accept the completion, the batch is visible in
+   * the history like any other, and no endpoint exists that would let an agent
+   * claim progress without going through it. A batch that reads and sends
+   * nothing is the honest description of what happened.
+   *
+   * Failure here is not fatal. The range genuinely was verified; if the centre
+   * could not be told, the next run compares the same months again and says so
+   * then. Losing the note is cheaper than failing a run that found no fault.
+   */
+  private async recordVerifiedRange(
+    pcucode: string,
+    range: { from: string; to: string },
+    mode: SyncMode,
+  ): Promise<void> {
+    const batchRef = nextBatchRef();
+    try {
+      await withRetry(
+        () =>
+          this.client.startSync({
+            batchRef,
+            mode,
+            rangeFrom: range.from,
+            rangeTo: range.to,
+            pcucode,
+            recordsRead: 0,
+          }),
+        { label: "verified range start" },
+      );
+      await withRetry(
+        () =>
+          this.client.completeSync({
+            batchRef,
+            status: "COMPLETED",
+            recordsRead: 0,
+            recordsSent: 0,
+            lastVisitDate: range.to,
+            errorMessage: null,
+          }),
+        { label: "verified range complete" },
+      );
+      const state = loadState();
+      saveState({ ...state, lastSyncedVisitDate: range.to, lastSyncAt: new Date().toISOString() });
+      log.info("บันทึกว่าตรวจครบถึงวันที่แล้ว", { through: range.to, batchRef });
+    } catch (error) {
+      log.warn("บันทึกผลการตรวจกับศูนย์กลางไม่สำเร็จ จะตรวจใหม่รอบหน้า", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async narrowToMissing(
     extractor: UsageExtractor,
     pcucode: string,

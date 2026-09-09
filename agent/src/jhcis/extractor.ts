@@ -20,6 +20,7 @@
 import type { RowDataPacket } from "mysql2/promise";
 
 import type { DrugMasterRecord, DrugUsageRecord } from "@shared/canonical";
+import { ELIGIBLE_SOURCE_ROW_SQL } from "@shared/ingest-rules";
 
 import type { JhcisConnection } from "./connection";
 import type { SchemaMapping } from "./schema-inspector";
@@ -336,11 +337,16 @@ export class UsageExtractor {
     to: string,
   ): Promise<Array<{ month: string; rows: number }>> {
     const dateExpr = this.dateExpr();
+    // Counts only the rows the centre is able to store. A month containing a
+    // row it must always refuse - an empty drugcode, say - would otherwise
+    // never match the centre's count, and the run that compares them would
+    // re-read and re-upload that month on every schedule, for ever.
     const rows = await this.db.query<RowDataPacket & { month: string; rows: number }>(
-      `SELECT DATE_FORMAT(${dateExpr}, '%Y-%m') AS month, COUNT(*) AS rows
+      `SELECT DATE_FORMAT(${dateExpr}, '%Y-%m') AS month, COUNT(*) AS \`rows\`
          FROM visitdrug vd
          LEFT JOIN visit v ON v.pcucode = vd.pcucode AND v.visitno = vd.visitno
         WHERE vd.pcucode = ? AND ${dateExpr} >= ? AND ${dateExpr} <= ?
+          AND ${ELIGIBLE_SOURCE_ROW_SQL}
         GROUP BY month
         ORDER BY month`,
       [pcucode, from, to],
