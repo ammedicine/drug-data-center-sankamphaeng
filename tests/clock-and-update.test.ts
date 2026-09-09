@@ -14,6 +14,7 @@
  * this file is about refusing to run the wrong file.
  */
 import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -87,6 +88,27 @@ const updaterModule = () => import(`../agent/src/updater?u=${counter++}`);
 const configModule = () => import(`../agent/src/config?k=${counter++}`);
 
 const sha256 = (buffer: Buffer) => createHash("sha256").update(buffer).digest("hex");
+
+/**
+ * Runs the CLI as a real process.
+ *
+ * Asynchronously, and that matters: spawnSync would block this process's event
+ * loop, and the fake Central above lives in this process - it could never
+ * answer, so every such test would sit there until it timed out.
+ */
+function runCli(args: string[], home: string): Promise<{ code: number; out: string }> {
+  return new Promise((done) => {
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", resolve(process.cwd(), "agent", "src", "cli.ts"), ...args],
+      { env: { ...process.env, AGENT_DATA_DIR: home }, encoding: "utf8" } as never,
+    );
+    let out = "";
+    child.stdout?.on("data", (c) => (out += c));
+    child.stderr?.on("data", (c) => (out += c));
+    child.on("close", (code) => done({ code: code ?? -1, out }));
+  });
+}
 
 // --------------------------------------------------------------------- clock
 
@@ -391,6 +413,78 @@ describe("deciding whether to install an update", () => {
       expect(syncIsBusy(), `${phase} should not block an install`).toBe(false);
     }
   });
+});
+
+describe("an update found while a sync is running", () => {
+  it("TEST 20: waits, and says it is waiting, instead of interrupting", async () => {
+    // The queue would survive an interruption, but a run that is most of the
+    // way through a clinic's history should not be cut short for an update
+    // that can wait an hour. Run end to end through the CLI, because the
+    // decision lives there rather than in a helper.
+    const { writeStatus, loadStatus } = await configModule();
+    central.asset = randomBytes(1024);
+    central.manifest = {
+      available: true,
+      version: "9.9.9",
+      assetName: "SDCAgent-Setup-9.9.9.exe",
+      size: central.asset.length,
+      sha256: sha256(central.asset),
+      autoInstall: true,
+    };
+    writeFileSync(
+      join(workDir, "agent.config.json"),
+      JSON.stringify({
+        agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl,
+        facilityId: "f", expectedPcucode: "T0001", installationId: "i",
+        syncIntervalMinutes: 60, reprocessDays: 7,
+      }),
+      "utf8",
+    );
+    // A sync is mid-flight.
+    writeStatus({ syncPhase: "UPLOADING" });
+
+    const result = await runCli(["auto-update"], workDir);
+
+    expect(result.code, result.out.slice(-300)).toBe(0);
+    expect(result.out).toMatch(/รอบถัดไป/);
+    // Nothing was fetched and nothing was installed.
+    expect(central.downloads).toBe(0);
+    const status = loadStatus();
+    expect(status.updateState).toBe("READY");
+    expect(status.updateLatestVersion).toBe("9.9.9");
+  }, 180_000);
+
+  it("installs once the sync is idle", async () => {
+    const { writeStatus, loadStatus } = await configModule();
+    central.asset = randomBytes(1024);
+    central.manifest = {
+      available: true,
+      version: "9.9.9",
+      assetName: "SDCAgent-Setup-9.9.9.exe",
+      size: central.asset.length,
+      sha256: sha256(central.asset),
+      autoInstall: true,
+    };
+    writeFileSync(
+      join(workDir, "agent.config.json"),
+      JSON.stringify({
+        agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl,
+        facilityId: "f", expectedPcucode: "T0001", installationId: "i",
+        syncIntervalMinutes: 60, reprocessDays: 7,
+      }),
+      "utf8",
+    );
+    writeStatus({ syncPhase: "IDLE" });
+
+    const result = await runCli(["auto-update"], workDir);
+
+    // It downloaded and verified, then tried to run the "installer" - which is
+    // random bytes here, so the attempt fails and is reported as a failure
+    // rather than pretending to have succeeded.
+    expect(central.downloads).toBe(1);
+    expect(loadStatus().updateState).toBe("FAILED");
+    void result;
+  }, 180_000);
 });
 
 describe("fifteen clinics updating at once", () => {
