@@ -139,6 +139,19 @@ export class SchemaInspector {
   async inspect(): Promise<{ report: SchemaReport; mapping: SchemaMapping | null }> {
     const warnings: string[] = [];
     const tables: Record<string, boolean> = {};
+
+    // Before anything reads Thai, prove the session can carry it. A connection
+    // that quietly stayed on latin1 turns every Thai character into "?" at the
+    // server, and no later step can tell that from a drug genuinely named "???".
+    const charset = await this.db.charsetReport();
+    if (!charset.ok) {
+      warnings.push(
+        `พบปัญหาชุดอักขระของการเชื่อมต่อ (client ${charset.client} / connection ` +
+          `${charset.connection} / results ${charset.results}) ข้อความภาษาไทยอาจอ่านไม่ถูกต้อง`,
+      );
+    } else if (charset.repaired) {
+      warnings.push("ตั้งชุดอักขระของการเชื่อมต่อเป็น utf8 ให้อัตโนมัติแล้ว");
+    }
     for (const table of REQUIRED_TABLES) {
       tables[table] = await this.tableExists(table);
       if (!tables[table]) warnings.push(`ไม่พบตาราง ${table} ใน JHCISDB`);

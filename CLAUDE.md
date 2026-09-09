@@ -127,7 +127,23 @@ agent/                Local Agent (Node + TS, Windows service)
 
 ## 3. JHCIS schema ที่ **ตรวจจาก DB จริง** แล้ว (localhost:3333, MySQL 5.6.45, jhcisdb)
 
-ข้อมูลจริงเก็บเป็น UTF-8 (ยืนยันด้วย HEX) → client ต้องใช้ `charset: utf8mb3`
+ข้อมูลจริงเก็บเป็น UTF-8 (ยืนยันด้วย HEX) → client ต้องใช้ **`charset: utf8_general_ci`**
+
+> **แก้ความเข้าใจผิดเดิม (2026-09-09)** เคยเขียนว่าให้ใช้ `utf8mb3` — **ใช้ไม่ได้**
+> MySQL 5.1 ไม่รู้จักชื่อ `utf8mb3_general_ci` และ **ไม่มี `utf8mb4` เลย**
+> ของจริงที่เจอ: agent ขอ `utf8mb4_general_ci` -> driver ไม่ error แต่ session ค้างที่
+> ค่าเริ่มต้นของ server คือ **latin1** -> server แปลงอักษรไทยเป็น `?` ตั้งแต่ก่อนส่ง
+> ข้อมูลจึงหายที่ต้นทาง กู้ไม่ได้ (ชื่อยาใน Central เสีย 2,919/14,772 รายการ)
+> `utf8_general_ci` ใช้ได้ตั้งแต่ **5.1.73 ถึง 8.4.3** (MySQL 8 map เป็นตระกูล utf8mb3)
+> ทดสอบกับ server จริงทั้งสองรุ่นแล้ว และ `charsetReport()` จะตรวจ session ซ้ำหลังต่อ
+> ถ้าไม่ใช่ตระกูล utf8 จะสั่ง `SET NAMES utf8` (เฉพาะ session ไม่แตะ JHCIS) แล้วตรวจใหม่
+> **record_key ไม่กระทบ** เพราะสร้างจาก facility|pcucode|visitNo|drugCode ซึ่งเป็น ASCII
+
+### backlog: JHCIS LEGACY CHARSET EXTENSION (ยังไม่ทำ — v1.1.8+)
+ยังไม่มีหลักฐานว่ามี รพ.สต. ใดใช้คอลัมน์ tis620 จริง ถ้าเจอเมื่อไรค่อยทำ:
+TIS-620 / Windows-874 · fallback อ่าน raw byte เมื่อ metadata ประกาศผิด ·
+iconv-lite + การ bundle เข้า PyInstaller · เมทริกซ์ MySQL 5.5/5.7 จริง ·
+การรักษาอักขระ 4 ไบต์แบบ capability-aware
 
 ### `visitdrug` (การจ่ายยา) — PK `(pcucode, visitno, drugcode)`
 | column | type | ใช้ทำอะไร |

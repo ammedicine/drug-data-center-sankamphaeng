@@ -37,6 +37,23 @@ export function withDeadline<T>(work: Promise<T>, ms: number, stage: string): Pr
   ]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+/** What the session actually ended up using, whatever we asked for. */
+export interface CharsetReport {
+  version: string;
+  client: string;
+  connection: string;
+  results: string;
+  /** true when the session is on a UTF-8 family that can carry Thai */
+  ok: boolean;
+  /** set when the session had to be corrected after connecting */
+  repaired: boolean;
+}
+
+/** utf8 on 5.1, utf8mb3 on 8.x - the same three-byte family, and Thai fits. */
+function utf8Family(name: string): boolean {
+  return /^utf8(mb3|mb4)?$/i.test(String(name ?? "").trim());
+}
+
 export class JhcisConnection {
   private pool: Pool | null = null;
 
@@ -79,6 +96,15 @@ export class JhcisConnection {
         dateStrings: true,
         timezone: "local",
         supportBigNumbers: true,
+      });
+
+      // Belt and braces: the handshake charset above is what a healthy server
+      // honours, and this is what makes it true on one that quietly ignored it.
+      // Session-scoped, valid on 5.1 through 8.x, and it writes nothing.
+      this.pool.on("connection", (connection) => {
+        // Fire and forget: a server that refuses it will be caught by the
+        // assertion below, which is where the failure belongs.
+        void Promise.resolve(connection.query("SET NAMES utf8")).catch(() => undefined);
       });
     }
     return this.pool;
@@ -147,6 +173,63 @@ export class JhcisConnection {
   async mysqlVersion(): Promise<string> {
     const row = await this.queryOne<RowDataPacket & { v: string }>("SELECT VERSION() AS v");
     return row?.v ?? "unknown";
+  }
+
+/**
+   * Proves the session really is on a UTF-8 family before any text is read.
+   *
+   * Asking for a charset is not the same as getting one. MySQL 5.1 has no
+   * utf8mb4, and the driver does not fail on a name it does not know - it
+   * leaves the session at the server default, which on a JHCIS box is latin1,
+   * and the server then replaces every Thai character with a literal "?" on its
+   * way out. That is how 2,919 drug names reached the centre as "???" with the
+   * original bytes already gone.
+   *
+   * So the option is checked rather than trusted. Every pooled connection is
+   * also sent an explicit SET NAMES utf8, which is valid on 5.1 through 8.x and
+   * changes only this session - it does not touch the server, the database, or
+   * a single row of JHCIS.
+   */
+  async charsetReport(): Promise<CharsetReport> {
+    const read = async (): Promise<Omit<CharsetReport, "ok" | "repaired">> => {
+      const row = await this.queryOne<
+        RowDataPacket & { v: string; cl: string; cn: string; r: string }
+      >(
+        "SELECT VERSION() AS v, @@character_set_client AS cl, " +
+          "@@character_set_connection AS cn, @@character_set_results AS r",
+      );
+      return {
+        version: String(row?.v ?? "unknown"),
+        client: String(row?.cl ?? "unknown"),
+        connection: String(row?.cn ?? "unknown"),
+        results: String(row?.r ?? "unknown"),
+      };
+    };
+
+    let seen = await read();
+    let repaired = false;
+
+    if (!utf8Family(seen.client) || !utf8Family(seen.connection) || !utf8Family(seen.results)) {
+      log.warn("การเชื่อมต่อ JHCIS ไม่ได้ใช้ชุดอักขระ UTF-8 กำลังตั้งใหม่ให้ session นี้", {
+        client: seen.client,
+        connection: seen.connection,
+        results: seen.results,
+      });
+      // Session-scoped, and the only form every supported version accepts.
+      await this.query("SET NAMES utf8");
+      seen = await read();
+      repaired = true;
+    }
+
+    const ok = utf8Family(seen.client) && utf8Family(seen.connection) && utf8Family(seen.results);
+    if (!ok) {
+      log.error("ตั้งชุดอักขระของการเชื่อมต่อ JHCIS ไม่สำเร็จ", {
+        client: seen.client,
+        connection: seen.connection,
+        results: seen.results,
+      });
+    }
+    return { ...seen, ok, repaired };
   }
 
   async ping(): Promise<void> {

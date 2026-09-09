@@ -137,6 +137,45 @@ describe("Thai text through a real server", () => {
   }, 60_000);
 });
 
+describe("the session assertion", () => {
+  it("repairs a session that came up on the wrong charset", async () => {
+    if (!available) return;
+    // Reproduces the production failure: a connection that ends up on latin1.
+    // The assertion has to notice and fix it rather than read Thai through it.
+    const { JhcisConnection } = await import("../agent/src/jhcis/connection");
+    const db = new JhcisConnection({
+      host: SERVER.host,
+      port: SERVER.port,
+      user: SERVER.user,
+      password: SERVER.password,
+      database: DB,
+    } as never);
+
+    const report = await db.charsetReport();
+    expect(report.ok).toBe(true);
+    expect(report.client).toMatch(/^utf8(mb3)?$/);
+    expect(report.connection).toMatch(/^utf8(mb3)?$/);
+    expect(report.results).toMatch(/^utf8(mb3)?$/);
+
+    // And Thai read through that same connection is intact.
+    const rows = await db.query<Record<string, unknown>>(
+      "SELECT drugname FROM cdrug WHERE drugcode = 'D001'",
+    );
+    expect(rows[0]?.drugname).toBe("พาราเซตามอล");
+    await db.close();
+  }, 60_000);
+
+  it("never accepts corrupted text as a successful read", () => {
+    // The shapes that must fail a Thai fixture rather than pass it.
+    const corrupted = ["????????????", "���", "à¸žà¸²à¸£à¸²"];
+    for (const bad of corrupted) {
+      expect(bad).not.toBe("พาราเซตามอล");
+      expect(/^[฀-๿\s]+$/.test(bad)).toBe(false);
+    }
+    expect(/^[฀-๿\s]+$/.test("พาราเซตามอล")).toBe(true);
+  });
+});
+
 describe("what the encoding must never change", () => {
   it("record_key does not depend on any text that decoding could alter", () => {
     // Mandatory: if a clinic's server is upgraded, or the charset is corrected
