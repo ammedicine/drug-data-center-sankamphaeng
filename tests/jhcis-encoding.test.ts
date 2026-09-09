@@ -17,7 +17,7 @@
  * These tests hold that choice in place. They run against whatever local MySQL
  * is available and skip when there is none.
  */
-import mysql from "mysql2/promise";
+import mysql, { type RowDataPacket } from "mysql2/promise";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -158,7 +158,7 @@ describe("the session assertion", () => {
     expect(report.results).toMatch(/^utf8(mb3)?$/);
 
     // And Thai read through that same connection is intact.
-    const rows = await db.query<Record<string, unknown>>(
+    const rows = await db.query<{ drugname: string } & RowDataPacket>(
       "SELECT drugname FROM cdrug WHERE drugcode = 'D001'",
     );
     expect(rows[0]?.drugname).toBe("พาราเซตามอล");

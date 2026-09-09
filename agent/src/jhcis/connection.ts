@@ -102,9 +102,17 @@ export class JhcisConnection {
       // honours, and this is what makes it true on one that quietly ignored it.
       // Session-scoped, valid on 5.1 through 8.x, and it writes nothing.
       this.pool.on("connection", (connection) => {
-        // Fire and forget: a server that refuses it will be caught by the
-        // assertion below, which is where the failure belongs.
-        void Promise.resolve(connection.query("SET NAMES utf8")).catch(() => undefined);
+        // The pool hands out the callback-style connection here, not the
+        // promise wrapper, so this takes a callback. Treating it as a promise
+        // made mysql2 print a warning on every new connection and, worse, meant
+        // the statement never ran - leaving the fallback to charsetReport()
+        // alone, which only fixes the one connection it happens to borrow.
+        //
+        // Fire and forget: a server that refuses it is caught by the assertion,
+        // which is where that failure belongs.
+        (
+          connection as unknown as { query: (sql: string, cb: () => void) => void }
+        ).query("SET NAMES utf8", () => undefined);
       });
     }
     return this.pool;
