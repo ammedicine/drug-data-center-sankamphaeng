@@ -105,8 +105,6 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
 ; จะถูกแก้ภายในหนึ่งชั่วโมงแม้ไม่มีใครแตะเครื่อง (ปุ่มบนหน้าจอเป็นแค่ตัวเร่ง)
 ; /RU SYSTEM /RL HIGHEST = สิทธิ์สูงสุด · /F = เขียนทับของเดิมตอนอัปเกรด
 ; **ห้าม** เปลี่ยนให้รับ path/argument จากภายนอก มิฉะนั้นกลายเป็นช่องยกระดับสิทธิ์
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""SDCAgentTimeSync"" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 1 /TR ""\"{app}\runtime\node.exe\" \"{app}\app\agent.js\" time-sync"""; Flags: runhidden; StatusMsg: "ตั้งงานซิงก์เวลา..."
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""SDCAgentAutoUpdate"" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 4 /TR ""\"{app}\runtime\node.exe\" \"{app}\app\agent.js\" auto-update"""; Flags: runhidden; StatusMsg: "ตั้งงานอัปเดตอัตโนมัติ..."
 Filename: "{app}\{#AppExe}"; Description: "เปิดโปรแกรมทันที"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -151,6 +149,38 @@ begin
        '', SW_HIDE, ewWaitUntilTerminated, code);
   Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "{#AppNameEn}" /F',
        '', SW_HIDE, ewWaitUntilTerminated, code);
+end;
+
+// สร้างงานตามเวลาสองตัวที่ต้องใช้สิทธิ์ผู้ดูแล
+//
+// เขียนใน [Code] ไม่ใช่ [Run] เพราะ /TR ต้องมีเครื่องหมายคำพูดซ้อนอยู่ข้างใน
+// (path มีช่องว่าง) ซึ่งใน [Run] ต้อง escape จนอ่านไม่ออกและพลาดง่าย
+// สตริงเดี่ยวของ Pascal เก็บ " และ \ ตามตัวอักษร จึงเห็นคำสั่งจริงได้ชัด
+//
+// **คำสั่งตายตัวทั้งคู่ ไม่รับ argument จากภายนอก** ถ้าเปลี่ยนให้รับ path
+// จากที่อื่นเมื่อไร จะกลายเป็นช่องยกระดับสิทธิ์ในเครื่องทันที
+procedure CreateScheduledTasks();
+var
+  app, node, script, code: String;
+  ok: Integer;
+begin
+  app := ExpandConstant('{app}');
+  node := '\"' + app + '\runtime\node.exe\"';
+  script := '\"' + app + '\app\agent.js\"';
+
+  code := '/Create /F /TN "SDCAgentTimeSync" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 1' +
+          ' /TR "' + node + ' ' + script + ' time-sync"';
+  Exec(ExpandConstant('{sys}\schtasks.exe'), code, '', SW_HIDE, ewWaitUntilTerminated, ok);
+
+  code := '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 4' +
+          ' /TR "' + node + ' ' + script + ' auto-update"';
+  Exec(ExpandConstant('{sys}\schtasks.exe'), code, '', SW_HIDE, ewWaitUntilTerminated, ok);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    CreateScheduledTasks();
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
