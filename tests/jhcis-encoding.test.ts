@@ -176,6 +176,67 @@ describe("the session assertion", () => {
   });
 });
 
+describe("the fallback, when the session comes up wrong", () => {
+  it("detects an unsafe session, repairs it, and only then reads", async () => {
+    if (!available) return;
+    // The whole point of the fallback: a server that ignores the handshake
+    // charset. Forced here by asking for latin1 - which is exactly the state
+    // MySQL 5.1 was left in when it was handed a charset it did not know.
+    const { JhcisConnection } = await import("../agent/src/jhcis/connection");
+    const db = new JhcisConnection({
+      host: SERVER.host,
+      port: SERVER.port,
+      user: SERVER.user,
+      password: SERVER.password,
+      database: DB,
+      charset: "latin1_swedish_ci",
+    } as never);
+
+    const report = await db.charsetReport();
+
+    // The session is safe despite latin1 having been requested. The SET NAMES
+    // that every pooled connection is sent got there first, which is why
+    // `repaired` is false - the assertion found nothing left to correct. That
+    // handler is the thing 54f02f9 fixed; before it, this call never ran and
+    // this session would still be latin1.
+    expect(report.ok).toBe(true);
+    expect(report.repaired).toBe(false);
+    expect(report.client).toMatch(/^utf8(mb3)?$/);
+    expect(report.connection).toMatch(/^utf8(mb3)?$/);
+    expect(report.results).toMatch(/^utf8(mb3)?$/);
+
+    // And Thai read after the repair is intact, not "???".
+    const rows = await db.query<{ drugname: string } & RowDataPacket>(
+      "SELECT drugname FROM cdrug WHERE drugcode = 'D001'",
+    );
+    expect(rows[0]?.drugname).toBe("พาราเซตามอล");
+    await db.close();
+  }, 60_000);
+
+  it("reports an encoding problem rather than reading through it", async () => {
+    if (!available) return;
+    // When the session cannot be made safe, the schema report must carry a
+    // warning - uploading "???" silently is the one outcome worse than failing,
+    // because it is indistinguishable from a drug genuinely named that.
+    const { JhcisConnection } = await import("../agent/src/jhcis/connection");
+    const db = new JhcisConnection({
+      host: SERVER.host, port: SERVER.port, user: SERVER.user,
+      password: SERVER.password, database: DB,
+    } as never);
+
+    // Stub the reader so the session always looks unsafe, however often it is
+    // re-read - the shape of a server that refuses to change.
+    const stuck = { v: "5.1.73", cl: "latin1", cn: "latin1", r: "latin1" };
+    (db as unknown as { queryOne: unknown }).queryOne = async () => stuck;
+    (db as unknown as { query: unknown }).query = async () => [];
+
+    const report = await db.charsetReport();
+    expect(report.ok).toBe(false);
+    expect(report.repaired).toBe(true); // it did try
+    await db.close();
+  }, 60_000);
+});
+
 describe("what the encoding must never change", () => {
   it("record_key does not depend on any text that decoding could alter", () => {
     // Mandatory: if a clinic's server is upgraded, or the charset is corrected
