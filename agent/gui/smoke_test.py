@@ -481,8 +481,126 @@ def main() -> int:
     print("`agent status` ok:", result.ok)
     for line in result.output.strip().splitlines()[:12]:
         print("   ", line)
+    if not result.ok:
+        return 1
 
-    return 0 if result.ok else 1
+    return check_worker_survives_its_own_output(app)
+
+
+def check_worker_survives_its_own_output(app) -> int:
+    """
+    A worker must not be stopped by how much it printed.
+
+    This is a regression test for a defect that ran on the canary for eleven
+    hours. The tray started the worker with stdout=PIPE and read none of it.
+    An unread pipe on Windows holds about 4 KB, and Node writes to a pipe
+    synchronously, so the worker parked in a kernel wait forever: no timers, no
+    heartbeat, no CPU, process still alive. The watchdog then killed a healthy
+    worker every five minutes, around the clock. Measured on that machine, the
+    child blocked after 3,900 bytes; a normal cycle printed 592 and lived,
+    while the historical repair printed 4,038 and did not.
+
+    So the test drives the tray's real spawn path - start_background, the same
+    _popen, the same console file - with a child that prints far more than any
+    real run would, and requires it to finish. The control run afterwards uses
+    the old unread-pipe shape and must NOT finish, because a test that passes
+    either way would not have caught this.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile
+    import time as _time
+
+    LINES = 20_000
+    WIDTH = 100  # bytes per line -> ~2 MB on stdout, plus ~200 KB on stderr
+
+    node = None
+    bundled = app.app_dir() / "runtime" / "node.exe"
+    if bundled.exists():
+        node = str(bundled)
+    else:
+        node = _shutil.which("node")
+    if not node:
+        print("worker output  : ข้าม (ไม่พบ node)")
+        return 0
+
+    work = Path(tempfile.mkdtemp(prefix="sdc-spew-"))
+    progress = work / "progress.txt"
+    spew = work / "spew.js"
+    spew.write_text(
+        "\n".join(
+            [
+                "const fs = require('node:fs');",
+                f"const line = 'x'.repeat({WIDTH - 8});",
+                f"for (let i = 0; i < {LINES}; i++) {{",
+                "  console.log(`${String(i).padStart(6, '0')} ${line}`);",
+                "  if (i % 10 === 0) console.error(`${i} stderr`);",
+                "  if (i % 1000 === 0) fs.writeFileSync(process.argv[2], String(i));",
+                "}",
+                "fs.writeFileSync(process.argv[2], 'done');",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # Isolated data folder: this test writes megabytes, and it must not land in
+    # the ProgramData folder a real clinic's queue and credential live in.
+    previous = os.environ.get("AGENT_DATA_DIR")
+    os.environ["AGENT_DATA_DIR"] = str(work)
+
+    bridge = app.AgentBridge()
+    # The real spawn path, pointed at a child that prints instead of syncing.
+    bridge._command = lambda args: [node, str(spew), str(progress)]  # noqa: SLF001
+
+    started = _time.time()
+    error = bridge.start_background()
+    if error:
+        print("worker output  :   !", error)
+        return 1
+    child = bridge.background
+    while _time.time() - started < 120 and child.poll() is None:
+        _time.sleep(0.25)
+    elapsed = _time.time() - started
+    finished = child.poll()
+    console = bridge.worker_console_log()
+    written = console.stat().st_size if console.exists() else 0
+    reached = progress.read_text(encoding="utf-8") if progress.exists() else "(never wrote)"
+    bridge.stop_background()
+
+    print(f"worker output  : {LINES} บรรทัด (~{LINES * WIDTH // 1024} KB) ใน {elapsed:.1f}s")
+    print(f"                 exit={finished} progress={reached} console log={written} bytes")
+    if finished is None:
+        print("   ! ตัวทำงานค้างเพราะ output ของตัวเอง (pipe deadlock กลับมาแล้ว)")
+        return 1
+    if reached != "done":
+        print(f"   ! ตัวทำงานหยุดกลางทางที่ {reached}")
+        return 1
+    if written < LINES * WIDTH:
+        print(f"   ! console log สั้นกว่าที่เขียนจริง ({written} bytes)")
+        return 1
+
+    # The control: the shape this defect had. It must still deadlock, or this
+    # test proves nothing.
+    control = _subprocess.Popen(
+        [node, str(spew), str(work / "control.txt")],
+        stdout=_subprocess.PIPE,
+        stderr=_subprocess.STDOUT,
+        creationflags=_subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    _time.sleep(6)
+    blocked = control.poll() is None
+    control.kill()
+    print("                 control (unread pipe) blocked:", blocked)
+
+    if previous is None:
+        os.environ.pop("AGENT_DATA_DIR", None)
+    else:
+        os.environ["AGENT_DATA_DIR"] = previous
+
+    if not blocked:
+        print("   ! การทดสอบนี้ไม่ได้พิสูจน์อะไร เพราะ pipe ที่ไม่มีคนอ่านก็ไม่ค้าง")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

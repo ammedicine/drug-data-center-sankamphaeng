@@ -175,19 +175,51 @@ class AgentBridge:
         child["AGENT_DATA_DIR"] = str(data_dir())
         return child
 
-    def _popen(self, args: list[str]) -> subprocess.Popen[str]:
+    def _popen(self, args: list[str], console: Path | None = None) -> subprocess.Popen[str]:
+        """
+        Starts the agent CLI.
+
+        `console` decides where the child's console output goes, and that
+        choice is the difference between a worker that runs for months and one
+        that stops dead.
+
+        A short command is read to completion by communicate(), so a pipe is
+        right for it. The always-on worker is not read by anybody, and an
+        unread pipe on Windows holds about 4 KB - measured on this machine, a
+        Node child blocked permanently after 3,900 bytes. Node writes to a pipe
+        synchronously, so the block is not backpressure the event loop can work
+        around: timers stop, the heartbeat stops, and the tray's watchdog then
+        kills a worker that was never actually unwell. An ordinary sync writes
+        about 592 bytes and survives; the historical repair wrote 4,038 and did
+        not.
+
+        So the worker is handed a real file instead. A file handle cannot fill
+        up, the operating system does the writing, and anything printed before
+        the agent's own logger exists - a module that fails to load, a runtime
+        that will not start - is still on disk afterwards, which DEVNULL would
+        have thrown away. One file per day, beside the logs the agent already
+        writes.
+        """
         creation = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        return subprocess.Popen(
-            self._command(args),
-            cwd=str(self.root),
-            env=self._environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=creation,
-        )
+        sink = open(console, "a", encoding="utf-8", errors="replace") if console else None
+        try:
+            return subprocess.Popen(
+                self._command(args),
+                cwd=str(self.root),
+                env=self._environment(),
+                stdout=sink if sink else subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creation,
+            )
+        finally:
+            # The child inherited its own duplicate of the handle, so this copy
+            # has done its job. Closing it here means no handle to track, and
+            # none to leak when a worker is restarted.
+            if sink:
+                sink.close()
 
     def run_with_input(self, args: list[str], payload: str, timeout: int = 120) -> CommandResult:
         """
@@ -279,12 +311,28 @@ class AgentBridge:
             return CommandResult(False, str(error))
 
     # -- the always-on background worker ---------------------------------------
+    def worker_console_log(self) -> Path:
+        """
+        Where the worker's console output is parked.
+
+        Dated like the agent's own log so it inherits the same shape and stays
+        small: everything here is also written, structured, to
+        agent-<date>.log. What is only here is whatever the agent printed
+        before its logger existed, which is exactly what is worth having when a
+        worker will not start at all.
+        """
+        folder = data_dir() / "logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / f"worker-console-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log"
+
     def start_background(self) -> str | None:
         """Starts the worker; returns an error message instead of raising."""
         if self.background and self.background.poll() is None:
             return None
         try:
-            self.background = self._popen(["run"])
+            # A file, never a pipe: nothing in this process reads the worker's
+            # output, and an unread pipe stops the worker dead. See _popen.
+            self.background = self._popen(["run"], console=self.worker_console_log())
             self._background_started = datetime.now(timezone.utc)
             return None
         except Exception as error:
