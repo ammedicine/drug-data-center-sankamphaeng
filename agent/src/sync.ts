@@ -7,12 +7,16 @@
  */
 import type { AgentConfigResponse, DrugUsageRecord } from "@shared/canonical";
 import { classifyCentralFailure } from "@shared/agent-status";
+import { applySyncStartFloor } from "@shared/sync-control";
 
 import {
+  AGENT_BUILD_ID,
+  AGENT_CAPABILITIES,
   AGENT_VERSION,
   JHCIS_PROBE_TIMEOUT_MS,
   dataDir,
   loadState,
+  syncStartDate,
   loadStatus,
   machineHostname,
   type AgentStatus,
@@ -25,6 +29,15 @@ import { CentralApiError, CentralClient, withRetry } from "./central/client";
 import { JhcisConnection, withDeadline } from "./jhcis/connection";
 import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector, type SchemaMapping } from "./jhcis/schema-inspector";
+import {
+  applyControlInstruction,
+  beginPauseHandover,
+  completePauseHandover,
+  effectiveSyncState,
+  pausedMessage,
+  shouldStopForPause,
+  syncPaused,
+} from "./control";
 import { log } from "./logger";
 import { OfflineQueue } from "./queue/queue";
 import { resolveNetworkIdentity } from "./network";
@@ -142,17 +155,37 @@ export async function resolveRange(
    */
   loadBounds: () => Promise<{ min: string | null; max: string | null }>,
   explicit: { from?: string | null; to?: string | null },
+  /**
+   * Earliest dispensing date this สถานบริการ collects.
+   *
+   * Every mode leaves through this function, which is why the floor is applied
+   * here rather than in each caller: the schedule, a reconciliation, a repair,
+   * an operator's manual range and the empty-watermark case all become one
+   * `from`, and that `from` is the SQL predicate the extractor reads with. A
+   * floor applied after reading would still have made a รพ.สต. server walk
+   * twenty years of dispensing to throw most of it away - which is the cost
+   * the setting exists to remove, not merely the rows.
+   */
+  floor: string = syncStartDate(),
 ): Promise<{ from: string; to: string }> {
   const state = loadState();
   const watermark = state.lastSyncedVisitDate;
+  const atOrAfterFloor = (from: string) => applySyncStartFloor(from, floor);
 
   // An incremental run that already knows where it left off, and is told where
   // to stop, can answer without touching JHCIS at all.
   if (mode !== "MANUAL_RANGE" && mode !== "INITIAL" && watermark && explicit.to) {
-    return { from: shiftDays(watermark, -credential.reprocessDays), to: explicit.to };
+    return {
+      from: atOrAfterFloor(shiftDays(watermark, -credential.reprocessDays)),
+      to: explicit.to,
+    };
   }
   if (mode === "MANUAL_RANGE" && explicit.from && explicit.to) {
-    return { from: explicit.from, to: explicit.to };
+    // A manual range is floored too, and deliberately. "Read from 2019" cannot
+    // mean 2019 at a สถานบริการ configured to keep data from 2022: the rows
+    // would be refused or purged, and the next reconciliation would find those
+    // months short and fetch them again, for ever.
+    return { from: atOrAfterFloor(explicit.from), to: explicit.to };
   }
 
   const bounds = await loadBounds();
@@ -160,13 +193,18 @@ export async function resolveRange(
 
   if (mode === "MANUAL_RANGE") {
     if (!explicit.from) throw new Error("MANUAL_RANGE requires --from");
-    return { from: explicit.from, to };
+    return { from: atOrAfterFloor(explicit.from), to };
   }
   if (mode === "INITIAL") {
-    return { from: explicit.from ?? bounds.min ?? shiftDays(to, -365), to };
+    return { from: atOrAfterFloor(explicit.from ?? bounds.min ?? shiftDays(to, -365)), to };
   }
-  if (!watermark) return { from: bounds.min ?? shiftDays(to, -365), to };
-  return { from: shiftDays(watermark, -credential.reprocessDays), to };
+  // No watermark is the case that matters most here. It is what an agent sees
+  // after the centre's data for its สถานบริการ has been deliberately cleared,
+  // and without a floor it walks back to whatever JHCIS holds - at 05957 that
+  // was 2006, and 252,698 of the 268,474 rows it collected were older than the
+  // สถานบริการ had any intention of keeping.
+  if (!watermark) return { from: atOrAfterFloor(bounds.min ?? shiftDays(to, -365)), to };
+  return { from: atOrAfterFloor(shiftDays(watermark, -credential.reprocessDays)), to };
 }
 
 /** p95 and friends, for the one log line that reports where a run's time went. */
@@ -307,6 +345,17 @@ export class SyncRunner {
     let rejected = 0;
 
     for (const chunk of this.queue.list("PENDING")) {
+      // Between chunks, never inside one. A pause that arrives mid-upload lets
+      // the current atomic unit finish and stops before the next: the queue
+      // stays coherent, nothing is half-delivered, and what is left on disk is
+      // exactly what has not been sent yet.
+      if (shouldStopForPause()) {
+        beginPauseHandover();
+        log.info("หยุดส่งข้อมูลตามคำสั่งผู้ดูแลระบบ ชุดที่ยังไม่ส่งยังอยู่ในคิว", {
+          pending: this.queue.count("PENDING"),
+        });
+        break;
+      }
       const uploadStartedAt = Date.now();
       try {
         const result = await withRetry(
@@ -432,6 +481,32 @@ export class SyncRunner {
   }
 
   async run(options: SyncOptions): Promise<SyncResult> {
+    // Nothing is read from JHCIS while the centre has this สถานบริการ paused.
+    // Checked before the connection is even opened: a paused agent should not
+    // be putting load on a clinic's database server to produce rows that will
+    // be refused.
+    if (syncPaused()) {
+      log.info("ข้ามการซิงก์เพราะถูกหยุดโดยผู้ดูแลระบบส่วนกลาง");
+      completePauseHandover();
+      writeStatus({
+        phase: "idle",
+        syncPhase: "IDLE",
+        message: pausedMessage(),
+        lastError: null,
+      });
+      return {
+        batchRef: "",
+        mode: options.mode,
+        rangeFrom: "",
+        rangeTo: "",
+        recordsRead: 0,
+        recordsSent: 0,
+        accepted: 0,
+        rejected: 0,
+        pendingChunks: this.queue.count("PENDING"),
+        reconciliation: null,
+      };
+    }
     const runStartedAt = Date.now();
     let extractStartedAt = runStartedAt;
     let extractEndedAt = runStartedAt;
@@ -659,6 +734,14 @@ export class SyncRunner {
         range.to,
         EXTRACT_PAGE_SIZE,
       )) {
+        // Stop reading JHCIS at the next page boundary. A สถานบริการ that has
+        // just been paused should not have its database walked for another
+        // twenty minutes producing rows the centre will refuse.
+        if (shouldStopForPause()) {
+          beginPauseHandover();
+          log.info("หยุดอ่านข้อมูลจาก JHCIS ตามคำสั่งผู้ดูแลระบบ");
+          break;
+        }
         for (const record of page) {
           buffer.push(record);
           if (buffer.length >= DEFAULT_CHUNK_SIZE) {
@@ -1258,6 +1341,17 @@ export class SyncRunner {
       pendingBatches: queue.count("PENDING"),
       ...(syncRanAt ? { syncRanAt } : {}),
       network: await resolveNetworkIdentity(this.credential.centralApiUrl),
+      // Which build this is and what it can do. Three different v1.1.7 builds
+      // all reported "1.1.7", one of which destroyed Thai text, and the centre
+      // had no way to tell them apart when deciding whether a fleet-wide
+      // update was safe.
+      buildId: AGENT_BUILD_ID,
+      capabilities: AGENT_CAPABILITIES,
+      syncStartDate: syncStartDate(),
+      // Reporting only. What the centre accepts is decided by the centre; this
+      // just lets an operator see whether the instruction has landed yet.
+      effectiveSyncState: effectiveSyncState(),
+      appliedControlRevision: loadState().appliedControlRevision ?? 0,
       });
     } catch (error) {
       // The attempt stands; the acknowledgement does not. Nothing after this
@@ -1269,6 +1363,7 @@ export class SyncRunner {
     log.debug("heartbeat acknowledged", { config: response.config });
     writeStatus({ ...this.centralAck(), pendingChunks: queue.count("PENDING") });
     this.adoptCentralWatermark(response.config.lastSyncedVisitDate);
+    applyControlInstruction(response.config);
     return response.config;
   }
 

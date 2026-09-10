@@ -25,6 +25,7 @@ import {
   type JhcisLinkState,
   type SyncPhase,
 } from "@shared/agent-status";
+import { DEFAULT_SYNC_START_DATE, isValidSyncStartDate } from "@shared/sync-control";
 
 import * as dotenv from "dotenv";
 
@@ -37,7 +38,32 @@ dotenv.config();
  * build when they disagree, because a fleet that all reports 1.0.0 tells an
  * operator nothing about which machines still need updating.
  */
-export const AGENT_VERSION = "1.1.7";
+export const AGENT_VERSION = "1.1.8";
+
+/**
+ * Which source this build came from, stamped by the installer build script.
+ *
+ * The version alone was not enough. Three different v1.1.7 builds all reported
+ * "1.1.7" - one that corrupted Thai text, one whose tray strangled its own
+ * worker, and the released one - and Central could not tell which of them a
+ * machine was running when deciding whether an update was safe to push.
+ * Replaced at build time; "dev" when running from a checkout.
+ */
+export const AGENT_BUILD_ID = process.env.AGENT_BUILD_ID ?? "dev";
+
+/**
+ * What this build can do, reported so the centre never has to infer it from a
+ * version number. Anything a build cannot do is simply absent from an older
+ * agent's report, and absent reads as false.
+ */
+export const AGENT_CAPABILITIES = {
+  autoUpdate: true,
+  remotePause: true,
+  syncStartDate: true,
+  charsetGate: true,
+  workerLock: true,
+  boundedWorkerLog: true,
+} as const;
 
 /**
  * How long the agent will wait on JHCIS before giving up.
@@ -93,6 +119,23 @@ export interface AgentState {
   lastSyncedVisitDate: string | null;
   lastSyncAt: string | null;
   batchSequence: number;
+
+  /**
+   * The centre's last known instruction, kept on disk on purpose.
+   *
+   * A paused สถานบริการ that reboots must come back paused. If this were held
+   * only in memory, every restart would be a window in which the agent
+   * believed it was free to read JHCIS and upload - and the machine most
+   * likely to restart during a reset is the one somebody is standing in front
+   * of. Persisted, the answer survives reboots, upgrades and power cuts.
+   *
+   * Absent means an agent that has never been told anything, which is RUNNING.
+   */
+  syncControlState?: "RUNNING" | "PAUSED";
+  /** the revision this agent has acted on, so the same order is obeyed once */
+  appliedControlRevision?: number;
+  controlAppliedAt?: string | null;
+  pauseReason?: string | null;
 }
 
 /**
@@ -368,6 +411,19 @@ export interface AgentSettings {
   startWithWindows: boolean;
   /** keep running in the notification area when the window is closed */
   minimiseToTray: boolean;
+  /**
+   * Earliest dispensing date this สถานบริการ collects, ISO yyyy-mm-dd.
+   *
+   * JHCIS here holds dispensing back to 2006 and almost none of it is wanted:
+   * the full collection at 05957 carried 268,474 rows of which 252,698 predate
+   * October 2022. This is a floor on the source query, not a filter applied
+   * afterwards - reading two decades in order to discard most of it is the
+   * cost the setting exists to avoid.
+   *
+   * Absent means the default, which is why loadSettings fills it in rather
+   * than leaving it undefined for every caller to guess at.
+   */
+  syncStartDate: string;
 }
 
 export const DEFAULT_SETTINGS: AgentSettings = {
@@ -378,6 +434,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   heartbeatSeconds: HEARTBEAT_INTERVAL_SECONDS,
   startWithWindows: true,
   minimiseToTray: true,
+  syncStartDate: DEFAULT_SYNC_START_DATE,
 };
 
 export function settingsPath(): string {
@@ -389,10 +446,23 @@ export function loadSettings(): AgentSettings {
   if (!existsSync(path)) return { ...DEFAULT_SETTINGS };
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<AgentSettings>;
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    const merged = { ...DEFAULT_SETTINGS, ...parsed };
+    // A settings.json written before this release has no floor, and one
+    // written by hand may have nonsense in it. Neither may be allowed to
+    // become a query predicate: an invalid date would either read nothing at
+    // all or - worse - silently read everything back to 2006.
+    if (!isValidSyncStartDate(merged.syncStartDate ?? "")) {
+      merged.syncStartDate = DEFAULT_SYNC_START_DATE;
+    }
+    return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
+}
+
+/** The floor every read goes through, always a valid ISO date. */
+export function syncStartDate(): string {
+  return loadSettings().syncStartDate;
 }
 
 export function saveSettings(settings: Partial<AgentSettings>): AgentSettings {
@@ -487,6 +557,19 @@ export interface AgentStatus {
   lastWorkerTickAt: string | null;
 
   /**
+   * The centre's instruction, mirrored for the screen.
+   *
+   * The window must be able to say "หยุดโดยผู้ดูแลระบบ" rather than inventing
+   * an explanation. A paused agent is connected and its credential is valid,
+   * so showing "ออฟไลน์" or "สิทธิ์ถูกเพิกถอน" would send somebody looking
+   * for a fault that does not exist.
+   */
+  syncControlState?: "RUNNING" | "PAUSED";
+  controlRevision?: number;
+  controlAppliedAt?: string | null;
+  pauseReason?: string | null;
+
+  /**
    * What the two elevated scheduled tasks actually did, and who ran them.
    *
    * Needed because the same two commands can be reached from the window's
@@ -552,6 +635,10 @@ export function loadStatus(): AgentStatus {
     lastProgressAt: null,
     nextSyncAt: null,
     lastWorkerTickAt: null,
+    syncControlState: "RUNNING",
+    controlRevision: 0,
+    controlAppliedAt: null,
+    pauseReason: null,
     timeSyncTaskLastRunAt: null,
     timeSyncTaskLastResult: null,
     autoUpdateTaskLastRunAt: null,

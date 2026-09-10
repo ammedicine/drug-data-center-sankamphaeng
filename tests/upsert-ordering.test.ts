@@ -42,6 +42,17 @@ vi.mock("@/lib/db", () => {
     db: {
       insert: capture,
       update: () => ({ set: () => ({ where: () => done }) }),
+      // The ingestion core asks whether the centre is still accepting this
+      // agent's data before it writes anything. This mock answers RUNNING so
+      // these tests stay about ordering - the barrier itself is covered in
+      // tests/remote-pause.test.ts, against a real database.
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: () => Promise.resolve([{ state: "RUNNING", reason: null }]),
+          }),
+        }),
+      }),
     },
   };
 });

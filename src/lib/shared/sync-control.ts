@@ -55,14 +55,18 @@ export const SYNC_PAUSED_STATUS = 503;
 /**
  * Seconds an Agent is asked to wait, and deliberately small.
  *
- * withRetry in the released client uses Retry-After verbatim as its sleep, up
- * to five attempts, inside a run that is holding sync.lock - whose stale
- * takeover window is five minutes. A Retry-After of an hour would park an old
- * Agent inside one upload for five hours and let a second worker seize its
- * lock. Sixty seconds costs at most five minutes of polite retrying and then
- * the run ends normally.
+ * withRetry in the released client uses Retry-After verbatim as its sleep, so
+ * this number decides how long an old Agent sits inside a single upload. It
+ * makes five attempts with a sleep between each, which is four sleeps, and it
+ * does all of that while holding sync.lock - whose stale-takeover window is
+ * exactly five minutes. At 60 seconds that is 240 seconds of sleeping plus
+ * five round trips, close enough to 300 that a slow link would let a second
+ * worker seize the lock and run a concurrent sync, which is the one thing the
+ * lock exists to prevent. 45 leaves 180 seconds and a real margin.
+ *
+ * An hour, by contrast, would park the Agent for five hours.
  */
-export const SYNC_PAUSED_RETRY_AFTER_SECONDS = 60;
+export const SYNC_PAUSED_RETRY_AFTER_SECONDS = 45;
 
 /**
  * The earliest dispensing date any Agent collects unless told otherwise.
