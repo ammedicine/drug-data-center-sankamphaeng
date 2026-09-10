@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -101,6 +101,26 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       ...(body.network?.ipAddress ? { ipAddress: body.network.ipAddress } : {}),
       ...(body.network?.interfaceName ? { networkInterface: body.network.interfaceName } : {}),
       ...(body.lastError ? { lastError: body.lastError, lastErrorAt: now } : {}),
+
+      // A watermark that has run ahead of real time is corrected here, on the
+      // one request every agent makes whatever version it is running.
+      //
+      // It has to be the centre that does this. An agent only moves this value
+      // by completing a batch, and an agent with nothing new to send opens no
+      // batch - so a สถานบริการ sitting quietly with a future watermark could
+      // never repair it, and would collect nothing until the calendar caught
+      // up. 05957 is in exactly that state right now, on v1.1.7, which cannot
+      // be taught anything new.
+      //
+      // CASE rather than LEAST because LEAST(NULL, date) is NULL in MySQL and
+      // a NULL watermark is meaningful: it is what a deliberate purge leaves
+      // behind, and it must keep meaning "recollect from syncStartDate".
+      // Idempotent - once the value is at or below today this rewrites it to
+      // itself - and it touches nothing but sync-derived state.
+      lastSyncedVisitDate: sql`CASE
+        WHEN ${agents.lastSyncedVisitDate} > UTC_DATE() THEN UTC_DATE()
+        ELSE ${agents.lastSyncedVisitDate}
+      END`,
 
       // Build identity and capabilities, written only when the agent actually
       // sent them. An older agent must not blank out what a newer one
