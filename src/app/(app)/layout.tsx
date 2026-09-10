@@ -8,6 +8,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // ADMIN reads every facility but changes nothing, so it gets the same pages
   // with the action controls removed (each page enforces this server-side too).
   const seesAllFacilities = user.role === "SUPER_ADMIN" || user.role === "ADMIN";
+  // The fleet page can stop a สถานบริการ sending data, so it is SUPER_ADMIN
+  // only. The link is hidden from ADMIN and the page and its actions refuse
+  // them independently - hiding a link has never been access control.
+  const controlsFleet = user.role === "SUPER_ADMIN";
 
   // Menu wording follows the vocabulary used in รพ.สต. / สสอ. systems rather
   // than developer terms, and is grouped so administration is clearly separate
@@ -28,6 +32,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             items: [
               { href: "/admin/facilities", label: "ทะเบียนสถานบริการ", icon: "facility" as const },
               { href: "/admin/agents", label: "โปรแกรมเชื่อมข้อมูล (Agent)", icon: "agent" as const },
+              ...(controlsFleet
+                ? [{ href: "/admin/fleet", label: "จัดการ Agent ทั้งหมด", icon: "agent" as const }]
+                : []),
               { href: "/admin/users", label: "ผู้ใช้งานระบบ", icon: "users" as const },
               { href: "/admin/monitoring", label: "ติดตามสถานะระบบ", icon: "monitoring" as const },
               { href: "/admin/audit", label: "ประวัติการใช้งานระบบ", icon: "audit" as const },

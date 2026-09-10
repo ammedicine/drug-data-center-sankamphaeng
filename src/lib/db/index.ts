@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
 
@@ -38,10 +40,42 @@ function createPool(): mysql.Pool {
     enableKeepAlive: true,
     timezone: "Z",
     charset: "utf8mb4_general_ci",
-    // Verified TLS 1.2+, always. Only an explicit CA bundle in the URL is
-    // allowed to add to this; nothing may weaken it.
-    ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+    // Verified TLS 1.2+, always. A CA bundle may be added; nothing may weaken
+    // this. rejectUnauthorized stays true in every branch below, which is the
+    // property that matters - DATABASE_CA_FILE can only ever make the trust
+    // store larger, never turn verification off.
+    ssl: {
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: true,
+      ...(extraCertificateAuthority() ? { ca: extraCertificateAuthority() } : {}),
+    },
   });
+}
+
+/**
+ * An additional CA to trust, for a server that is not TiDB Cloud.
+ *
+ * The release gates run the real service against a real MySQL, and MySQL 8.4
+ * generates its own self-signed CA on first start. Without this, proving those
+ * queries against a real database would mean either turning verification off -
+ * never - or not proving them at all, which is how a column that exists in
+ * schema.ts and not in the database reaches production.
+ *
+ * Unset in production, where TiDB Cloud presents a publicly trusted
+ * certificate and Node's own store is the right answer.
+ */
+function extraCertificateAuthority(): string | undefined {
+  const path = process.env.DATABASE_CA_FILE;
+  if (!path) return undefined;
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(
+      `DATABASE_CA_FILE points at ${path}, which could not be read: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
