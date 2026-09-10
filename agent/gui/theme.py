@@ -411,6 +411,52 @@ def worker_status(running: bool, error: str | None, now: datetime) -> StatusItem
     return StatusItem("worker", "ตัวทำงานเบื้องหลัง", "danger", "หยุดอยู่", detail)
 
 
+def sync_control_status(status: dict[str, Any]) -> StatusItem | None:
+    """
+    The card that appears only when the centre has stopped this สถานบริการ.
+    
+    It exists because every honest way of describing a paused Agent with the
+    cards we already had was wrong. It is not offline - it is talking to the
+    centre right now. Its credential is not revoked - that message sent a
+    clinic hunting for a fault that did not exist once already, over a clock
+    error. It is not broken. It has been told to stop, by a person, for a
+    reason, and the only useful thing the screen can do is say so and name the
+    reason.
+    """
+    if str(status.get("syncControlState") or "RUNNING") != "PAUSED":
+        return None
+    reason = str(status.get("pauseReason") or "").strip()
+    detail = f"เหตุผล: {reason}" if reason else "Agent ยังเชื่อมต่อกับศูนย์กลางตามปกติ"
+    return StatusItem(
+        key="control",
+        label="การซิงก์",
+        tone="warn",
+        text="หยุดโดยผู้ดูแลระบบ",
+        detail=detail,
+    )
+
+
+def paused_notice(status: dict[str, Any]) -> str | None:
+    """
+    What to tell somebody at the clinic who presses "ซิงก์ตอนนี้" while paused.
+    
+    Says what happened, that nothing is wrong with their machine, and who can
+    undo it - so nobody spends an afternoon reinstalling an Agent that is
+    working perfectly.
+    """
+    if str(status.get("syncControlState") or "RUNNING") != "PAUSED":
+        return None
+    reason = str(status.get("pauseReason") or "").strip()
+    lines = [
+        "การซิงก์ถูกหยุดโดยผู้ดูแลระบบส่วนกลาง",
+        "Agent ยังเชื่อมต่อกับศูนย์กลางตามปกติ แต่หยุดส่งข้อมูล JHCIS ชั่วคราว",
+    ]
+    if reason:
+        lines.append(f"เหตุผล: {reason}")
+    lines.append("ต้องให้ผู้ดูแลระบบส่วนกลางเปิดการซิงก์อีกครั้ง")
+    return "\n".join(lines)
+
+
 def system_status(
     status: dict[str, Any],
     credential: dict[str, Any],
@@ -420,11 +466,18 @@ def system_status(
 ) -> list[StatusItem]:
     """The three cards at the top of the overview, in reading order."""
     moment = now or datetime.now(timezone.utc)
-    return [
+    cards = [
         jhcis_status(status, moment),
         central_status(status, credential, moment),
         worker_status(worker_running, worker_error, moment),
     ]
+    # Added rather than substituted: an operator still needs to see that JHCIS
+    # and the centre are both fine, which is most of the reassurance that a
+    # pause is deliberate and not a fault.
+    control = sync_control_status(status)
+    if control:
+        cards.append(control)
+    return cards
 
 
 def sync_view(status: dict[str, Any], now: datetime | None = None) -> SyncView:

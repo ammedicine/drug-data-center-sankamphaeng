@@ -42,6 +42,7 @@ const calls = {
   completes: [] as Array<{ batchRef: string; status: string; lastVisitDate: string | null }>,
   uploads: 0,
   auditMonths: [] as Array<{ month: string; rows: number }>,
+  uploadedDates: [] as string[],
 };
 
 async function buildSource() {
@@ -83,6 +84,16 @@ async function buildSource() {
   await c.query(
     `INSERT INTO visitdrug VALUES (?, 2, '', 5, '1x1', '001', '2024-02-20 08:30:00')`, [PCUCODE]);
   // A later month that is genuinely complete, so the run has something to skip.
+  // Dispensing from long before any sensible collection floor. Production
+  // JHCIS at these สถานบริการ holds rows back to 2006; these stand in for it,
+  // and exist so a test can prove they are never read rather than assuming it.
+  await c.query(`INSERT INTO visit VALUES (?, 90, '2019-05-05', '2019-05-05 08:00:00')`, [PCUCODE]);
+  await c.query(
+    `INSERT INTO visitdrug VALUES (?, 90, 'D001', 3, '1x1', '001', '2019-05-05 08:30:00')`, [PCUCODE]);
+  await c.query(`INSERT INTO visit VALUES (?, 91, '2021-08-08', '2021-08-08 08:00:00')`, [PCUCODE]);
+  await c.query(
+    `INSERT INTO visitdrug VALUES (?, 91, 'D001', 4, '1x1', '001', '2021-08-08 08:30:00')`, [PCUCODE]);
+
   await c.query(`INSERT INTO visit VALUES (?, 3, '2024-03-10', '2024-03-10 08:00:00')`, [PCUCODE]);
   await c.query(
     `INSERT INTO visitdrug VALUES (?, 3, 'D001', 7, '1x1', '001', '2024-03-10 08:30:00')`, [PCUCODE]);
@@ -152,8 +163,11 @@ beforeAll(async () => {
           lastVisitDate: parsed.lastVisitDate ?? null,
         });
       } else if (path.endsWith("/sync/upload")) {
-        const records = (parsed.records ?? []) as unknown[];
+        const records = (parsed.records ?? []) as Array<{ usageDate?: string }>;
         if (records.length) calls.uploads += 1;
+        // Recorded so a test can assert what actually reached the centre,
+        // rather than inferring it from a count.
+        for (const r of records) if (r.usageDate) calls.uploadedDates.push(r.usageDate);
         payload = { accepted: records.length, rejected: 0, rejects: [] };
       } else if (path.endsWith("/sync/audit")) {
         payload = { months: calls.auditMonths, total: calls.auditMonths.reduce((a, m) => a + m.rows, 0) };
@@ -194,6 +208,7 @@ function reset(watermark: string | null) {
   calls.starts.length = 0;
   calls.completes.length = 0;
   calls.uploads = 0;
+  calls.uploadedDates.length = 0;
   writeFileSync(
     resolve(workDir, "state.json"),
     JSON.stringify({ lastSyncedVisitDate: watermark, lastSyncAt: null, batchSequence: 0 }),
@@ -348,6 +363,60 @@ describe("a month whose only difference is a row the centre must refuse", () => 
     await (await runner()).run({ mode: "INCREMENTAL", from: null, to: "2024-04-30" });
     expect(calls.starts.length).toBe(afterFirst + 1);
     expect(state().lastSyncedVisitDate).toBe("2024-04-30");
+  }, 180_000);
+});
+
+describe("after the centre's data for a สถานบริการ is deliberately cleared", () => {
+  it("recollects from the configured floor, not from 2006, and does not stall", async () => {
+    if (!available) return;
+    // The exact production sequence from this morning. An administrator purged
+    // 05957 through the supported action; that resets the centre's watermark to
+    // NULL by design. The agent adopted the NULL, lost its own position, and
+    // walked back to 2006 - collecting 268,474 rows of which 252,698 predated
+    // anything the สถานบริการ meant to keep.
+    //
+    // The floor is what makes the same sequence safe. It must recollect, and
+    // it must start where it was told to.
+    writeFileSync(
+      resolve(workDir, "settings.json"),
+      JSON.stringify({ autoSyncEnabled: true, syncStartDate: "2022-10-01" }),
+      "utf8",
+    );
+    // The centre holds nothing for this สถานบริการ any more, so every month
+    // it is asked about is missing.
+    calls.auditMonths = [];
+    // The agent's own position after the heartbeat has adopted the centre's
+    // NULL - which is what happened at 05957 at 03:47 this morning, logged as
+    // "ปรับ watermark ตามศูนย์กลาง". adoptCentralWatermark runs on the
+    // heartbeat rather than inside run(), so the sequence is reproduced by
+    // starting from the position that adoption leaves behind.
+    reset(null);
+
+    const result = await (await runner()).run({
+      mode: "INCREMENTAL", from: null, to: "2024-03-31",
+    });
+
+    // It recollected rather than doing nothing.
+    expect(calls.starts.length).toBeGreaterThan(0);
+    const started = calls.starts.at(-1)!;
+
+    // And it started at the floor, not at the oldest thing JHCIS holds.
+    expect(started.from >= "2022-10-01").toBe(true);
+    expect(started.from).not.toBe("2019-05-05");
+
+    // The pre-floor rows were never collected. This is the assertion that
+    // actually matters: 2019 and 2021 dispensing exists in this JHCIS and
+    // stayed there.
+    expect(result.recordsRead).toBeGreaterThan(0);
+    const uploaded = calls.uploadedDates;
+    expect(uploaded.every((d) => d >= "2022-10-01")).toBe(true);
+    expect(uploaded).not.toContain("2019-05-05");
+    expect(uploaded).not.toContain("2021-08-08");
+
+    // No re-enrolment, no identity change: same agent, same facility.
+    const credential = JSON.parse(readFileSync(resolve(workDir, "agent.config.json"), "utf8"));
+    expect(credential.agentId).toBe("rec-agent");
+    expect(credential.expectedPcucode).toBe(PCUCODE);
   }, 180_000);
 });
 

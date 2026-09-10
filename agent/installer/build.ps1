@@ -96,6 +96,26 @@ if (-not (Test-Path (Join-Path $AgentRoot "node_modules"))) {
   Invoke-Native { npm install --no-audit --no-fund } "npm install"
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $BuildDir "app") | Out-Null
+
+# The commit this build came from, stamped into the bundle.
+#
+# The version string alone was not enough and v1.1.7 proved it: three
+# different builds all reported "1.1.7" - one that destroyed Thai text, one
+# whose tray strangled its own worker, and the released one - and Central had
+# no way to tell which of them a สถานบริการ was running when deciding whether
+# a fleet-wide update was safe. Now every agent reports its source.
+$buildId = (& git -C $AgentRoot rev-parse --short=7 HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $buildId) { $buildId = "unknown" }
+$buildId = $buildId.Trim()
+# A tree with uncommitted changes does not match its commit, and saying it
+# does would make the identifier a lie exactly when somebody is relying on it.
+& git -C $AgentRoot diff --quiet HEAD 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Info "คำเตือน: มีการแก้ไขที่ยังไม่ commit - buildId จะเป็น $buildId-dirty"
+  $buildId = "$buildId-dirty"
+}
+Info "buildId: $buildId"
+
 # mysql2 ships optional native-looking requires that esbuild must not follow;
 # bundling everything else keeps the payload to a single file.
 Invoke-Native {
@@ -106,6 +126,7 @@ Invoke-Native {
     --format=cjs `
     --outfile="$BuildDir\app\agent.js" `
     --external:better-sqlite3 `
+    --define:process.env.AGENT_BUILD_ID="'$buildId'" `
     --log-level=warning
 } "esbuild"
 Info "ได้ไฟล์ $BuildDir\app\agent.js"

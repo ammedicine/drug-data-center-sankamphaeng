@@ -1539,6 +1539,20 @@ class AgentApp(ctk.CTk):
     def _run_async(self, args: list[str], busy_text: str) -> None:
         if self.busy:
             return
+
+        # Anything that would move dispensing data is refused while the centre
+        # has this สถานบริการ paused, and refused here rather than left to fail
+        # later: the agent would decline it anyway, but a person watching would
+        # see a run start and stop with no explanation. There is no override -
+        # only the centre can lift a pause, and a button offering to try
+        # anyway would be a button that does nothing.
+        if args and args[0] in {"sync", "verify", "retry"}:
+            notice = theme.paused_notice(self.bridge.status())
+            if notice:
+                self.sync_headline.configure(text=notice.splitlines()[0], text_color=theme.WARN)
+                self.log_hint.configure(text=notice, text_color=theme.WARN)
+                return
+
         self.busy = True
         for button in self._action_buttons():
             button.configure(state="disabled")

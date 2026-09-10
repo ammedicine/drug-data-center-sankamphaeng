@@ -269,6 +269,47 @@ def check(theme) -> list[str]:
     daily_thai = theme.next_sync_text({"syncIntervalMinutes": 0, "dailyTimes": ["08:15"]}, {}, now)
     expect("08:15" in daily_thai, f"a daily time must not be shifted, got {daily_thai}")
 
+    # --- paused by the centre ------------------------------------------------
+    # Every honest description of this state using the existing cards was
+    # wrong: not offline, not revoked, not broken. Told to stop, by a person,
+    # for a reason.
+    paused = {
+        "syncControlState": "PAUSED",
+        "pauseReason": "กำลังปรับช่วงวันที่จัดเก็บข้อมูล",
+        "centralState": "CONNECTED",
+        "jhcisState": "CONNECTED",
+        "jhcisCheckedAt": fresh,
+        "centralAckAt": fresh,
+    }
+    card = theme.sync_control_status(paused)
+    expect(card is not None, "a centrally paused agent must say so on the overview")
+    expect(card.text == "หยุดโดยผู้ดูแลระบบ", f"unexpected pause headline: {card.text}")
+    expect("ปรับช่วงวันที่" in card.detail, f"the reason should be shown, got {card.detail}")
+    expect(card.tone == "warn", "a deliberate pause is a warning, not an error")
+
+    # The two things it must never say.
+    for item in theme.system_status(paused, enrolled, True, None):
+        expect(
+            "เพิกถอน" not in item.text and "เพิกถอน" not in item.detail,
+            f"a paused agent must never mention revoked credentials: {item}",
+        )
+        expect(
+            item.key != "central" or "ออฟไลน์" not in item.text,
+            f"a paused agent is still connected: {item}",
+        )
+
+    # And a running agent gets no pause card at all.
+    expect(
+        theme.sync_control_status({"syncControlState": "RUNNING"}) is None,
+        "a running agent must not show a pause card",
+    )
+    expect(theme.paused_notice({"syncControlState": "RUNNING"}) is None, "no notice when running")
+
+    notice = theme.paused_notice(paused)
+    expect(notice is not None, "pressing sync while paused must explain why nothing happened")
+    expect("ผู้ดูแลระบบส่วนกลาง" in notice, "the notice must say who can undo it")
+    expect("ยังเชื่อมต่อ" in notice, "the notice must say the agent is not broken")
+
     # --- the worker watchdog ------------------------------------------------
     # Two failures need recovering and they look nothing alike from outside: a
     # worker that is alive and doing nothing, and a worker that has exited.
