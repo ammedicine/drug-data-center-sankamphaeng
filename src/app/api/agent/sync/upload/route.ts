@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { apiError, withAgent } from "@/lib/agent-auth/route";
+import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
 import { syncBatches } from "@/lib/db/schema";
@@ -59,6 +60,7 @@ const schema = z.object({
  * rows instead of duplicating them. Invalid rows are rejected individually.
  */
 export const POST = withAgent(schema, async ({ agent, body }) => {
+  await assertAgentSyncAllowed(agent.agentId);
   assertPcucodeMatches(agent, body.pcucode);
 
   const [batch] = await db

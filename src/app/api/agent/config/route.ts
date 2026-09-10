@@ -26,6 +26,11 @@ export const GET = withAgent(z.object({}).optional(), async ({ agent }) => {
     disabled: agent.disabled,
     syncRequested: agent.syncRequested,
     verifyRequested: agent.verifyRequested,
+    // Same instruction as the heartbeat carries. An agent that polls config
+    // instead of heartbeating must not be able to miss a pause.
+    syncControlState: agent.syncControlState,
+    controlRevision: agent.controlRevision,
+    pauseReason: agent.pauseReason,
   };
   return NextResponse.json(config);
 });

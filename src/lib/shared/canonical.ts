@@ -11,6 +11,8 @@
  */
 import { createHash, createHmac } from "node:crypto";
 
+import type { EffectiveSyncState, SyncControlState } from "./sync-control";
+
 export const API_VERSION = "1";
 
 /** Header names used by the agent protocol. */
@@ -150,6 +152,16 @@ export interface SchemaReport {
 
 export interface HeartbeatRequest {
   agentVersion: string;
+  /** short source commit, so the centre can tell builds apart */
+  buildId?: string | null;
+  /** what this build can do; anything absent is false */
+  capabilities?: Record<string, boolean> | null;
+  /** the earliest dispensing date this agent is configured to collect */
+  syncStartDate?: string | null;
+  /** what the agent is actually doing about the centre's instruction */
+  effectiveSyncState?: EffectiveSyncState | null;
+  /** the highest control revision the agent has acted on */
+  appliedControlRevision?: number | null;
   hostname: string;
   installationId: string;
   status: "ONLINE" | "SYNCING" | "ERROR";
@@ -205,6 +217,18 @@ export interface AgentConfigResponse {
   syncRequestedTo?: string | null;
   /** an operator asked for a full month-by-month reconciliation */
   verifyRequested: boolean;
+
+  /**
+   * The centre's instruction about whether to sync at all.
+   *
+   * Optional so an older Central and a newer Agent still understand each
+   * other. An Agent that receives no instruction keeps whatever it last
+   * persisted rather than assuming RUNNING - assuming would let a Central
+   * rollback silently restart collection at a paused สถานบริการ.
+   */
+  syncControlState?: SyncControlState;
+  controlRevision?: number;
+  pauseReason?: string | null;
 }
 
 export interface SyncStartRequest {

@@ -39,6 +39,8 @@ export class AgentAuthError extends Error {
   }
 }
 
+import type { SyncControlState } from "@/lib/shared/sync-control";
+
 export interface AuthenticatedAgent {
   agentId: string;
   agentName: string;
@@ -54,6 +56,16 @@ export interface AuthenticatedAgent {
   syncRequestedFrom: string | null;
   syncRequestedTo: string | null;
   verifyRequested: boolean;
+  /**
+   * The centre's instruction, carried back on every authenticated round.
+   *
+   * Rides the existing outbound channel deliberately: a รพ.สต. LAN accepts no
+   * inbound connection, so the only way to reach an agent is to answer when it
+   * calls. Nothing here needs a port opened, a VPN, or anyone on site.
+   */
+  syncControlState: SyncControlState;
+  controlRevision: number;
+  pauseReason: string | null;
 }
 
 /**
@@ -128,6 +140,9 @@ export async function authenticateAgent(
       facilityName: facilities.name,
       expectedPcucode: facilities.jhcisPcucode,
       facilityActive: facilities.isActive,
+      syncControlState: agents.syncControlState,
+      controlRevision: agents.controlRevision,
+      pauseReason: agents.pauseReason,
     })
     .from(agentCredentials)
     .innerJoin(agents, eq(agents.id, agentCredentials.agentId))
@@ -194,6 +209,9 @@ export async function authenticateAgent(
     syncIntervalMinutes: row.syncIntervalMinutes,
     reprocessDays: row.reprocessDays,
     lastSyncedVisitDate: row.lastSyncedVisitDate ? String(row.lastSyncedVisitDate) : null,
+    syncControlState: row.syncControlState,
+    controlRevision: row.controlRevision,
+    pauseReason: row.pauseReason ?? null,
     // status DISABLED is rejected above, so an authenticated agent may always run
     disabled: false,
     syncRequestedFrom: row.syncRequestedFrom ?? null,

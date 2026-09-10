@@ -71,6 +71,13 @@
       "when": 1788848434300,
       "tag": "0009_regular_zeigeist",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1789026356744,
+      "tag": "0010_brief_molly_hayes",
+      "breakpoints": true
     }
   ]
 }

@@ -7,6 +7,8 @@
  * - drug_usage is the high-volume table: keep it narrow and indexed for aggregation
  */
 import { relations } from "drizzle-orm";
+
+import { EFFECTIVE_SYNC_STATES, SYNC_CONTROL_STATES } from "@/lib/shared/sync-control";
 import {
   bigint,
   boolean,
@@ -40,6 +42,13 @@ export const USER_ROLES = ["SUPER_ADMIN", "ADMIN", "FACILITY_ADMIN", "USER"] as 
 export const AGENT_STATUSES = ["ONLINE", "OFFLINE", "SYNCING", "ERROR", "DISABLED"] as const;
 export const BATCH_STATUSES = ["STARTED", "UPLOADING", "COMPLETED", "FAILED", "ABORTED"] as const;
 export const SYNC_MODES = ["INITIAL", "INCREMENTAL", "MANUAL_RANGE", "RETRY"] as const;
+
+/**
+ * Remote sync control lives in src/lib/shared/sync-control.ts so the agent,
+ * the API and the screen all read the same list rather than three copies that
+ * can drift apart.
+ */
+export { SYNC_CONTROL_STATES, EFFECTIVE_SYNC_STATES };
 
 /* ------------------------------------------------------------------ users */
 
@@ -199,11 +208,59 @@ export const agents = mysqlTable(
     verifyRequestedAt: datetime("verify_requested_at"),
     enrolledAt: datetime("enrolled_at"),
     revokedAt: datetime("revoked_at"),
+
+    /* --------------------------------------------- remote sync control */
+    /**
+     * What the centre has decided this agent should be doing.
+     *
+     * Deliberately its own column rather than another meaning stacked onto
+     * `status` or `revokedAt`. Those two already fail authentication when set,
+     * which would take the heartbeat down with the sync - and an agent that
+     * cannot heartbeat cannot be told to start again. Pausing has to leave
+     * every channel open except the one that writes data.
+     *
+     * This is the authoritative value for ingestion. Whether the agent has
+     * heard about it, agrees with it, or is even switched on changes nothing
+     * about what the centre will store.
+     */
+    syncControlState: mysqlEnum("sync_control_state", SYNC_CONTROL_STATES)
+      .notNull()
+      .default("RUNNING"),
+    /**
+     * Bumped on every change, so an agent can tell a new instruction from the
+     * same one arriving again on the next heartbeat and act once rather than
+     * on every round.
+     */
+    controlRevision: int("control_revision").notNull().default(0),
+    pausedAt: datetime("paused_at"),
+    pausedByUserId: id("paused_by_user_id"),
+    /** operator's words, shown to the clinic - never anything secret */
+    pauseReason: varchar("pause_reason", { length: 200 }),
+
+    /* ------------------------------------- what the agent reports back */
+    /** RUNNING | PAUSE_REQUESTED | PAUSED, as last reported by the agent */
+    effectiveSyncState: mysqlEnum("effective_sync_state", EFFECTIVE_SYNC_STATES),
+    appliedControlRevision: int("applied_control_revision"),
+    controlAppliedAt: datetime("control_applied_at"),
+
+    /* ------------------------------------------- build and capability */
+    /**
+     * Short source commit. Several intermediate v1.1.7 builds all reported the
+     * same version string, and the centre had no way to tell which of them a
+     * machine was running - including one that corrupted Thai text.
+     */
+    buildId: varchar("build_id", { length: 40 }),
+    /** what this build can do; anything absent is false, never unknown */
+    capabilities: json("capabilities"),
+    /** earliest dispensing date the agent is configured to collect */
+    syncStartDate: date("sync_start_date", { mode: "string" }),
+
     createdAt,
     updatedAt,
   },
   (t) => ({
     facilityIdx: index("agents_facility_idx").on(t.facilityId, t.status),
+    controlIdx: index("agents_control_idx").on(t.syncControlState),
     ownerIdx: index("agents_owner_idx").on(t.ownerUserId),
     heartbeatIdx: index("agents_heartbeat_idx").on(t.lastHeartbeatAt),
     seenIdx: index("agents_seen_idx").on(t.lastSeenAt),

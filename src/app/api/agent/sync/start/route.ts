@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withAgent } from "@/lib/agent-auth/route";
+import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { writeAudit } from "@/lib/services/audit";
 import { startBatch, UPLOAD_CHUNK_SIZE } from "@/lib/services/sync";
@@ -26,6 +27,10 @@ const schema = z.object({
  * the agent may retry after a network failure.
  */
 export const POST = withAgent(schema, async ({ agent, body }) => {
+  // Before anything is opened: the centre decides whether it is taking
+  // this agent's data at all, and it decides that here rather than
+  // trusting the agent to have stopped asking.
+  await assertAgentSyncAllowed(agent.agentId);
   assertPcucodeMatches(agent, body.pcucode);
 
   const { batchId, resumed } = await startBatch({

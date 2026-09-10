@@ -13,8 +13,31 @@ export interface AgentRouteContext<T> {
   req: NextRequest;
 }
 
-export function apiError(status: number, code: string, message: string) {
-  return NextResponse.json({ error: { code, message } }, { status });
+export function apiError(
+  status: number,
+  code: string,
+  message: string,
+  headers?: Record<string, string>,
+) {
+  return NextResponse.json({ error: { code, message } }, { status, headers });
+}
+
+/**
+ * Turns an authentication or control refusal into a response.
+ *
+ * A paused agent gets Retry-After, and that header is load-bearing for the
+ * clients already in the field: withRetry in the released Agent uses the
+ * server's number in place of its own backoff, so this is how the centre keeps
+ * an old machine politely quiet instead of letting it hammer or give up.
+ */
+function authErrorResponse(error: AgentAuthError) {
+  const retryAfter = (error as { retryAfterSeconds?: number }).retryAfterSeconds;
+  return apiError(
+    error.status,
+    error.code,
+    error.message,
+    retryAfter ? { "Retry-After": String(retryAfter) } : undefined,
+  );
 }
 
 /**
@@ -75,7 +98,7 @@ export function withAgent<TSchema extends z.ZodTypeAny>(
       return await handler({ agent, body: body.data, req });
     } catch (error) {
       if (error instanceof AgentAuthError) {
-        return apiError(error.status, error.code, error.message);
+        return authErrorResponse(error);
       }
       console.error("[agent-api] unhandled error", error);
       return apiError(500, "INTERNAL_ERROR", "Internal server error");
@@ -101,7 +124,7 @@ export function withUnsignedAgent<TSchema extends z.ZodTypeAny>(
       return await handler({ body: parsed.data, req });
     } catch (error) {
       if (error instanceof AgentAuthError) {
-        return apiError(error.status, error.code, error.message);
+        return authErrorResponse(error);
       }
       console.error("[agent-api] unhandled error", error);
       return apiError(500, "INTERNAL_ERROR", "Internal server error");

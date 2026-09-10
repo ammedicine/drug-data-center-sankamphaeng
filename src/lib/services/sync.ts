@@ -6,6 +6,7 @@
  *  - partial tolerance: one bad row is rejected, the batch still commits
  *  - facility-bound: facilityId always comes from the authenticated agent
  */
+import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
 import { and, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/lib/db";
@@ -140,6 +141,9 @@ export async function startBatch(input: {
   rangeTo: string | null;
   recordsRead: number;
 }): Promise<{ batchId: string; resumed: boolean }> {
+  // Defence in depth. The route checks this too; this is the layer that
+  // still holds if a future endpoint reaches the core without asking.
+  await assertAgentSyncAllowed(input.agent.agentId);
   const existing = await db
     .select({ id: syncBatches.id, status: syncBatches.status })
     .from(syncBatches)
@@ -178,6 +182,7 @@ export async function upsertDrugMaster(
   records: DrugMasterRecord[],
   sourceVersion: string | null,
 ): Promise<number> {
+  await assertAgentSyncAllowed(agent.agentId);
   // Same ordering argument as the usage upsert: this table's unique key is
   // (facility_id, drug_code), the facility is fixed for one request, so
   // ascending drug_code is ascending index order. Master uploads land at the
@@ -249,6 +254,7 @@ export async function ingestUsageRecords(input: {
   sourceVersion: string | null;
   records: DrugUsageRecord[];
 }): Promise<SyncUploadResponse> {
+  await assertAgentSyncAllowed(input.agent.agentId);
   const valid: ValidatedRecord[] = [];
   const rejects: Array<{ recordKey: string | null; reason: string }> = [];
 
@@ -365,6 +371,7 @@ export async function completeBatch(input: {
   lastVisitDate: string | null;
   errorMessage?: string | null;
 }): Promise<void> {
+  await assertAgentSyncAllowed(input.agent.agentId);
   const [batch] = await db
     .select({ rangeFrom: syncBatches.rangeFrom, rangeTo: syncBatches.rangeTo })
     .from(syncBatches)

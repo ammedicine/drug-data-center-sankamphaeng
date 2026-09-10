@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { apiError, withAgent } from "@/lib/agent-auth/route";
+import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
 import { db } from "@/lib/db";
 import { syncBatches } from "@/lib/db/schema";
 import { writeAudit } from "@/lib/services/audit";
@@ -29,6 +30,9 @@ const schema = z.object({
  * agent will resume from.
  */
 export const POST = withAgent(schema, async ({ agent, body }) => {
+  // Completing is a mutation too - it moves the watermark, which is the
+  // one number that decides what an agent may skip in future.
+  await assertAgentSyncAllowed(agent.agentId);
   const [batch] = await db
     .select({ id: syncBatches.id, status: syncBatches.status })
     .from(syncBatches)
