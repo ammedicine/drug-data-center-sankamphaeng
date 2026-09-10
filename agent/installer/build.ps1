@@ -144,10 +144,46 @@ Invoke-Native {
 } "pip install"
 
 $customtkinterPath = & $VenvPython -c "import customtkinter, os; print(os.path.dirname(customtkinter.__file__))"
+
+# Windows version resource. Without one, Properties -> Details on SDCAgent.exe
+# is blank and nothing outside the program can tell which build a machine is
+# running - the registry and AGENT_VERSION know, but a person looking at the
+# file does not. Generated here so it can never disagree with $Version.
+# Written UTF-8 with BOM for the same reason every other file here is: Windows
+# PowerShell reads a BOM-less file as ANSI and the Thai product name would
+# arrive as mojibake inside the executable itself.
+$fileVersionParts = ($Version -replace '[^0-9.].*$', '') -split '\.'
+while ($fileVersionParts.Count -lt 4) { $fileVersionParts += '0' }
+$fileVersionTuple = ($fileVersionParts[0..3] -join ', ')
+$versionFile = Join-Path $BuildDir "version-info.txt"
+$versionInfo = @"
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=($fileVersionTuple), prodvers=($fileVersionTuple),
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([StringTable('041E04B0', [
+      StringStruct('CompanyName', 'สำนักงานสาธารณสุขอำเภอสันกำแพง'),
+      StringStruct('FileDescription', 'Drug data center อำเภอสันกำแพง'),
+      StringStruct('FileVersion', '$($fileVersionParts[0..3] -join '.')'),
+      StringStruct('InternalName', 'SDCAgent'),
+      StringStruct('OriginalFilename', 'SDCAgent.exe'),
+      StringStruct('ProductName', 'Drug data center อำเภอสันกำแพง'),
+      StringStruct('ProductVersion', '$Version')
+    ])]),
+    VarFileInfo([VarStruct('Translation', [1054, 1200])])
+  ]
+)
+"@
+[System.IO.File]::WriteAllText($versionFile, $versionInfo, (New-Object System.Text.UTF8Encoding $true))
+Info "version resource: ProductVersion $Version / FileVersion $($fileVersionParts[0..3] -join '.')"
+
 Invoke-Native {
   & $VenvPython -m PyInstaller `
     --noconfirm --clean --windowed --onefile `
     --name SDCAgent `
+    --version-file $versionFile `
     --distpath (Join-Path $BuildDir "gui") `
     --workpath (Join-Path $BuildDir "pyinstaller") `
     --specpath (Join-Path $BuildDir "pyinstaller") `
