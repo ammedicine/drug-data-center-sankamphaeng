@@ -92,17 +92,69 @@ export function isValidSyncStartDate(value: string): boolean {
 }
 
 /**
- * The floor applied to a requested range.
+ * The floor applied to a range the machine chose for itself.
  *
- * Every path that decides what to read goes through this: the schedule, a
- * reconciliation, a repair, and a range an operator typed by hand. A manual
- * range is not an exception - "read from 2019" cannot mean 2019 when the
- * สถานบริการ has been configured to keep data from 2022, or the next
- * reconciliation would find those months missing and fetch them all over
- * again, for ever.
+ * The schedule, a reconciliation, a repair and the empty-watermark case all
+ * come through here, and raising their start date silently is right: nobody
+ * asked for a particular day, they asked for "whatever is missing".
+ *
+ * A range an operator typed is different and must not come through here - see
+ * MANUAL_RANGE_BEFORE_FLOOR_CODE. Quietly narrowing somebody's explicit
+ * request produces a run that reports success over a period it never read.
  */
 export function applySyncStartFloor(from: string, floor: string): string {
   return from < floor ? floor : from;
+}
+
+/**
+ * Why an operator's own range was refused rather than narrowed.
+ *
+ * "Read from 2019" at a สถานบริการ configured to collect from 2022 cannot be
+ * honoured, and cannot be quietly turned into 2022 either: the operator would
+ * be told the backfill succeeded while three years they explicitly asked for
+ * were never touched. Refusing says what happened and what to change.
+ *
+ * The floor is set locally, in the Tray, and stays the only authority. This
+ * error exists to send the operator there rather than to offer a way around it
+ * from the centre.
+ */
+export const MANUAL_RANGE_BEFORE_FLOOR_CODE = "MANUAL_RANGE_BEFORE_SYNC_START_DATE";
+
+export interface ManualRangeRefusal {
+  code: typeof MANUAL_RANGE_BEFORE_FLOOR_CODE;
+  requestedFromDate: string;
+  configuredSyncStartDate: string;
+  message: string;
+}
+
+/**
+ * Whether an operator's range may run, and the refusal when it may not.
+ *
+ * Both ends being below the floor and only the start being below it are the
+ * same answer: the whole request is refused. Partially processing the
+ * overlapping part would be the silent narrowing under another name.
+ */
+export function checkManualRange(
+  from: string,
+  floor: string,
+): ManualRangeRefusal | null {
+  if (from >= floor) return null;
+  return {
+    code: MANUAL_RANGE_BEFORE_FLOOR_CODE,
+    requestedFromDate: from,
+    configuredSyncStartDate: floor,
+    message: manualRangeRefusalMessage(from, floor),
+  };
+}
+
+/** The Thai wording, in one place so the tray, the CLI and the web agree. */
+export function manualRangeRefusalMessage(from: string, floor: string): string {
+  return [
+    "วันที่เริ่มต้นที่เลือกอยู่ก่อนวันที่เริ่มเก็บข้อมูลของ Agent",
+    `ช่วงที่ขอ: ${toThaiDate(from)}`,
+    `Agent นี้กำหนดเริ่มเก็บข้อมูลตั้งแต่: ${toThaiDate(floor)}`,
+    'กรุณาปรับ "วันที่เริ่มเก็บข้อมูล" ในการตั้งค่า Agent ก่อน แล้วจึงลองใหม่',
+  ].join("\n");
 }
 
 /** True when a stored record predates the floor and must not be uploaded. */

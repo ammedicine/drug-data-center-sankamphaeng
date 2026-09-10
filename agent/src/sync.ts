@@ -7,7 +7,11 @@
  */
 import type { AgentConfigResponse, DrugUsageRecord } from "@shared/canonical";
 import { classifyCentralFailure } from "@shared/agent-status";
-import { applySyncStartFloor } from "@shared/sync-control";
+import {
+  applySyncStartFloor,
+  checkManualRange,
+  type ManualRangeRefusal,
+} from "@shared/sync-control";
 
 import {
   AGENT_BUILD_ID,
@@ -103,6 +107,32 @@ export interface Reconciliation {
   repairedMonths: string[];
 }
 
+/**
+ * Thrown when an operator asks for a range that starts before the floor.
+ *
+ * Carries the two dates so the tray and the CLI can say both without
+ * re-deriving either. Nothing patient-related is ever in here.
+ */
+export class ManualRangeRefusedError extends Error {
+  readonly code: string;
+  readonly requestedFromDate: string;
+  readonly configuredSyncStartDate: string;
+
+  constructor(refusal: ManualRangeRefusal) {
+    super(refusal.message);
+    this.name = "ManualRangeRefusedError";
+    this.code = refusal.code;
+    this.requestedFromDate = refusal.requestedFromDate;
+    this.configuredSyncStartDate = refusal.configuredSyncStartDate;
+  }
+}
+
+/** Throws the refusal when an operator's range starts before the floor. */
+function refuseManualRangeBeforeFloor(from: string, floor: string): void {
+  const refusal = checkManualRange(from, floor);
+  if (refusal) throw new ManualRangeRefusedError(refusal);
+}
+
 export interface SyncResult {
   batchRef: string;
   mode: SyncMode;
@@ -181,11 +211,11 @@ export async function resolveRange(
     };
   }
   if (mode === "MANUAL_RANGE" && explicit.from && explicit.to) {
-    // A manual range is floored too, and deliberately. "Read from 2019" cannot
-    // mean 2019 at a สถานบริการ configured to keep data from 2022: the rows
-    // would be refused or purged, and the next reconciliation would find those
-    // months short and fetch them again, for ever.
-    return { from: atOrAfterFloor(explicit.from), to: explicit.to };
+    // Refused rather than raised. SyncRunner.run checks this before it opens
+    // anything, and it is checked again here so the invariant holds for any
+    // caller: a range an operator typed is either run as asked or not at all.
+    refuseManualRangeBeforeFloor(explicit.from, floor);
+    return { from: explicit.from, to: explicit.to };
   }
 
   const bounds = await loadBounds();
@@ -193,7 +223,8 @@ export async function resolveRange(
 
   if (mode === "MANUAL_RANGE") {
     if (!explicit.from) throw new Error("MANUAL_RANGE requires --from");
-    return { from: atOrAfterFloor(explicit.from), to };
+    refuseManualRangeBeforeFloor(explicit.from, floor);
+    return { from: explicit.from, to };
   }
   if (mode === "INITIAL") {
     return { from: atOrAfterFloor(explicit.from ?? bounds.min ?? shiftDays(to, -365)), to };
@@ -481,6 +512,31 @@ export class SyncRunner {
   }
 
   async run(options: SyncOptions): Promise<SyncResult> {
+    // An operator's own range is checked before anything else happens, and
+    // before a JHCIS connection exists.
+    //
+    // Refused, not narrowed. Turning "read from 2019" into "read from 2022"
+    // would report a successful backfill over three years it never touched -
+    // and the operator would have no way to know. Refusing here means no
+    // connection is opened, no batch is created, no watermark moves and
+    // nothing is enqueued: the request simply did not happen.
+    if (options.mode === "MANUAL_RANGE" && options.from) {
+      const refusal = checkManualRange(options.from, syncStartDate());
+      if (refusal) {
+        log.warn("ปฏิเสธช่วงวันที่ที่ขอ เพราะเริ่มก่อนวันที่เริ่มเก็บข้อมูลของ Agent", {
+          code: refusal.code,
+          requestedFromDate: refusal.requestedFromDate,
+          configuredSyncStartDate: refusal.configuredSyncStartDate,
+        });
+        writeStatus({
+          phase: "error",
+          syncPhase: "ERROR",
+          lastError: refusal.message,
+        });
+        throw new ManualRangeRefusedError(refusal);
+      }
+    }
+
     // Nothing is read from JHCIS while the centre has this สถานบริการ paused.
     // Checked before the connection is even opened: a paused agent should not
     // be putting load on a clinic's database server to produce rows that will
