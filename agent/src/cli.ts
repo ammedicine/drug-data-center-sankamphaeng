@@ -905,6 +905,15 @@ async function autoUpdate(): Promise<void> {
     });
     record(`INSTALLING version=${decision.version}`);
     await installUpdate(installer, decision.version);
+    // The installer is replacing this program as we speak, so whatever is
+    // written here is what the screen shows until the new build starts and
+    // writes its own. "Downloading" would be a lie for that whole window.
+    writeStatus({
+      updateState: "READY",
+      updateLatestVersion: decision.version,
+      updateCheckedAt: checkedAt,
+      updateDetail: "ติดตั้งแล้ว รอเริ่มโปรแกรมใหม่",
+    });
     record(`INSTALLED version=${decision.version}`);
     console.log(`ติดตั้งรุ่น ${decision.version} แล้ว`);
   } catch (error) {

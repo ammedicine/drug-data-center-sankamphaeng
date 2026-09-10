@@ -107,6 +107,111 @@ def read_json(path: Path) -> dict[str, Any]:
 # ------------------------------------------------------------------ agent bridge
 
 
+CONSOLE_LOG_NAME = "worker-console.log"
+"""Where the worker's stdout and stderr end up, under the agent's data folder."""
+
+CONSOLE_MAX_BYTES = 1_048_576
+"""Rotate at 1 MB. Small on purpose: everything here is also written,
+structured, to agent-<date>.log. What is only here is whatever the agent
+printed before its own logger existed."""
+
+CONSOLE_GENERATIONS = 3
+"""worker-console.log plus .1 .2 .3 - a hard ceiling of 4 MB, whatever the
+worker decides to print."""
+
+
+class ConsolePump(threading.Thread):
+    """
+    Reads the worker's console output continuously and writes a bounded copy.
+
+    Reading is the point. The tray used to hand the worker a pipe and never
+    read it, which on Windows holds about 4 KB before a synchronous write
+    blocks for ever - and Node writes to pipes synchronously. The worker then
+    sat in a kernel wait with no timers and no heartbeat, alive but stopped,
+    and the watchdog killed a healthy process every five minutes for eleven
+    hours. Handing it a plain file would also never block, but a file nothing
+    supervises grows without limit, and a clinic PC cannot afford that either.
+
+    So: drain always, write within a bound. If writing fails - a full disk, a
+    rotation that cannot rename, a virus scanner holding the file - the thread
+    keeps reading and throws the output away. Draining is what keeps the
+    worker alive; keeping a copy is only a convenience, and the convenience
+    must never be able to cost the worker.
+    """
+
+    def __init__(self, stream, path: Path) -> None:
+        super().__init__(name="sdc-console-pump", daemon=True)
+        self.stream = stream
+        self.path = path
+        self.written = 0
+        self.rotations = 0
+        self.discarding = False
+        self._sink = None
+        self._size = 0
+
+    def run(self) -> None:
+        try:
+            self._open()
+            for line in self.stream:
+                self._write(line)
+        except Exception:  # pragma: no cover - the stream closing is normal
+            pass
+        finally:
+            self._close()
+
+    # -- the bounded file ------------------------------------------------------
+    def _open(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._size = self.path.stat().st_size if self.path.exists() else 0
+            self._sink = self.path.open("a", encoding="utf-8", errors="replace")
+        except Exception:
+            self.discarding = True
+
+    def _close(self) -> None:
+        if self._sink:
+            try:
+                self._sink.close()
+            except Exception:
+                pass
+            self._sink = None
+
+    def _write(self, line: str) -> None:
+        self.written += len(line)
+        if self.discarding or not self._sink:
+            return
+        try:
+            if self._size >= CONSOLE_MAX_BYTES:
+                self._rotate()
+            self._sink.write(line)
+            self._sink.flush()
+            self._size += len(line)
+        except Exception:
+            # Whatever went wrong with the file, the stream still gets read.
+            self._close()
+            self.discarding = True
+
+    def _rotate(self) -> None:
+        """
+        worker-console.log -> .1, .1 -> .2, .2 -> .3, and .3 is gone.
+
+        Renaming needs the file closed, which is why this thread is the only
+        writer: Windows refuses to rename a file another handle still holds.
+        """
+        self._close()
+        oldest = self.path.with_suffix(self.path.suffix + f".{CONSOLE_GENERATIONS}")
+        if oldest.exists():
+            oldest.unlink()
+        for generation in range(CONSOLE_GENERATIONS - 1, 0, -1):
+            source = self.path.with_suffix(self.path.suffix + f".{generation}")
+            if source.exists():
+                source.replace(self.path.with_suffix(self.path.suffix + f".{generation + 1}"))
+        self.path.replace(self.path.with_suffix(self.path.suffix + ".1"))
+        self._sink = self.path.open("a", encoding="utf-8", errors="replace")
+        self._size = 0
+        self.rotations += 1
+
+
 @dataclass
 class CommandResult:
     ok: bool
@@ -119,6 +224,7 @@ class AgentBridge:
     def __init__(self) -> None:
         self.root = app_dir()
         self.background: subprocess.Popen[str] | None = None
+        self.console: ConsolePump | None = None
         self._background_started: datetime | None = None
 
     # -- how to invoke the agent ------------------------------------------------
@@ -175,51 +281,32 @@ class AgentBridge:
         child["AGENT_DATA_DIR"] = str(data_dir())
         return child
 
-    def _popen(self, args: list[str], console: Path | None = None) -> subprocess.Popen[str]:
+    def _popen(self, args: list[str]) -> subprocess.Popen[str]:
         """
         Starts the agent CLI.
 
-        `console` decides where the child's console output goes, and that
-        choice is the difference between a worker that runs for months and one
-        that stops dead.
-
-        A short command is read to completion by communicate(), so a pipe is
-        right for it. The always-on worker is not read by anybody, and an
-        unread pipe on Windows holds about 4 KB - measured on this machine, a
-        Node child blocked permanently after 3,900 bytes. Node writes to a pipe
-        synchronously, so the block is not backpressure the event loop can work
-        around: timers stop, the heartbeat stops, and the tray's watchdog then
-        kills a worker that was never actually unwell. An ordinary sync writes
-        about 592 bytes and survives; the historical repair wrote 4,038 and did
-        not.
-
-        So the worker is handed a real file instead. A file handle cannot fill
-        up, the operating system does the writing, and anything printed before
-        the agent's own logger exists - a module that fails to load, a runtime
-        that will not start - is still on disk afterwards, which DEVNULL would
-        have thrown away. One file per day, beside the logs the agent already
-        writes.
+        Short commands are read to completion by communicate(). The always-on
+        worker is drained by ConsolePump instead - see start_background. What
+        must never happen again is a pipe nobody reads: an unread pipe on
+        Windows holds about 4 KB, Node writes to one synchronously, and the
+        worker parks in a kernel wait for ever. No timers, no heartbeat, no
+        CPU, process still alive, and a watchdog killing something that was
+        never unwell - every five minutes, for eleven hours, on the canary.
+        Measured here, the child blocked after 3,900 bytes; an ordinary cycle
+        prints 592 and the historical repair printed 4,038.
         """
         creation = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        sink = open(console, "a", encoding="utf-8", errors="replace") if console else None
-        try:
-            return subprocess.Popen(
-                self._command(args),
-                cwd=str(self.root),
-                env=self._environment(),
-                stdout=sink if sink else subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=creation,
-            )
-        finally:
-            # The child inherited its own duplicate of the handle, so this copy
-            # has done its job. Closing it here means no handle to track, and
-            # none to leak when a worker is restarted.
-            if sink:
-                sink.close()
+        return subprocess.Popen(
+            self._command(args),
+            cwd=str(self.root),
+            env=self._environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation,
+        )
 
     def run_with_input(self, args: list[str], payload: str, timeout: int = 120) -> CommandResult:
         """
@@ -312,27 +399,21 @@ class AgentBridge:
 
     # -- the always-on background worker ---------------------------------------
     def worker_console_log(self) -> Path:
-        """
-        Where the worker's console output is parked.
-
-        Dated like the agent's own log so it inherits the same shape and stays
-        small: everything here is also written, structured, to
-        agent-<date>.log. What is only here is whatever the agent printed
-        before its logger existed, which is exactly what is worth having when a
-        worker will not start at all.
-        """
+        """The bounded file ConsolePump writes, and the .1 .2 .3 beside it."""
         folder = data_dir() / "logs"
         folder.mkdir(parents=True, exist_ok=True)
-        return folder / f"worker-console-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log"
+        return folder / CONSOLE_LOG_NAME
 
     def start_background(self) -> str | None:
         """Starts the worker; returns an error message instead of raising."""
         if self.background and self.background.poll() is None:
             return None
         try:
-            # A file, never a pipe: nothing in this process reads the worker's
-            # output, and an unread pipe stops the worker dead. See _popen.
-            self.background = self._popen(["run"], console=self.worker_console_log())
+            self.background = self._popen(["run"])
+            # Started immediately and never left unattached: the pipe above is
+            # only safe for as long as somebody is emptying it.
+            self.console = ConsolePump(self.background.stdout, self.worker_console_log())
+            self.console.start()
             self._background_started = datetime.now(timezone.utc)
             return None
         except Exception as error:
@@ -387,12 +468,18 @@ class AgentBridge:
             pass
 
     def stop_background(self) -> None:
+        # Still only this tray's own child, by the handle it was started with.
         if self.background and self.background.poll() is None:
             self.background.terminate()
             try:
                 self.background.wait(timeout=10)
             except subprocess.TimeoutExpired:  # pragma: no cover
                 self.background.kill()
+        # The pump ends on its own when the stream closes; it is a daemon
+        # thread, so a slow one can never hold the window open either.
+        if self.console:
+            self.console.join(timeout=5)
+            self.console = None
         self.background = None
 
     def background_running(self) -> bool:

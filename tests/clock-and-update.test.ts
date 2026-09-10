@@ -14,7 +14,7 @@
  * this file is about refusing to run the wrong file.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -548,6 +548,181 @@ describe("an update found while a sync is running", () => {
     expect(status.timeSyncTaskLastResult).toMatch(/ as=\S+/);
     // Same field the ordinary reading writes, so the screen is unaffected.
     expect(status.lastClockCheckAt).toBeTruthy();
+  }, 180_000);
+});
+
+/**
+ * The whole update, end to end, against a real executable.
+ *
+ * Everything above tests the pieces. This runs the actual `agent auto-update`
+ * command against a local manifest and a file that really is launched, so the
+ * exit code is a number Windows produced rather than one a mock returned.
+ *
+ * The "installer" is a compiled stub that records the arguments it was given
+ * and exits with whatever this file asks for. It never touches this machine's
+ * installation, and no GitHub Release has to exist for any of it.
+ */
+describe("the update a clinic would actually get", () => {
+  let stub: Buffer | null = null;
+  let marker = "";
+
+  beforeAll(() => {
+    const csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+    if (process.platform !== "win32" || !existsSync(csc)) return;
+    const dir = mkdtempSync(resolve(tmpdir(), "sdc-stub-"));
+    const source = join(dir, "stub.cs");
+    const exe = join(dir, "stub.exe");
+    writeFileSync(
+      source,
+      [
+        "using System; using System.IO;",
+        "class Stub { static int Main(string[] args) {",
+        "  var m = Environment.GetEnvironmentVariable(\"STUB_MARKER\");",
+        "  if (!string.IsNullOrEmpty(m)) File.AppendAllText(m, string.Join(\" \", args));",
+        "  var c = Environment.GetEnvironmentVariable(\"STUB_EXIT\");",
+        "  return string.IsNullOrEmpty(c) ? 0 : int.Parse(c);",
+        "} }",
+      ].join("\n"),
+      "utf8",
+    );
+    const built = spawnSync(csc, ["/nologo", "/target:exe", `/out:${exe}`, source], {
+      encoding: "utf8",
+    });
+    if (built.status === 0 && existsSync(exe)) stub = readFileSync(exe);
+  }, 120_000);
+
+  const enrol = () =>
+    writeFileSync(
+      join(workDir, "agent.config.json"),
+      JSON.stringify({
+        agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl,
+        facilityId: "f", expectedPcucode: "T0001", installationId: "i",
+        syncIntervalMinutes: 60, reprocessDays: 7,
+      }),
+      "utf8",
+    );
+
+  const offer = (overrides: Record<string, unknown> = {}) => {
+    central.asset = Buffer.from(stub ?? []);
+    central.manifest = {
+      available: true,
+      version: "9.9.9",
+      assetName: "SDCAgent-Setup-9.9.9.exe",
+      size: central.asset.length,
+      sha256: sha256(central.asset),
+      autoInstall: true,
+      ...overrides,
+    };
+  };
+
+  beforeEach(() => {
+    marker = join(workDir, "launched.txt");
+    process.env.STUB_MARKER = marker;
+    delete process.env.STUB_EXIT;
+  });
+
+  afterEach(() => {
+    delete process.env.STUB_MARKER;
+    delete process.env.STUB_EXIT;
+  });
+
+  it("checks, downloads, verifies and runs it - exit code 0", async () => {
+    if (!stub) return;
+    const { writeStatus, loadStatus } = await configModule();
+    enrol();
+    offer();
+    writeStatus({ syncPhase: "IDLE" });
+
+    await runCli(["auto-update"], workDir);
+
+    // It fetched the manifest, decided 9.9.9 beats this build, downloaded
+    // once, and checked what it got before running anything.
+    expect(central.downloads).toBe(1);
+    // Then it really launched it, with the arguments the elevated path uses -
+    // and without /SUPPRESSMSGBOXES, which once answered Inno's own questions
+    // with Cancel three times in a row.
+    const launched = readFileSync(marker, "utf8");
+    expect(launched).toContain("/VERYSILENT");
+    expect(launched).toContain("/NORESTART");
+    expect(launched).toContain("/LOG=");
+    expect(launched).not.toContain("/SUPPRESSMSGBOXES");
+
+    const status = loadStatus();
+    expect(status.autoUpdateTaskLastResult).toMatch(/INSTALLED version=9\.9\.9/);
+    expect(status.updateState).toBe("READY");
+    expect(status.updateDetail).toBe("ติดตั้งแล้ว รอเริ่มโปรแกรมใหม่");
+
+    // Nothing half-written left behind for a later run to pick up.
+    const updates = join(workDir, "updates");
+    const leftovers = existsSync(updates) ? readdirSync(updates) : [];
+    expect(leftovers.filter((name) => name.endsWith(".part"))).toEqual([]);
+  }, 180_000);
+
+  it("a file whose hash is wrong is never launched", async () => {
+    if (!stub) return;
+    const { writeStatus, loadStatus } = await configModule();
+    enrol();
+    // The centre - or something pretending to be it - offers a hash that does
+    // not belong to the bytes it serves. HTTPS proves who sent the file, not
+    // that the file is the one that was published.
+    offer({ sha256: "0".repeat(64) });
+    writeStatus({ syncPhase: "IDLE" });
+
+    await runCli(["auto-update"], workDir);
+
+    expect(central.downloads).toBe(1);
+    // The only assertion that really matters here.
+    expect(existsSync(marker)).toBe(false);
+    expect(loadStatus().updateState).toBe("FAILED");
+    // And the file it could not vouch for is gone, not left where the next
+    // run - or anything else - could execute it.
+    const updates = join(workDir, "updates");
+    const kept = existsSync(updates) ? readdirSync(updates) : [];
+    expect(kept.filter((name) => name.endsWith(".exe"))).toEqual([]);
+  }, 180_000);
+
+  it("an installer that refuses reports the number it refused with", async () => {
+    if (!stub) return;
+    const { writeStatus, loadStatus } = await configModule();
+    enrol();
+    offer();
+    writeStatus({ syncPhase: "IDLE" });
+    // 1641 is a real Inno/MSI code. The point is the number survives.
+    process.env.STUB_EXIT = "1641";
+
+    await runCli(["auto-update"], workDir);
+
+    expect(readFileSync(marker, "utf8")).toContain("/VERYSILENT");
+    const status = loadStatus();
+    expect(status.updateState).toBe("FAILED");
+    expect(status.updateDetail).toContain("1641");
+    expect(status.autoUpdateTaskLastResult).toMatch(/FAILED version=9\.9\.9/);
+    expect(status.autoUpdateTaskLastResult).toContain("1641");
+  }, 180_000);
+
+  it("will not start an installer while a sync is running", async () => {
+    if (!stub) return;
+    const { writeStatus, loadStatus } = await configModule();
+    enrol();
+    offer();
+    writeStatus({ syncPhase: "UPLOADING" });
+
+    await runCli(["auto-update"], workDir);
+
+    // Not downloaded, not launched, and it said why rather than going quiet.
+    expect(central.downloads).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    const status = loadStatus();
+    expect(status.updateState).toBe("READY");
+    expect(status.updateDetail).toBe("รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง");
+    expect(status.autoUpdateTaskLastResult).toMatch(/WAITING_FOR_SYNC/);
+
+    // One check, one decision. A run that finds a busy agent must not sit
+    // there retrying - the next scheduled check is hours away, and fifteen
+    // clinics doing that at once is a queue nobody asked for.
+    await runCli(["auto-update"], workDir);
+    expect(central.downloads).toBe(0);
+    expect(existsSync(marker)).toBe(false);
   }, 180_000);
 });
 

@@ -511,8 +511,11 @@ def check_worker_survives_its_own_output(app) -> int:
     import tempfile
     import time as _time
 
-    LINES = 20_000
-    WIDTH = 100  # bytes per line -> ~2 MB on stdout, plus ~200 KB on stderr
+    # ~6 MB, deliberately past the 4 MB ceiling: enough to force several
+    # rotations and prove the oldest generation is actually deleted rather
+    # than merely renamed for ever.
+    LINES = 60_000
+    WIDTH = 100
 
     node = None
     bundled = app.app_dir() / "runtime" / "node.exe"
@@ -562,21 +565,45 @@ def check_worker_survives_its_own_output(app) -> int:
         _time.sleep(0.25)
     elapsed = _time.time() - started
     finished = child.poll()
-    console = bridge.worker_console_log()
-    written = console.stat().st_size if console.exists() else 0
     reached = progress.read_text(encoding="utf-8") if progress.exists() else "(never wrote)"
+    pump = bridge.console
+    drained = pump.written if pump else 0
+    rotations = pump.rotations if pump else 0
+    discarding = pump.discarding if pump else True
     bridge.stop_background()
 
+    console = bridge.worker_console_log()
+    folder = console.parent
+    kept = sorted(p for p in folder.glob(console.name + "*"))
+    total = sum(p.stat().st_size for p in kept)
+    ceiling = app.CONSOLE_MAX_BYTES * (app.CONSOLE_GENERATIONS + 1)
+
     print(f"worker output  : {LINES} บรรทัด (~{LINES * WIDTH // 1024} KB) ใน {elapsed:.1f}s")
-    print(f"                 exit={finished} progress={reached} console log={written} bytes")
+    print(f"                 exit={finished} progress={reached} drained={drained} bytes")
+    print(f"                 rotations={rotations} files={len(kept)} on disk={total} bytes")
+    print(f"                 ceiling={ceiling} bytes ({app.CONSOLE_MAX_BYTES} x {app.CONSOLE_GENERATIONS} + live)")
     if finished is None:
         print("   ! ตัวทำงานค้างเพราะ output ของตัวเอง (pipe deadlock กลับมาแล้ว)")
         return 1
     if reached != "done":
         print(f"   ! ตัวทำงานหยุดกลางทางที่ {reached}")
         return 1
-    if written < LINES * WIDTH:
-        print(f"   ! console log สั้นกว่าที่เขียนจริง ({written} bytes)")
+    if discarding:
+        print("   ! เขียนไฟล์ console ไม่ได้ (ยังระบายท่อต่อ แต่หลักฐานหาย)")
+        return 1
+    if drained < LINES * WIDTH:
+        print(f"   ! ระบายท่อได้ไม่ครบ ({drained} bytes)")
+        return 1
+    # The whole point of the bound: this run printed about 2 MB into a 1 MB
+    # file, so it must have rotated, and what is left on disk must fit.
+    if rotations < app.CONSOLE_GENERATIONS + 1:
+        print(f"   ! หมุนไฟล์แค่ {rotations} ครั้ง ยังไม่ได้พิสูจน์ว่าไฟล์เก่าถูกลบ")
+        return 1
+    if total > ceiling:
+        print(f"   ! ใช้พื้นที่เกินเพดาน ({total} > {ceiling})")
+        return 1
+    if len(kept) > app.CONSOLE_GENERATIONS + 1:
+        print(f"   ! เก็บไฟล์เก่าไว้มากเกินไป ({len(kept)} ไฟล์)")
         return 1
 
     # The control: the shape this defect had. It must still deadlock, or this
