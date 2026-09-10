@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { join, resolve } from "node:path";
 
 import type { DrugUsageRecord } from "@shared/canonical";
+import { isBelowSyncFloor } from "@shared/sync-control";
 
 export type ChunkStatus = "PENDING" | "FAILED";
 
@@ -48,6 +49,23 @@ export class OfflineQueue {
 
   private failedDir(): string {
     return join(this.root, "failed");
+  }
+
+  /**
+   * Rows the centre will no longer take, kept rather than thrown away.
+   *
+   * When a สถานบริการ's collection floor moves forward, chunks already on disk
+   * can contain dispensing from before it. Uploading them would put back
+   * exactly what the floor exists to keep out; deleting them would destroy
+   * local work with nothing to show for it. So they are set aside, where an
+   * operator can see how much there was and the rows are still readable if the
+   * floor is ever lowered again.
+   *
+   * This is sync-derived local state - a copy of what JHCIS already holds -
+   * and nothing here is authoritative. JHCIS is never touched.
+   */
+  private quarantineDir(): string {
+    return join(this.root, "quarantined");
   }
 
   private pathFor(status: ChunkStatus, batchRef: string, sequence: number): string {
@@ -105,6 +123,60 @@ export class OfflineQueue {
     writeFileSync(temp, JSON.stringify(payload), "utf8");
     renameSync(temp, target);
     if (permanent && target !== chunk.file) rmSync(chunk.file, { force: true });
+  }
+
+  /**
+   * Removes records below the floor from a chunk, keeping them on disk.
+   *
+   * Returns how many were set aside. A chunk left with nothing stays out of
+   * the pending queue entirely; one with rows on both sides of the floor is
+   * rewritten to hold only what may still be sent, so a partial chunk is never
+   * uploaded whole and never silently trimmed without a record of it.
+   */
+  quarantineBelowFloor(chunk: QueuedChunk, floor: string): { kept: number; setAside: number } {
+    const keep = chunk.records.filter((r) => !isBelowSyncFloor(r.usageDate, floor));
+    const drop = chunk.records.filter((r) => isBelowSyncFloor(r.usageDate, floor));
+    if (!drop.length) return { kept: keep.length, setAside: 0 };
+
+    ensure(this.quarantineDir());
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const parked = join(
+      this.quarantineDir(),
+      `${chunk.batchRef}__${String(chunk.sequence).padStart(6, "0")}__${stamp}.json`,
+    );
+    const temp = `${parked}.tmp`;
+    writeFileSync(
+      temp,
+      JSON.stringify({
+        batchRef: chunk.batchRef,
+        sequence: chunk.sequence,
+        pcucode: chunk.pcucode,
+        sourceVersion: chunk.sourceVersion,
+        floor,
+        parkedAt: new Date().toISOString(),
+        records: drop,
+      }),
+      "utf8",
+    );
+    renameSync(temp, parked);
+
+    if (!keep.length) {
+      rmSync(chunk.file, { force: true });
+    } else {
+      const target = chunk.file;
+      const rewrite = `${target}.tmp`;
+      const { file: _file, ...rest } = chunk;
+      writeFileSync(rewrite, JSON.stringify({ ...rest, records: keep }), "utf8");
+      renameSync(rewrite, target);
+    }
+    return { kept: keep.length, setAside: drop.length };
+  }
+
+  /** How many chunks are parked below the floor, for the screen. */
+  quarantinedCount(): number {
+    const dir = this.quarantineDir();
+    if (!existsSync(dir)) return 0;
+    return readdirSync(dir).filter((f) => f.endsWith(".json")).length;
   }
 
   /**

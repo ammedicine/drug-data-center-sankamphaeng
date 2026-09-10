@@ -387,6 +387,26 @@ export class SyncRunner {
         });
         break;
       }
+      // Rows from before this สถานบริการ's collection floor never go up.
+      //
+      // A chunk written before the floor moved can still be sitting here, and
+      // sending it would put back exactly what the floor exists to keep out.
+      // The rows are set aside rather than deleted: local sync-derived work,
+      // still readable if the floor is ever lowered, and JHCIS untouched.
+      const floor = syncStartDate();
+      const parked = this.queue.quarantineBelowFloor(chunk, floor);
+      if (parked.setAside) {
+        log.warn("พักข้อมูลที่เก่ากว่าวันที่เริ่มเก็บข้อมูลไว้ ไม่ส่งขึ้นศูนย์กลาง", {
+          batchRef: chunk.batchRef,
+          sequence: chunk.sequence,
+          floor,
+          setAside: parked.setAside,
+          kept: parked.kept,
+        });
+        if (!parked.kept) continue;
+        chunk.records = chunk.records.filter((r) => r.usageDate >= floor);
+      }
+
       const uploadStartedAt = Date.now();
       try {
         const result = await withRetry(
