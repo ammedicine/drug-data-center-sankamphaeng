@@ -408,9 +408,24 @@ export async function completeBatch(input: {
         // request to re-read one week in July would drag the whole autumn back
         // through the pipe. Purging is the only thing that moves this
         // backwards, and it does so deliberately.
+        // Forward only, and never past today.
+        //
+        // GREATEST alone made this a ratchet in one direction, which is right
+        // for a manual back-fill reporting an older date - but it also meant a
+        // single future value could never be corrected. 05957 arrived here
+        // with 2026-09-30 while the newest dispensing row was the 10th,
+        // written by an agent repairing the current month, and a watermark in
+        // the future is a claim to have verified days that have not happened.
+        //
+        // LEAST against the server's own date puts a ceiling on what an agent
+        // can assert. The agent clamps too; this is the half that does not
+        // depend on which version the agent is running.
         ...(input.lastVisitDate
           ? {
-              lastSyncedVisitDate: sql`GREATEST(COALESCE(${agents.lastSyncedVisitDate}, '1900-01-01'), ${input.lastVisitDate})`,
+              lastSyncedVisitDate: sql`LEAST(
+                GREATEST(COALESCE(${agents.lastSyncedVisitDate}, '1900-01-01'), ${input.lastVisitDate}),
+                UTC_DATE()
+              )`,
             }
           : {}),
         // Clear the requested window only when this batch is the one that read

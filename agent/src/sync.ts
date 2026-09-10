@@ -127,6 +127,39 @@ export class ManualRangeRefusedError extends Error {
   }
 }
 
+/**
+ * A date that cannot be later than today.
+ *
+ * The watermark means "everything up to here has been checked", so a value in
+ * the future is a claim about days that have not happened. Date-only
+ * throughout, comparing the ISO strings the rest of the pipeline already uses
+ * - no timezone conversion, because a usage date is a calendar day at a
+ * สถานบริการ and not an instant.
+ */
+export function clampToToday(value: string): string {
+  const now = today();
+  return value > now ? now : value;
+}
+
+/**
+ * Repairs a watermark that is already in the future.
+ *
+ * 05957 is carrying 2026-09-30 right now, written by a version that had no
+ * ceiling, and it must recover without anybody editing a file by hand. Only
+ * sync-derived state is touched: never JHCIS, never the credential, never the
+ * enrolment or the identity of the agent or its สถานบริการ.
+ */
+export function normalizeFutureWatermark(): string | null {
+  const state = loadState();
+  const stored = state.lastSyncedVisitDate;
+  if (!stored) return null;
+  const capped = clampToToday(stored);
+  if (capped === stored) return null;
+  log.warn("FUTURE_WATERMARK_NORMALIZED", { stored, normalized: capped, today: today() });
+  saveState({ ...state, lastSyncedVisitDate: capped });
+  return capped;
+}
+
 /** Throws the refusal when an operator's range starts before the floor. */
 function refuseManualRangeBeforeFloor(from: string, floor: string): void {
   const refusal = checkManualRange(from, floor);
@@ -198,6 +231,10 @@ export async function resolveRange(
    */
   floor: string = syncStartDate(),
 ): Promise<{ from: string; to: string }> {
+  // A watermark from the future is repaired before it is used to plan
+  // anything, so a machine that already holds one recovers on its next run
+  // rather than waiting for the calendar.
+  normalizeFutureWatermark();
   const state = loadState();
   const watermark = state.lastSyncedVisitDate;
   const atOrAfterFloor = (from: string) => applySyncStartFloor(from, floor);
@@ -923,7 +960,21 @@ export class SyncRunner {
       // Only when the run succeeded: a failed or partial run has verified
       // nothing, and `complete` already carries the queue and the post-sync
       // count comparison.
-      const verifiedThrough = range === requested ? range.to : requested.to;
+      // Never past today, whatever the range asked for.
+      //
+      // `agent verify` repairs a month at a time, so repairing the current
+      // month asks for 2026-09-01..2026-09-30 and a completed run would report
+      // the 30th as verified while standing on the 10th. Production 05957 did
+      // exactly that. The next incremental run then computed its start from
+      // the watermark and its end from the newest row that exists, producing
+      // from 2026-09-23 to 2026-09-10 - a range that selects nothing - so the
+      // สถานบริการ would have collected nothing at all until October.
+      //
+      // Today is the honest ceiling: a day that has not happened cannot have
+      // been verified. Deliberately not MAX(usageDate), because a day with no
+      // dispensing is still a day that was checked and found empty, and using
+      // the newest row would stall the watermark on quiet สถานบริการ.
+      const verifiedThrough = clampToToday(range === requested ? range.to : requested.to);
       await withRetry(
         () =>
           this.client.completeSync({
@@ -1177,13 +1228,17 @@ export class SyncRunner {
             status: "COMPLETED",
             recordsRead: 0,
             recordsSent: 0,
-            lastVisitDate: range.to,
+            lastVisitDate: clampToToday(range.to),
             errorMessage: null,
           }),
         { label: "verified range complete" },
       );
       const state = loadState();
-      saveState({ ...state, lastSyncedVisitDate: range.to, lastSyncAt: new Date().toISOString() });
+      saveState({
+        ...state,
+        lastSyncedVisitDate: clampToToday(range.to),
+        lastSyncAt: new Date().toISOString(),
+      });
       log.info("บันทึกว่าตรวจครบถึงวันที่แล้ว", { through: range.to, batchRef });
     } catch (error) {
       log.warn("บันทึกผลการตรวจกับศูนย์กลางไม่สำเร็จ จะตรวจใหม่รอบหน้า", {
