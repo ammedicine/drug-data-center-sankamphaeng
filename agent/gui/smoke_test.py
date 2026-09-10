@@ -288,6 +288,41 @@ def check(theme) -> list[str]:
     expect(restart, "a worker that stopped ticking should be restarted")
     expect("ไม่ตอบสนอง" in why, f"the reason should say what happened, got {why}")
 
+    # CASE 26: a newborn worker is not judged by the dead one's last round.
+    #
+    # status.json outlives the process that wrote it. Seconds after the v1.1.7
+    # install the file still held the previous worker's tick - 180.3 seconds
+    # old - and the worker that had just been started was killed for it, one
+    # second into its life. The grace was there; it only applied when the file
+    # had no timestamp at all, which is never true on a machine that has run
+    # before.
+    just_born = dict(
+        should_run=True, now=now, last_checked=now - timedelta(seconds=30), restarts=[],
+    )
+    previous_worker_tick = (now - timedelta(seconds=180, milliseconds=334)).isoformat()
+    for age in (1, 5, 20, 60):
+        restart, why = theme.watchdog_decision(
+            child_running=True, last_tick=previous_worker_tick,
+            first_seen=now - timedelta(seconds=age), **just_born,
+        )
+        expect(not restart, f"a worker {age}s old must not be killed for the previous one's tick, got {why}")
+
+    # And the stale detection this must not weaken: a worker that reported, then
+    # stopped, is still restarted - that is the whole reason the watchdog exists.
+    restart, why = theme.watchdog_decision(
+        child_running=True, last_tick=(now - timedelta(seconds=400)).isoformat(),
+        first_seen=now - timedelta(hours=2), **just_born,
+    )
+    expect(restart, "a long-running worker whose own rounds stopped must still be restarted")
+
+    # A worker that never reports at all is still restarted once its own grace
+    # has run out, so a permanently mute worker cannot hide behind this.
+    restart, why = theme.watchdog_decision(
+        child_running=True, last_tick=None,
+        first_seen=now - timedelta(seconds=theme.WATCHDOG_GRACE_SECONDS + 10), **just_born,
+    )
+    expect(restart, "a worker that never ticks must be restarted after its grace expires")
+
     # CASE 11: it exited. Nothing else watches for this - v1.1.2 assumed the
     # start path would, and no start path runs while the tray simply sits there.
     restart, why = theme.watchdog_decision(child_running=False, last_tick=dead_tick, **healthy)

@@ -168,9 +168,22 @@ def watchdog_decision(
         return True, "ตัวทำงานเบื้องหลังหยุดไปเอง"
 
     stamp = parse_iso(last_tick)
-    if stamp is None:
-        # No stamp at all: either brand new, or an older worker that never
-        # reports one. Both deserve room rather than a restart.
+    # A stamp older than this worker was written by the one before it.
+    #
+    # status.json outlives the process that wrote it, so after any restart -
+    # an upgrade, a crash, a watchdog kill - the file still names the dead
+    # worker's last round. Judging a newborn by it kills it before it has had
+    # any chance to tick. Production did exactly that seconds after the v1.1.7
+    # install: a stamp 180.3 seconds old, a worker one second into its life,
+    # and a restart it had done nothing to deserve.
+    #
+    # The grace belongs to the current worker, not to whether the file happens
+    # to contain a timestamp. Once this worker has reported once, its stamp is
+    # newer than its own start and ordinary stale detection resumes untouched.
+    unheard = stamp is None or (first_seen is not None and stamp < first_seen)
+    if unheard:
+        # Nothing from THIS worker yet: either brand new, or an older worker
+        # that never reports one. Both deserve room rather than a restart.
         started = first_seen or now
         if (now - started).total_seconds() < WATCHDOG_GRACE_SECONDS:
             return False, "เพิ่งเริ่มทำงาน"
