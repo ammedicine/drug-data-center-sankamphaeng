@@ -560,7 +560,8 @@ def main() -> int:
     if not result.ok:
         return 1
 
-    return check_worker_survives_its_own_output(app)
+    outcome = check_worker_survives_its_own_output(app)
+    return outcome or check_installer_shutdown_is_ownership_aware()
 
 
 def check_worker_survives_its_own_output(app) -> int:
@@ -704,6 +705,86 @@ def check_worker_survives_its_own_output(app) -> int:
         print("   ! การทดสอบนี้ไม่ได้พิสูจน์อะไร เพราะ pipe ที่ไม่มีคนอ่านก็ไม่ค้าง")
         return 1
     return 0
+
+
+def check_installer_shutdown_is_ownership_aware() -> int:
+    """
+    The installer must close its own Agent, and only its own.
+
+    v1.1.7 needed a person twice: the "please close all instances" dialog, and
+    then an orphan worker still holding runtime\node.exe. Neither is
+    acceptable for the SYSTEM auto-update path, where nobody is at the machine
+    at four in the morning - one dialog stops the whole district's upgrade.
+
+    Read from the shipped files rather than described in prose, because the two
+    settings that caused the dialog are one line each and easy to reintroduce.
+    """
+    iss_raw = (HERE.parent / "installer" / "sdc-agent.iss").read_text(encoding="utf-8")
+    ps_raw = (HERE.parent / "installer" / "stop-owned-agent.ps1").read_text(encoding="utf-8")
+
+    # Scan the code, not the prose. Both files explain at length why taskkill
+    # and image-name matching are forbidden, and a check that fails on the
+    # comment describing the rule would be a check nobody could satisfy.
+    def strip_comments(text: str, *markers: str) -> str:
+        out = []
+        for line in text.splitlines():
+            body = line
+            for marker in markers:
+                # Inno's ; comments and Pascal's // both start a line here;
+                # PowerShell's # likewise. None of them appear mid-statement
+                # in these two files.
+                stripped = body.lstrip()
+                if stripped.startswith(marker):
+                    body = ""
+                    break
+            if body.strip():
+                out.append(body)
+        return "\n".join(out)
+
+    iss = strip_comments(iss_raw, ";", "//")
+    ps = strip_comments(ps_raw, "#")
+    failures: list[str] = []
+
+    def expect(condition: bool, message: str) -> None:
+        if not condition:
+            failures.append(message)
+
+    # AppMutex makes Inno check before [Code] runs, so the dialog appears and
+    # our shutdown never gets a chance. It must not come back.
+    expect(
+        not re.search(r"^\s*AppMutex\s*=", iss, re.M),
+        "AppMutex must not be declared - it shows the close-all-instances dialog "
+        "before any of our code can close the agent",
+    )
+    # CloseApplications=yes adds Inno's own file-in-use dialog on top.
+    expect(
+        re.search(r"^\s*CloseApplications\s*=\s*no\s*$", iss, re.M) is not None,
+        "CloseApplications must be no - the installer closes its own agent by ownership",
+    )
+    # Never by process name.
+    expect(
+        "/IM " not in iss,
+        "the installer must not match processes by image name",
+    )
+    expect("taskkill" not in ps.lower(), "the shutdown script must not use taskkill")
+    expect("/IM" not in ps, "the shutdown script must not match by image name")
+
+    # Ownership evidence, graceful-first, bounded, then forced.
+    expect("ExecutablePath.StartsWith" in ps, "ownership must be established by executable path")
+    expect("worker.lock" in ps, "worker.lock must be used to catch an orphaned worker")
+    expect("dataDir" in ps, "the worker.lock dataDir must be cross-checked")
+    expect("CloseMainWindow" in ps, "a graceful close must be attempted first")
+    expect("TimeoutSec" in ps, "the wait for a graceful exit must be bounded")
+    expect("Stop-Process -Id" in ps, "force must target a specific PID, never a name")
+    expect(
+        "ExtractTemporaryFile('stop-owned-agent.ps1')" in iss,
+        "the installer must extract and run the ownership-aware shutdown script",
+    )
+
+    print("installer close :", "ownership-aware" if not failures else f"ไม่ผ่าน {len(failures)} ข้อ")
+    for failure in failures:
+        print("   !", failure)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

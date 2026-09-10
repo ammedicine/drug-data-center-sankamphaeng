@@ -37,10 +37,18 @@ VersionInfoVersion={#AppVersion}
 ; AppId เดิม -> Windows รู้ว่าเป็นโปรแกรมตัวเดียวกัน ไม่ขึ้นรายการซ้ำใน Programs and Features
 ; ห้ามเปลี่ยน AppId เด็ดขาด ไม่งั้นเวอร์ชันเก่าจะค้างอยู่คู่กับเวอร์ชันใหม่
 SetupMutex=SDCAgentSetupMutex
-AppMutex=SDCAgentRunningMutex
-; ให้ Restart Manager ปิดโปรแกรมที่ล็อกไฟล์ใน {app} ไว้ และไม่ต้องเปิดคืนหลังติดตั้ง
-; (เปิดคืนเองผ่าน [Run] เพื่อให้ได้ไบนารีตัวใหม่แน่นอน)
-CloseApplications=yes
+; ไม่ประกาศ AppMutex โดยเจตนา
+;
+; AppMutex ทำให้ Inno ตรวจ mutex **ก่อน** โค้ดใน [Code] จะได้ทำงาน แล้วขึ้นกล่อง
+; "Setup has detected that ... is currently running. Please close all instances"
+; รอคนกด — StopRunningAgent ใน PrepareToInstall จึงไม่มีโอกาสได้ปิดให้เลย
+;
+; เส้นทางอัปเดตอัตโนมัติที่รันเป็น SYSTEM ไม่มีคนอยู่หน้าเครื่อง กล่องนี้กล่องเดียว
+; ทำให้การอัปเกรดทั้งอำเภอค้าง (v1.1.7 เจอมาแล้วสองครั้ง ต้องให้เจ้าของกดเอง)
+;
+; ตัวติดตั้งจึงปิด Agent ของตัวเองด้วย stop-owned-agent.ps1 ซึ่งเลือกเป้าหมาย
+; จาก "เจ้าของจริง" (path ใต้ {app} + worker.lock ที่ dataDir ตรงกัน) ไม่ใช่จากชื่อ process
+CloseApplications=no
 RestartApplications=no
 
 [Languages]
@@ -57,6 +65,9 @@ Source: "{#BuildDir}\app\agent.js";     DestDir: "{app}\app"; Flags: ignoreversi
 Source: "{#BuildDir}\runtime\node.exe"; DestDir: "{app}\runtime"; Flags: ignoreversion
 Source: "..\.env.example";              DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist
 Source: "..\..\docs\AGENT.md";          DestDir: "{app}"; DestName: "คู่มือการใช้งาน.md"; Flags: ignoreversion skipifsourcedoesntexist
+; สคริปต์ปิด Agent ของการติดตั้งนี้ — dontcopy: ใช้ตอนติดตั้งเท่านั้น ไม่ต้องวางลงเครื่อง
+; เก็บเป็นไฟล์จริงเพื่ออ่าน/ทดสอบได้ ไม่ต้องฝัง PowerShell ไว้ในสตริง Pascal
+Source: "stop-owned-agent.ps1";         DestDir: "{app}"; Flags: dontcopy
 
 [Dirs]
 ; ข้อมูลใช้งาน (คิว/บันทึก/credential) อยู่นอก Program Files เพื่อให้เขียนได้โดยไม่ต้องเป็นผู้ดูแล
@@ -145,26 +156,27 @@ var
   code: Integer;
   script: String;
 begin
-  // /T ปิดลูกทั้งหมดด้วย ซึ่งก็คือ node.exe ที่หน้าจอสั่งให้ซิงก์อยู่
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM {#AppExe}',
-       '', SW_HIDE, ewWaitUntilTerminated, code);
-  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "{#AppNameEn}" /F',
+  // ปิด Agent ของการติดตั้งนี้เอง โดยไม่ต้องให้คนกดอะไร
+  //
+  // เดิมใช้ taskkill /F /T /IM SDCAgent.exe ซึ่งเลือกเป้าหมายจาก**ชื่อ process**
+  // และยังต้องพึ่ง AppMutex/Restart Manager มาช่วยอีกชั้น ผลคือ:
+  //   1. Inno ขึ้นกล่อง "please close all instances" ก่อนโค้ดนี้จะได้ทำงาน
+  //   2. ตัวทำงานที่กำพร้า (หน้าจอตายแล้วแต่ node.exe ยังถือ runtime\node.exe อยู่)
+  //      ไม่ถูกปิด เพราะ /T ไล่ได้แค่ลูกของหน้าจอที่ยังมีชีวิต
+  //
+  // ตอนนี้ใช้สคริปต์ที่พิสูจน์ความเป็นเจ้าของก่อน (path ใต้ {app} และ worker.lock
+  // ที่ dataDir ตรงกัน) ขอปิดอย่างสุภาพก่อน รอแบบมีขอบเขต แล้วจึงบังคับปิด
+  // เฉพาะ PID ที่เป็นของเรา — process Node ของโปรแกรมอื่นในเครื่องต้องรอดทุกตัว
+  ExtractTemporaryFile('stop-owned-agent.ps1');
+  script := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+            ExpandConstant('{tmp}\stop-owned-agent.ps1') + '" -Root "' +
+            ExpandConstant('{app}') + '" -DataDir "' +
+            ExpandConstant('{commonappdata}\SDCAgent') + '" -TimeoutSec 20';
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), script,
        '', SW_HIDE, ewWaitUntilTerminated, code);
 
-  // ตัวทำงานเบื้องหลังที่ "กำพร้า" — หน้าจอตายไปแล้วแต่ node.exe ยังอยู่
-  //
-  // /T ข้างบนไล่ปิดได้เฉพาะลูกของหน้าจอที่ยัง**มีชีวิต**อยู่ ถ้าหน้าจอตายไปก่อน
-  // (ซึ่งเป็นสถานการณ์ที่ watchdog มีไว้รับมือพอดี) node.exe จะค้างถือไฟล์
-  // {app}\runtime\node.exe ไว้ แล้วตัวติดตั้งจะขึ้นกล่อง "unable to close
-  // applications" ค้างรอคนกด — การอัปเดตอัตโนมัติจะค้างตรงนี้ทั้งอำเภอ
-  //
-  // ปิดเฉพาะ node.exe ที่รันจากโฟลเดอร์ติดตั้งนี้เท่านั้น
-  // **ห้าม taskkill /IM node.exe เฉย ๆ** เพราะจะฆ่า Node ของโปรแกรมอื่นในเครื่องด้วย
-  script := '-NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter ''Name=''''node.exe'''''' | ' +
-            'Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith(''' +
-            ExpandConstant('{app}') + ''', ''OrdinalIgnoreCase'') } | ' +
-            'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
-  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), script,
+  // งานตามเวลาเดิม (ถ้ามี) — ชื่อคงที่ ไม่รับค่าจากภายนอก
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "{#AppNameEn}" /F',
        '', SW_HIDE, ewWaitUntilTerminated, code);
 end;
 
