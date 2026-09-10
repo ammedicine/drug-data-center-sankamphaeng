@@ -24,8 +24,11 @@ import {
   saveCredential,
   saveJhcisOverride,
   saveSettings,
+  statusWriteStats,
   writeStatus,
 } from "./config";
+import { userInfo } from "node:os";
+
 import { CentralClient } from "./central/client";
 import { JhcisConnection } from "./jhcis/connection";
 import { UsageExtractor } from "./jhcis/extractor";
@@ -549,12 +552,33 @@ async function run(): Promise<void> {
     })();
   }, TICK_MS);
 
+  /**
+   * Says out loud when the status file could not be written.
+   *
+   * writeStatus never throws - a failed rename must not take a worker down -
+   * so a machine where every write is being refused looks identical to a
+   * healthy one until the screen goes stale and the watchdog starts killing a
+   * process that is doing nothing wrong. Reported only when the count has
+   * moved, so a quiet machine stays quiet.
+   */
+  let reportedStatusWriteFailures = 0;
+  const reportStatusWrites = () => {
+    if (statusWriteStats.failures <= reportedStatusWriteFailures) return;
+    reportedStatusWriteFailures = statusWriteStats.failures;
+    log.warn("เขียนไฟล์สถานะไม่สำเร็จ หน้าจออาจไม่ตรงกับความจริง", {
+      failures: statusWriteStats.failures,
+      retries: statusWriteStats.retries,
+      lastError: statusWriteStats.lastError,
+    });
+  };
+
   async function tick(): Promise<void> {
       if (stopping) return;
       // Written first and unconditionally: this is what tells the tray the
       // worker is still making its rounds, and it must not depend on
       // anything that can hang - not JHCIS, not Central, not a sync.
       writeStatus({ lastWorkerTickAt: new Date().toISOString() });
+      reportStatusWrites();
       const current = loadSettings();
       const now = new Date();
 
@@ -760,6 +784,21 @@ async function jhcis(): Promise<void> {
  * resynchronise, measures again, and writes what it found where the window can
  * read it. It changes nothing else about the machine's time configuration.
  */
+/**
+ * Which account this process is running under.
+ *
+ * Used only to tell a scheduled task apart from a button on the window. Falls
+ * back rather than throwing, because a diagnostic must never be the reason a
+ * clock never gets fixed.
+ */
+function runningAccount(): string {
+  try {
+    return process.env.USERNAME || userInfo().username || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 async function timeSync(): Promise<void> {
   const credential = loadCredential();
   const baseUrl = credential?.centralApiUrl ?? centralApiUrl();
@@ -768,6 +807,10 @@ async function timeSync(): Promise<void> {
     clockState: reading.state,
     clockSkewSeconds: reading.skewSeconds,
     lastClockCheckAt: reading.checkedAt,
+    timeSyncTaskLastRunAt: new Date().toISOString(),
+    timeSyncTaskLastResult:
+      `${reading.state} skew=${reading.skewSeconds}s attempts=${attempts} as=${runningAccount()}` +
+      (detail ? ` · ${detail}` : ""),
   });
   console.log(
     `เวลาเครื่องต่างจากศูนย์กลาง ${reading.skewSeconds} วินาที · สถานะ ${reading.state}` +
@@ -791,6 +834,16 @@ async function autoUpdate(): Promise<void> {
   const credential = loadCredential();
   const baseUrl = credential?.centralApiUrl ?? centralApiUrl();
 
+  // Recorded on every path below, so "the task never ran" and "the task ran
+  // and found nothing" stop looking the same from outside.
+  const taskRunAt = new Date().toISOString();
+  const account = runningAccount();
+  const record = (result: string) =>
+    writeStatus({
+      autoUpdateTaskLastRunAt: taskRunAt,
+      autoUpdateTaskLastResult: `${result} as=${account}`,
+    });
+
   const manifest = await fetchManifest(baseUrl);
   const decision = decideUpdate(manifest, AGENT_VERSION);
   const checkedAt = new Date().toISOString();
@@ -801,6 +854,7 @@ async function autoUpdate(): Promise<void> {
       updateCheckedAt: checkedAt,
       updateDetail: null,
     });
+    record(`NONE latest=${manifest.version ?? AGENT_VERSION} running=${AGENT_VERSION}`);
     console.log(decision.reason);
     return;
   }
@@ -811,6 +865,7 @@ async function autoUpdate(): Promise<void> {
       updateCheckedAt: checkedAt,
       updateDetail: decision.reason,
     });
+    record(`BLOCKED version=${decision.version} ${decision.reason}`);
     log.warn("มีรุ่นใหม่แต่ติดตั้งอัตโนมัติไม่ได้", {
       version: decision.version,
       reason: decision.reason,
@@ -829,6 +884,7 @@ async function autoUpdate(): Promise<void> {
       updateCheckedAt: checkedAt,
       updateDetail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง",
     });
+    record(`WAITING_FOR_SYNC version=${decision.version}`);
     console.log("กำลังซิงก์อยู่ จะติดตั้งรุ่นใหม่รอบถัดไป");
     return;
   }
@@ -847,7 +903,9 @@ async function autoUpdate(): Promise<void> {
       sha256: decision.sha256,
       size: decision.size,
     });
+    record(`INSTALLING version=${decision.version}`);
     await installUpdate(installer, decision.version);
+    record(`INSTALLED version=${decision.version}`);
     console.log(`ติดตั้งรุ่น ${decision.version} แล้ว`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -860,6 +918,7 @@ async function autoUpdate(): Promise<void> {
       updateCheckedAt: checkedAt,
       updateDetail: message.slice(0, 200),
     });
+    record(`FAILED version=${decision.version} ${message.slice(0, 120)}`);
     process.exitCode = 1;
   }
 }

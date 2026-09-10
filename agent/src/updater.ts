@@ -176,9 +176,20 @@ export function syncIsBusy(): boolean {
 export async function installUpdate(installerPath: string, version: string): Promise<void> {
   const logPath = join(dataDir(), "logs", `update-${version}.log`);
   log.info("กำลังติดตั้งรุ่นใหม่", { version });
-  await run(installerPath, ["/VERYSILENT", "/NORESTART", `/LOG=${logPath}`], {
-    timeout: 15 * 60_000,
-    windowsHide: true,
-  });
-  log.info("ติดตั้งรุ่นใหม่แล้ว", { version, logPath });
+  try {
+    await run(installerPath, ["/VERYSILENT", "/NORESTART", `/LOG=${logPath}`], {
+      timeout: 15 * 60_000,
+      windowsHide: true,
+    });
+  } catch (error) {
+    // execFile puts the exit code on the error, not in its message, so an
+    // installer that refused told us only "Command failed". Inno's codes are
+    // the difference between a question that answered itself (2), a file still
+    // in use (5) and a machine that genuinely cannot take this build - and
+    // whoever reads this log will not have the machine in front of them.
+    const code = (error as { code?: number | string }).code ?? "unknown";
+    log.error("ตัวติดตั้งจบด้วยรหัสผิดพลาด", { version, exitCode: code, logPath });
+    throw new Error(`ตัวติดตั้งจบด้วยรหัส ${code}`);
+  }
+  log.info("ติดตั้งรุ่นใหม่แล้ว", { version, logPath, exitCode: 0 });
 }

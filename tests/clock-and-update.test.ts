@@ -482,8 +482,72 @@ describe("an update found while a sync is running", () => {
     // random bytes here, so the attempt fails and is reported as a failure
     // rather than pretending to have succeeded.
     expect(central.downloads).toBe(1);
-    expect(loadStatus().updateState).toBe("FAILED");
+    const status = loadStatus();
+    expect(status.updateState).toBe("FAILED");
+
+    // The whole chain ran under one command, unattended, with nothing asked of
+    // a person: manifest -> version compare -> download -> size -> sha256 ->
+    // idle check -> execute -> report. What the machine did is on the record.
+    expect(status.updateLatestVersion).toBe("9.9.9");
+    expect(status.autoUpdateTaskLastRunAt).toBeTruthy();
+    expect(status.autoUpdateTaskLastResult).toMatch(/FAILED version=9\.9\.9/);
+    // And the account that ran it, which is the only thing that separates a
+    // SYSTEM scheduled task from somebody pressing the button on the window.
+    expect(status.autoUpdateTaskLastResult).toMatch(/ as=\S+/);
+    // The installer's own exit status, not just "it did not work". execFile
+    // hides it on the error object, so it had to be lifted out deliberately.
+    expect(status.updateDetail).toMatch(/ตัวติดตั้งจบด้วยรหัส/);
     void result;
+  }, 180_000);
+
+  it("records that the task ran even when there is nothing to install", async () => {
+    // The reason this field exists: from outside, a task that never fired and
+    // a task that fired and found nothing look identical - both leave the
+    // version where it was. The canary spent an hour unable to tell which had
+    // happened, with no elevated shell to ask Task Scheduler.
+    const { loadStatus } = await configModule();
+    central.manifest = { available: false, version: "0.0.1" };
+    writeFileSync(
+      join(workDir, "agent.config.json"),
+      JSON.stringify({
+        agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl,
+        facilityId: "f", expectedPcucode: "T0001", installationId: "i",
+        syncIntervalMinutes: 60, reprocessDays: 7,
+      }),
+      "utf8",
+    );
+
+    await runCli(["auto-update"], workDir);
+
+    const status = loadStatus();
+    expect(status.updateState).toBe("NONE");
+    expect(status.autoUpdateTaskLastRunAt).toBeTruthy();
+    expect(status.autoUpdateTaskLastResult).toMatch(/^NONE /);
+    expect(status.autoUpdateTaskLastResult).toMatch(/ as=\S+/);
+    expect(central.downloads).toBe(0);
+  }, 180_000);
+
+  it("records that the clock task ran, and who ran it", async () => {
+    const { loadStatus } = await configModule();
+    // Pointed at the fake centre in this file, never at a real one.
+    writeFileSync(
+      join(workDir, "agent.config.json"),
+      JSON.stringify({
+        agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl,
+        facilityId: "f", expectedPcucode: "T0001", installationId: "i",
+        syncIntervalMinutes: 60, reprocessDays: 7,
+      }),
+      "utf8",
+    );
+
+    await runCli(["time-sync"], workDir);
+
+    const status = loadStatus();
+    expect(status.timeSyncTaskLastRunAt).toBeTruthy();
+    expect(status.timeSyncTaskLastResult).toMatch(/^HEALTHY skew=/);
+    expect(status.timeSyncTaskLastResult).toMatch(/ as=\S+/);
+    // Same field the ordinary reading writes, so the screen is unaffected.
+    expect(status.lastClockCheckAt).toBeTruthy();
   }, 180_000);
 });
 

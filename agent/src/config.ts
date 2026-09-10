@@ -485,6 +485,24 @@ export interface AgentStatus {
    * still in the tray.
    */
   lastWorkerTickAt: string | null;
+
+  /**
+   * What the two elevated scheduled tasks actually did, and who ran them.
+   *
+   * Needed because the same two commands can be reached from the window's
+   * buttons, and from outside the two are indistinguishable: a clock check
+   * appearing in status.json proves something ran `agent time-sync`, not that
+   * Task Scheduler did. Recording the account separates them - a tray press
+   * carries the staff account, the scheduled task carries SYSTEM - and it is
+   * the only way to tell, without an elevated shell, whether the tasks the
+   * installer created are firing at all.
+   *
+   * An account name is not a credential. Nothing else is recorded here.
+   */
+  timeSyncTaskLastRunAt: string | null;
+  timeSyncTaskLastResult: string | null;
+  autoUpdateTaskLastRunAt: string | null;
+  autoUpdateTaskLastResult: string | null;
 }
 
 export function statusPath(): string {
@@ -534,6 +552,10 @@ export function loadStatus(): AgentStatus {
     lastProgressAt: null,
     nextSyncAt: null,
     lastWorkerTickAt: null,
+    timeSyncTaskLastRunAt: null,
+    timeSyncTaskLastResult: null,
+    autoUpdateTaskLastRunAt: null,
+    autoUpdateTaskLastResult: null,
   };
   if (!existsSync(path)) return empty;
   try {
@@ -553,8 +575,14 @@ const WRITE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
  * Counted so an operator can tell a quiet machine from a struggling one.
  *
  * Kept here rather than logged from here: the logger writes into the data
- * directory this module resolves, and importing it back would be a cycle.
- * The worker reports these numbers on its rounds instead.
+ * directory this module resolves, and importing it back would be a cycle. The
+ * worker reads these on its rounds and logs them - see reportStatusWrites in
+ * cli.ts. That was claimed here long before it was true, and a status file
+ * that silently stopped being written looks exactly like a worker that has
+ * stopped: the screen freezes, the watchdog restarts a process that was never
+ * unwell, and nothing anywhere says which of the two happened.
+ *
+ * lastError holds an error code, never a path or file contents.
  */
 export const statusWriteStats = { retries: 0, failures: 0, lastError: null as string | null };
 
