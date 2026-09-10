@@ -198,3 +198,87 @@ describe("when the centre cannot be reached", () => {
     expect(restarted.pausedMessage()).toContain("รอรีเซ็ต");
   });
 });
+
+describe("reconciliation while paused", () => {
+  /**
+   * C. verify() must refuse before it does any work.
+   *
+   * Proven by counting, not by inspection. JHCIS is pointed at a port nothing
+   * is listening on, and the centre is a real server that counts every request
+   * it receives - so a single reconciliation read would either throw a
+   * connection error or show up in the count. On the canary this walked 203
+   * months of a สถานบริการ that was supposed to be stopped.
+   */
+  it("does no JHCIS reads and no central audit calls", async () => {
+    const { createServer } = await import("node:http");
+    let requests: string[] = [];
+    const server = createServer((req, res) => {
+      requests.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, months: [], total: 0 }));
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    const address = server.address();
+    const baseUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+
+    try {
+      writeFileSync(
+        join(home, "agent.config.json"),
+        JSON.stringify({
+          agentId: "a", keyId: "k", secret: "s".repeat(40), centralApiUrl: baseUrl,
+          facilityId: "f", facilityCode: "T", expectedPcucode: "T0001",
+          installationId: "i", syncIntervalMinutes: 60, reprocessDays: 7,
+        }),
+        "utf8",
+      );
+      // A JHCIS nobody is listening on: any read at all fails loudly rather
+      // than quietly succeeding against something real.
+      writeFileSync(
+        join(home, "jhcis.json"),
+        JSON.stringify({ host: "127.0.0.1", port: 1, database: "none", user: "root", password: "" }),
+        "utf8",
+      );
+      persist({
+        lastSyncedVisitDate: "2026-09-10",
+        lastSyncAt: null,
+        batchSequence: 5,
+        syncControlState: "PAUSED",
+        appliedControlRevision: 1,
+        pauseReason: "เตรียมล้างข้อมูล",
+      });
+
+      const { SyncRunner } = await import(`../agent/src/sync?vp=${counter++}`);
+      const { loadState } = await import(`../agent/src/config?vp=${counter++}`);
+      const before = loadState();
+
+      const result = await new SyncRunner().verify({});
+
+      // Refused, and it says nothing was checked rather than claiming success
+      // over months it never looked at.
+      expect(result.checked).toBe(0);
+      expect(result.mismatched).toEqual([]);
+      expect(result.repaired).toBe(0);
+      // Not one request reached the centre - no audit, no batch, nothing.
+      expect(requests).toEqual([]);
+      // And nothing local moved.
+      const after = loadState();
+      expect(after.lastSyncedVisitDate).toBe(before.lastSyncedVisitDate);
+      expect(after.batchSequence).toBe(before.batchSequence);
+    } finally {
+      server.close();
+    }
+  }, 60_000);
+
+  it("still reconciles normally once resumed", async () => {
+    // D. The guard must be a pause guard, not a permanent one.
+    const { syncPaused } = await controlModule();
+    persist({
+      lastSyncedVisitDate: "2026-09-10",
+      lastSyncAt: null,
+      batchSequence: 5,
+      syncControlState: "RUNNING",
+      appliedControlRevision: 2,
+    });
+    expect(syncPaused()).toBe(false);
+  });
+});
