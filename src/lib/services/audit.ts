@@ -20,6 +20,8 @@ export type AuditAction =
   | "AGENT_REVOKE"
   | "AGENT_DELETE"
   | "FACILITY_DATA_PURGE"
+  | "AGENT_SYNC_PAUSED"
+  | "AGENT_SYNC_RESUMED"
   | "SYNC_START"
   | "SYNC_COMPLETE"
   | "SYNC_FAILED"

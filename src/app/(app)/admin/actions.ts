@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache";
 
 import { issueEnrollmentToken } from "@/lib/agent-auth/enrollment";
 import { effectiveStatus, listRunningBatches } from "@/lib/services/monitoring";
+import { resolveAgentIds, setAgentSyncControl } from "@/lib/services/fleet";
 import { countFacilityUsage, purgeFacilityUsage } from "@/lib/services/sync";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
@@ -862,4 +863,110 @@ export async function deleteAgentAction(
   return {
     success: `ลบ ${agent.name} ออกจากระบบแล้ว เครื่องที่ติดตั้งไว้จะใช้งานไม่ได้จนกว่าจะลงทะเบียนใหม่ (ข้อมูลการจ่ายยาที่เคยส่งมายังอยู่ครบ)`,
   };
+}
+
+/* ------------------------------------------------- remote sync control */
+
+/**
+ * Stops or starts an agent's data sync from the centre.
+ *
+ * SUPER_ADMIN only, and checked here rather than by hiding a button: a
+ * FACILITY_ADMIN who crafts the request by hand must be refused too, and the
+ * only place that can be guaranteed is the server.
+ *
+ * This never kills anything. The agent stays enrolled, keeps authenticating,
+ * keeps heartbeating and keeps taking updates - it simply stops being allowed
+ * to write dispensing data, and Central stops accepting it whether the agent
+ * has understood the instruction or not.
+ */
+async function applySyncControl(
+  agentIds: string[],
+  desired: "RUNNING" | "PAUSED",
+  reason: string | null,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่สั่งหยุด/เปิดการซิงก์ได้");
+  if (!agentIds.length) return fail("ยังไม่ได้เลือก Agent");
+
+  const ip = clientIp(await headers());
+  let changed = 0;
+
+  for (const agentId of agentIds) {
+    const [agent] = await db
+      .select({ id: agents.id, name: agents.name, facilityId: agents.facilityId })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .limit(1);
+    if (!agent) continue;
+
+    const result = await setAgentSyncControl({
+      agentId,
+      desired,
+      actorUserId: user.userId,
+      reason,
+    });
+    if (!result.changed) continue;
+    changed += 1;
+
+    await writeAudit({
+      actorType: "USER",
+      actorId: user.userId,
+      actorLabel: user.email,
+      action: desired === "PAUSED" ? "AGENT_SYNC_PAUSED" : "AGENT_SYNC_RESUMED",
+      resource: "agent",
+      resourceId: agentId,
+      facilityId: agent.facilityId,
+      ip,
+      // Safe metadata only: who, which agent, why, and which revision. No
+      // credential, no payload, nothing about a patient.
+      metadata: { agentName: agent.name, reason, controlRevision: result.revision },
+    });
+  }
+
+  revalidatePath("/admin/agents");
+  revalidatePath("/admin/monitoring");
+  revalidatePath("/sync");
+
+  if (!changed) {
+    return { success: desired === "PAUSED" ? "Agent ที่เลือกหยุดการซิงก์อยู่แล้ว" : "Agent ที่เลือกทำงานอยู่แล้ว" };
+  }
+  return {
+    success:
+      desired === "PAUSED"
+        ? `หยุดการซิงก์ ${changed} Agent แล้ว ศูนย์กลางจะไม่รับข้อมูลใหม่จากเครื่องเหล่านี้ทันที`
+        : `เปิดการซิงก์ ${changed} Agent แล้ว`,
+  };
+}
+
+export async function pauseAgentSyncAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const reason = String(formData.get("reason") ?? "").trim() || null;
+  const ids = await resolveSelection(formData);
+  return applySyncControl(ids, "PAUSED", reason);
+}
+
+export async function resumeAgentSyncAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const ids = await resolveSelection(formData);
+  return applySyncControl(ids, "RUNNING", null);
+}
+
+/**
+ * Which agents an action applies to, decided on the server.
+ *
+ * "All" is resolved from the database rather than from a list the browser
+ * sent, so a stale page cannot quietly miss the สถานบริการ that was enrolled
+ * five minutes ago - which during a reset is precisely the one that would
+ * refill Central.
+ */
+async function resolveSelection(formData: FormData): Promise<string[]> {
+  const scope = String(formData.get("scope") ?? "selected");
+  if (scope === "all") return resolveAgentIds({ all: true });
+  const agentIds = formData.getAll("agentId").map(String).filter(Boolean);
+  const facilityIds = formData.getAll("facilityId").map(String).filter(Boolean);
+  return resolveAgentIds({ agentIds, facilityIds });
 }
