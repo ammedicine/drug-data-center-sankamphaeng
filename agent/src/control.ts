@@ -35,6 +35,26 @@ import { log } from "./logger";
  */
 let pauseRequested = false;
 
+/**
+ * Whether a sync run is actually in flight.
+ *
+ * PAUSE_REQUESTED is supposed to mean "told to stop, finishing the unit it was
+ * in". The canary showed it meaning something else: an idle agent was paused,
+ * applied the instruction in thirteen seconds, and still reported
+ * PAUSE_REQUESTED - because the flag was set on arrival and only cleared by
+ * the next run, which was 48 minutes away. An operator watching the fleet
+ * screen during a reset would read "รอ Agent รับคำสั่ง" for the best part of
+ * an hour about a สถานบริการ that had already stopped.
+ *
+ * So the handover state now requires a run to hand over from.
+ */
+let runInFlight = false;
+
+/** Marks a sync run as started or finished, so a pause can tell them apart. */
+export function markRunInFlight(active: boolean): void {
+  runInFlight = active;
+}
+
 /** What the centre last told this Agent, as persisted. */
 export function desiredSyncState(): SyncControlState {
   return loadState().syncControlState ?? "RUNNING";
@@ -109,7 +129,10 @@ export function applyControlInstruction(config: AgentConfigResponse): void {
   });
 
   if (desired === "PAUSED") {
-    beginPauseHandover();
+    // Only a run that is genuinely mid-flight gets a handover. An idle agent
+    // has nothing to finish, so it is simply stopped - and says so.
+    if (runInFlight) beginPauseHandover();
+    else completePauseHandover();
     log.warn("ผู้ดูแลระบบส่วนกลางสั่งหยุดการซิงก์", {
       revision,
       reason: config.pauseReason ?? null,

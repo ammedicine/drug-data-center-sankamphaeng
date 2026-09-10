@@ -46,7 +46,45 @@ describe("the three states an agent can be in", () => {
     expect(syncPaused()).toBe(false);
   });
 
-  it("says PAUSE_REQUESTED while it finishes the unit it was in", async () => {
+  it("says PAUSED immediately when nothing was running", async () => {
+    // The canary found this the wrong way round. An idle agent was paused,
+    // applied the instruction in thirteen seconds, and still reported
+    // PAUSE_REQUESTED - because the flag was set on arrival and only cleared
+    // by the next run, 48 minutes later. The fleet screen would have shown
+    // "รอ Agent รับคำสั่ง" for most of an hour about a สถานบริการ that had
+    // already stopped, which during a reset is exactly the wrong thing to
+    // tell somebody.
+    const { applyControlInstruction, effectiveSyncState, markRunInFlight } =
+      await controlModule();
+    persist({ lastSyncedVisitDate: null, lastSyncAt: null, batchSequence: 0 });
+    markRunInFlight(false);
+
+    applyControlInstruction({
+      syncControlState: "PAUSED",
+      controlRevision: 1,
+      pauseReason: null,
+    } as never);
+
+    expect(effectiveSyncState()).toBe("PAUSED");
+  });
+
+  it("says PAUSE_REQUESTED only while a run is genuinely in flight", async () => {
+    const { applyControlInstruction, effectiveSyncState, markRunInFlight } =
+      await controlModule();
+    persist({ lastSyncedVisitDate: null, lastSyncAt: null, batchSequence: 0 });
+    markRunInFlight(true);
+
+    applyControlInstruction({
+      syncControlState: "PAUSED",
+      controlRevision: 1,
+      pauseReason: null,
+    } as never);
+
+    // Told to stop, still writing. This is the state the handover exists for.
+    expect(effectiveSyncState()).toBe("PAUSE_REQUESTED");
+  });
+
+  it("moves from handover to stopped once the run ends", async () => {
     const { beginPauseHandover, effectiveSyncState, completePauseHandover } =
       await controlModule();
     persist({

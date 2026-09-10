@@ -35,6 +35,7 @@ import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector, type SchemaMapping } from "./jhcis/schema-inspector";
 import {
   applyControlInstruction,
+  markRunInFlight,
   beginPauseHandover,
   completePauseHandover,
   effectiveSyncState,
@@ -620,6 +621,9 @@ export class SyncRunner {
         reconciliation: null,
       };
     }
+    // From here a run is genuinely in flight, so a pause arriving now is a
+    // handover rather than an immediate stop.
+    markRunInFlight(true);
     const runStartedAt = Date.now();
     let extractStartedAt = runStartedAt;
     let extractEndedAt = runStartedAt;
@@ -1062,6 +1066,10 @@ export class SyncRunner {
         reconciliation,
       };
     } finally {
+      // Cleared on every exit, including a throw: a run that failed is
+      // still not in flight, and leaving this set would make the next
+      // pause look like a handover from a run that had already ended.
+      markRunInFlight(false);
       await db.close();
     }
   }
@@ -1290,6 +1298,16 @@ export class SyncRunner {
     return { from, to };
   }
 
+  /**
+   * Month-by-month reconciliation against the centre.
+   *
+   * Refused while paused. The repair it launches goes through run(), which is
+   * guarded, so nothing could ever have been written - but the canary showed
+   * it still walking 203 months of JHCIS and calling the centre's audit
+   * endpoint for each of them while the สถานบริการ was supposed to be
+   * stopped. A paused clinic's database server should not be doing work on
+   * behalf of a reset that is deliberately excluding it.
+   */
   async verify(options: { from?: string | null; to?: string | null; repair?: boolean } = {}): Promise<{
     checked: number;
     mismatched: Array<{ month: string; jhcis: number; central: number }>;
@@ -1297,6 +1315,11 @@ export class SyncRunner {
     unresolved: Array<{ month: string; jhcis: number; central: number }>;
     repaired: number;
   }> {
+    if (syncPaused()) {
+      log.info("ข้ามการตรวจสอบความครบถ้วนเพราะถูกหยุดโดยผู้ดูแลระบบส่วนกลาง");
+      writeStatus({ message: pausedMessage(), lastError: null });
+      return { checked: 0, mismatched: [], unresolved: [], repaired: 0 };
+    }
     const db = new JhcisConnection();
     try {
       const { report, mapping } = await new SchemaInspector(db).inspect();
