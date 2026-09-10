@@ -979,6 +979,24 @@ export class SyncRunner {
     range: { from: string; to: string },
     mode: SyncMode,
   ): Promise<void> {
+    // Only when it would actually move something.
+    //
+    // Without this, an agent that is fully caught up opens one of these on
+    // every scheduled run for ever: hourly, that is 24 batches a day each, and
+    // 15 สถานบริการ turn the batch history into 130,000 rows a year that all
+    // say "nothing happened". The canary showed the shape of it - 115 of its
+    // 136 batches were empty. The watermark is what these exist to advance, so
+    // when it is already at or past the end of the range there is nothing to
+    // advance and nothing worth recording. A day with new visits still moves
+    // `to` forward and still gets its one batch.
+    const before = loadState();
+    if (before.lastSyncedVisitDate && before.lastSyncedVisitDate >= range.to) {
+      log.info("ตรวจครบแล้วและความคืบหน้าอยู่ที่วันนี้อยู่แล้ว ไม่ต้องเปิด batch", {
+        through: range.to,
+      });
+      return;
+    }
+
     const batchRef = nextBatchRef();
     try {
       await withRetry(

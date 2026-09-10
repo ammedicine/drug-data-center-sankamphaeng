@@ -321,6 +321,34 @@ describe("a month whose only difference is a row the centre must refuse", () => 
     expect(result.recordsSent).toBe(0);
     expect(state().lastSyncedVisitDate).toBe("2024-03-31");
   }, 120_000);
+
+  it("stops opening an empty batch once progress is already at the range end", async () => {
+    if (!available) return;
+    // The empty verified batch exists to move the watermark. When the
+    // watermark is already there it moves nothing, and opening one every
+    // scheduled run turns the audit history into noise: the canary ran hourly
+    // and reached 115 empty batches out of 136, 107 of them in a single day.
+    // A bounded one-per-advance is the point; one-per-cycle for ever is not.
+    calls.auditMonths = [{ month: "2024-02", rows: 1 }, { month: "2024-03", rows: 1 }];
+    reset("2024-02-29");
+
+    const first = await runner();
+    await first.run({ mode: "INCREMENTAL", from: null, to: "2024-03-31" });
+    const afterFirst = calls.starts.length;
+    expect(state().lastSyncedVisitDate).toBe("2024-03-31");
+
+    // Same range again, nothing new at the source: the first run recorded the
+    // advance, so the second has nothing to record.
+    await (await runner()).run({ mode: "INCREMENTAL", from: null, to: "2024-03-31" });
+    expect(calls.starts.length).toBe(afterFirst);
+    // And progress is untouched, not rolled back by the skip.
+    expect(state().lastSyncedVisitDate).toBe("2024-03-31");
+
+    // A day with something new still gets its one batch.
+    await (await runner()).run({ mode: "INCREMENTAL", from: null, to: "2024-04-30" });
+    expect(calls.starts.length).toBe(afterFirst + 1);
+    expect(state().lastSyncedVisitDate).toBe("2024-04-30");
+  }, 180_000);
 });
 
 describe("ELIGIBLE_SOURCE_ROW_SQL", () => {
