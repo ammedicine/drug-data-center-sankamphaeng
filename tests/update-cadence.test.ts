@@ -82,6 +82,27 @@ describe("the scheduled task the installer writes", () => {
     expect(updater).not.toContain("SUPPRESSMSGBOXES\"");
   });
 
+  it("asks the program for the slot without a shell in between", () => {
+    // The first canary wrote the task with the 00:00 fallback: the installer
+    // captured `agent update-slot` through `cmd /C "node" "script" > file`,
+    // and cmd's rule for a command that starts with a quote stripped the
+    // first and last quote, broke the path, and failed silently. Now node.exe
+    // is executed directly and the program writes the file itself.
+    const fn = source().slice(
+      source().indexOf("function UpdateCheckStartTime"),
+      source().indexOf("procedure CreateScheduledTasks"),
+    );
+    expect(fn).toContain("Exec(app + '\\runtime\\node.exe'");
+    expect(fn).toContain("update-slot --out");
+    expect(fn).not.toContain("{cmd}");
+    expect(fn).not.toContain("/C ");
+    expect(fn).not.toContain('> "'); // no stdout redirection into the slot file
+    // The schtasks-escaped \" strings are for /TR only, never for this call.
+    expect(fn).not.toContain("'\\\"'");
+    // And a fallback is logged as a fallback, not passed off as a slot.
+    expect(fn).toContain("ใช้ค่าสำรอง");
+  });
+
   it("only accepts a slot of the form 00:MM with MM in 00-29", () => {
     // The installer validates what the program prints rather than trusting it,
     // and falls back to 00:00 - still every 30 minutes, just unstaggered.
@@ -130,6 +151,41 @@ describe("deterministic staggering", () => {
     const again = await import(`../agent/src/schedule?again=${Date.now()}`);
     expect(again.updateCheckSlotMinute(id)).toBe(first);
   });
+
+  it("writes the slot to the file the installer names, with the installer's exact quoting", async () => {
+    // The very command line Inno builds, run through CreateProcess verbatim,
+    // with a destination path that contains a space - which is the case that
+    // broke through cmd.
+    const { updateCheckSlotMinute } = await import("../agent/src/schedule");
+    const home = mkdtempSync(resolve(tmpdir(), "sdc slot out-"));
+    try {
+      writeFileSync(join(home, "agent.config.json"), JSON.stringify({
+        agentId: "01m21zsrspzmv8vxja3daw1wfj", keyId: "k", secret: "s".repeat(40),
+        centralApiUrl: "https://central.invalid/", facilityId: "f", facilityCode: "T",
+        expectedPcucode: "T0001", installationId: "i", syncIntervalMinutes: 60, reprocessDays: 7,
+      }));
+      const outFile = join(home, "update-slot.txt");
+      // Only the arguments are verbatim; spawn supplies argv[0] itself.
+      const commandLine = `--import tsx "${CLI}" update-slot --out "${outFile}"`;
+      const result = spawnSync(process.execPath, [commandLine], {
+        env: { ...process.env, AGENT_DATA_DIR: home },
+        encoding: "utf8",
+        timeout: 60_000,
+        windowsVerbatimArguments: true,
+        // argv[0] must be quoted by hand under verbatim mode, or node reads
+        // "Files\nodejs\node.exe" as its script - the same class of bug.
+        argv0: `"${process.execPath}"`,
+        shell: false,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const expected = "00:" + String(updateCheckSlotMinute("01m21zsrspzmv8vxja3daw1wfj")).padStart(2, "0");
+      expect(readFileSync(outFile, "utf8").trim()).toBe(expected);
+      // What the installer accepts: exactly five characters, 00:MM, MM <= 29.
+      expect(readFileSync(outFile, "utf8").trim()).toMatch(/^00:[0-2][0-9]$/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("prints the slot through the CLI, from the enrolled id or the hostname", async () => {
     const { updateCheckSlotMinute } = await import("../agent/src/schedule");

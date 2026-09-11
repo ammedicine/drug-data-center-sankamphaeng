@@ -27,6 +27,7 @@ import {
   statusWriteStats,
   writeStatus,
 } from "./config";
+import { writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 
 import { CentralClient } from "./central/client";
@@ -875,7 +876,14 @@ async function timeSync(): Promise<void> {
  */
 function updateSlot(): void {
   const identity = loadCredential()?.agentId ?? machineHostname();
-  console.log(updateCheckStartTime(identity));
+  const value = updateCheckStartTime(identity);
+  console.log(value);
+  // The installer cannot capture stdout without going through cmd.exe, and
+  // cmd.exe's quoting rules silently broke exactly that on the first canary -
+  // the task got the 00:00 fallback and nobody was told. So the value can be
+  // written straight to a file the installer names, with no shell in between.
+  const out = arg("out");
+  if (out) writeFileSync(out, `${value}\n`, "utf8");
 }
 
 async function autoUpdate(): Promise<void> {
@@ -1024,7 +1032,7 @@ async function main(): Promise<void> {
           "  settings [--interval N] [--times 08:00,16:00] [--auto true|false]",
           "                                  ดู/ตั้งค่าตารางการซิงก์ในเครื่อง",
           "  jhcis [--set]                   ดูการเชื่อมต่อ JHCISDB (--set = อ่านค่าใหม่เป็น JSON ทาง stdin)",
-          "  update-slot                     เวลาเริ่ม (HH:MM) ของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (ตัวติดตั้งใช้)",
+          "  update-slot [--out <file>]      เวลาเริ่ม (HH:MM) ของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (ตัวติดตั้งใช้)",
         ].join("\n"),
       );
   }

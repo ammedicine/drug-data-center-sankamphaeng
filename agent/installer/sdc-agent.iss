@@ -225,13 +225,19 @@ end;
 // จากที่อื่นเมื่อไร จะกลายเป็นช่องยกระดับสิทธิ์ในเครื่องทันที
 // เวลาเริ่มของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (HH:MM ภายในครึ่งชั่วโมงแรกของวัน)
 //
-// ถามจากโปรแกรมเอง (`agent update-slot`) เพื่อให้มีที่คำนวณที่เดียวและทดสอบได้
+// ถามจากโปรแกรมเอง (`agent update-slot --out <ไฟล์>`) เพื่อให้มีที่คำนวณที่เดียวและทดสอบได้
 // ค่านี้มาจาก hash ของ agentId (หรือชื่อเครื่องถ้ายังไม่ลงทะเบียน) จึงคงที่ต่อเครื่อง
 // schtasks จะยึดนาทีนี้เป็นจังหวะ: เริ่ม 00:07 ทุก 30 นาที = :07 และ :37 ของทุกชั่วโมง
 // สิบห้าสถานบริการจึงกระจายกันไปคนละนาที ไม่ถามศูนย์กลางพร้อมกันในวินาทีเดียว
 //
+// **ไม่ผ่าน cmd.exe** — canary รอบแรกใช้ `cmd /C "node" "script" > ไฟล์` แล้ว cmd ตัด
+// เครื่องหมายคำพูดตัวแรกกับตัวสุดท้ายทิ้ง (กฎของ cmd เมื่อคำสั่งขึ้นต้นด้วย ") path จึงพัง
+// เงียบ ๆ และงานได้ค่าสำรอง 00:00 โดยไม่มีใครรู้ ตอนนี้เรียก node.exe ตรง ๆ แล้วให้
+// โปรแกรมเขียนไฟล์เอง ไม่มี shell คั่นกลาง
+//
 // ถ้าอ่านไม่ได้ด้วยเหตุใดก็ตาม ใช้ 00:00 — ยังตรวจทุก 30 นาทีเหมือนเดิม แค่ไม่กระจาย
-function UpdateCheckStartTime(node, script: String): String;
+// และบันทึกไว้ใน log ของตัวติดตั้งว่าเป็นค่าสำรอง
+function UpdateCheckStartTime(app: String): String;
 var
   code: Integer;
   slotFile, raw: String;
@@ -239,8 +245,9 @@ var
 begin
   Result := '00:00';
   slotFile := ExpandConstant('{tmp}\update-slot.txt');
-  if Exec(ExpandConstant('{cmd}'),
-          '/C ' + node + ' ' + script + ' update-slot > "' + slotFile + '"',
+  DeleteFile(slotFile);
+  if Exec(app + '\runtime\node.exe',
+          '"' + app + '\app\agent.js" update-slot --out "' + slotFile + '"',
           '', SW_HIDE, ewWaitUntilTerminated, code) and (code = 0) then
   begin
     if LoadStringsFromFile(slotFile, lines) and (GetArrayLength(lines) > 0) then
@@ -250,9 +257,15 @@ begin
       if (Length(raw) = 5) and (Copy(raw, 1, 3) = '00:')
          and (StrToIntDef(Copy(raw, 4, 2), -1) >= 0)
          and (StrToIntDef(Copy(raw, 4, 2), -1) <= 29) then
-        Result := raw;
-    end;
-  end;
+        Result := raw
+      else
+        Log('!! update-slot: ค่าไม่ถูกต้อง "' + raw + '" ใช้ค่าสำรอง');
+    end
+    else
+      Log('!! update-slot: อ่านไฟล์ผลลัพธ์ไม่ได้ ใช้ค่าสำรอง');
+  end
+  else
+    Log('!! update-slot: เรียกโปรแกรมไม่สำเร็จ (exit ' + IntToStr(code) + ') ใช้ค่าสำรอง');
   Log('update-slot: ' + Result);
 end;
 
@@ -272,7 +285,7 @@ begin
   // ทุก 30 นาที (เดิม 4 ชั่วโมง) โดยยึดนาทีประจำเครื่อง
   // /F เขียนทับงานชื่อเดิม ดังนั้นการติดตั้งทับ 1.1.7 หรือ 1.1.8 จะได้จังหวะใหม่
   // โดยไม่เหลืองานซ้ำ และงานอื่นของ Windows ไม่ถูกแตะ
-  startAt := UpdateCheckStartTime(node, script);
+  startAt := UpdateCheckStartTime(app);
   RunTool('{sys}\schtasks.exe',
     '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC MINUTE /MO 30 /ST ' + startAt
       + ' /TR "' + node + ' ' + script + ' auto-update"',
