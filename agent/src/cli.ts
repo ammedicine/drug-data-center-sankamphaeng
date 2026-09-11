@@ -39,6 +39,7 @@ import {
   dailyOffsetSeconds,
   intervalOffsetSeconds,
   nextScheduledRun,
+  updateCheckStartTime,
 } from "./schedule";
 import { OfflineQueue } from "./queue/queue";
 import { SyncRunner, type SyncMode } from "./sync";
@@ -859,6 +860,24 @@ async function timeSync(): Promise<void> {
  * a sync is mid-flight - the queue would survive, but there is no reason to
  * interrupt a run that is nearly done.
  */
+/**
+ * `agent update-slot` - the one line the installer needs from this program.
+ *
+ * Prints the `HH:MM` at which this machine's update check should be anchored,
+ * so the scheduled task the installer writes lands in this clinic's own minute
+ * of the half hour rather than in everybody's. Read-only: touches no file, no
+ * network and no database, and prints nothing that is secret.
+ *
+ * Identity is the agentId when the machine is enrolled and the hostname when
+ * it is not. On an upgrade the credential is already there, so a clinic keeps
+ * the slot it has had all along; on a first install the hostname stands in,
+ * and it is just as stable.
+ */
+function updateSlot(): void {
+  const identity = loadCredential()?.agentId ?? machineHostname();
+  console.log(updateCheckStartTime(identity));
+}
+
 async function autoUpdate(): Promise<void> {
   const credential = loadCredential();
   const baseUrl = credential?.centralApiUrl ?? centralApiUrl();
@@ -906,7 +925,7 @@ async function autoUpdate(): Promise<void> {
 
   if (syncIsBusy() && !has("force")) {
     // The queue would survive an interruption, but there is no reason to cut
-    // a run short when the next scheduled check is only hours away.
+    // a run short when the next scheduled check is half an hour away.
     writeStatus({
       updateState: "READY",
       updateLatestVersion: decision.version,
@@ -987,6 +1006,8 @@ async function main(): Promise<void> {
       return timeSync();
     case "auto-update":
       return autoUpdate();
+    case "update-slot":
+      return updateSlot();
     default:
       console.log(
         [
@@ -1003,6 +1024,7 @@ async function main(): Promise<void> {
           "  settings [--interval N] [--times 08:00,16:00] [--auto true|false]",
           "                                  ดู/ตั้งค่าตารางการซิงก์ในเครื่อง",
           "  jhcis [--set]                   ดูการเชื่อมต่อ JHCISDB (--set = อ่านค่าใหม่เป็น JSON ทาง stdin)",
+          "  update-slot                     เวลาเริ่ม (HH:MM) ของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (ตัวติดตั้งใช้)",
         ].join("\n"),
       );
   }

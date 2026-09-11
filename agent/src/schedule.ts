@@ -59,6 +59,48 @@ export function updateOffsetSeconds(agentId: string, window = UPDATE_STAGGER_SEC
   return agentSlot(agentId, Math.max(1, window));
 }
 
+/**
+ * How often an Agent asks Central whether a newer release exists.
+ *
+ * Thirty minutes, down from four hours. The check is cheap - one unauthenticated
+ * GET that Central answers from GitHub's release record without touching the
+ * database - and four hours meant a fix published in the morning reached the
+ * last clinic in the afternoon. What is not cheap is fifteen clinics asking in
+ * the same second, so each one is given its own minute within the half hour.
+ */
+export const UPDATE_CHECK_INTERVAL_MINUTES = 30;
+
+/**
+ * The minute within each half hour at which this Agent checks: 0..29.
+ *
+ * Derived from the same stable hash as everything else here, so a clinic keeps
+ * its slot across restarts, reinstalls and upgrades, and two clinics only share
+ * one by the ordinary odds of any hash - never because they were installed in
+ * the same minute or restarted together after a power cut.
+ *
+ * The identity is whatever is stable on the machine at the moment the task is
+ * written: the agentId once enrolled, the hostname before that. Either is fine.
+ * What matters is that it does not change on its own.
+ */
+export function updateCheckSlotMinute(
+  identity: string,
+  intervalMinutes = UPDATE_CHECK_INTERVAL_MINUTES,
+): number {
+  return agentSlot(identity, Math.max(1, intervalMinutes));
+}
+
+/**
+ * The `/ST` value for the scheduled task, as `HH:MM` inside the first half hour
+ * of the day. schtasks anchors a MINUTE schedule to this time, so a task
+ * started at 00:07 with a 30-minute interval runs at :07 and :37 of every hour
+ * for as long as it exists - which is exactly the fixed, per-clinic phase
+ * wanted. Measured on a real task before being relied on.
+ */
+export function updateCheckStartTime(identity: string): string {
+  const minute = updateCheckSlotMinute(identity);
+  return `00:${String(minute).padStart(2, "0")}`;
+}
+
 /** Seconds this agent waits after an interval becomes due. */
 export function intervalOffsetSeconds(
   agentId: string,

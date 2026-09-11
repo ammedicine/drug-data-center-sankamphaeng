@@ -223,9 +223,42 @@ end;
 //
 // **คำสั่งตายตัวทั้งคู่ ไม่รับ argument จากภายนอก** ถ้าเปลี่ยนให้รับ path
 // จากที่อื่นเมื่อไร จะกลายเป็นช่องยกระดับสิทธิ์ในเครื่องทันที
+// เวลาเริ่มของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (HH:MM ภายในครึ่งชั่วโมงแรกของวัน)
+//
+// ถามจากโปรแกรมเอง (`agent update-slot`) เพื่อให้มีที่คำนวณที่เดียวและทดสอบได้
+// ค่านี้มาจาก hash ของ agentId (หรือชื่อเครื่องถ้ายังไม่ลงทะเบียน) จึงคงที่ต่อเครื่อง
+// schtasks จะยึดนาทีนี้เป็นจังหวะ: เริ่ม 00:07 ทุก 30 นาที = :07 และ :37 ของทุกชั่วโมง
+// สิบห้าสถานบริการจึงกระจายกันไปคนละนาที ไม่ถามศูนย์กลางพร้อมกันในวินาทีเดียว
+//
+// ถ้าอ่านไม่ได้ด้วยเหตุใดก็ตาม ใช้ 00:00 — ยังตรวจทุก 30 นาทีเหมือนเดิม แค่ไม่กระจาย
+function UpdateCheckStartTime(node, script: String): String;
+var
+  code: Integer;
+  slotFile, raw: String;
+  lines: TArrayOfString;
+begin
+  Result := '00:00';
+  slotFile := ExpandConstant('{tmp}\update-slot.txt');
+  if Exec(ExpandConstant('{cmd}'),
+          '/C ' + node + ' ' + script + ' update-slot > "' + slotFile + '"',
+          '', SW_HIDE, ewWaitUntilTerminated, code) and (code = 0) then
+  begin
+    if LoadStringsFromFile(slotFile, lines) and (GetArrayLength(lines) > 0) then
+    begin
+      raw := Trim(lines[0]);
+      // รับเฉพาะรูป 00:MM ที่ MM อยู่ใน 00-29 เท่านั้น ค่าอื่นถือว่าไม่ถูกต้อง
+      if (Length(raw) = 5) and (Copy(raw, 1, 3) = '00:')
+         and (StrToIntDef(Copy(raw, 4, 2), -1) >= 0)
+         and (StrToIntDef(Copy(raw, 4, 2), -1) <= 29) then
+        Result := raw;
+    end;
+  end;
+  Log('update-slot: ' + Result);
+end;
+
 procedure CreateScheduledTasks();
 var
-  app, node, script, updates: String;
+  app, node, script, updates, startAt: String;
 begin
   app := ExpandConstant('{app}');
   node := '\"' + app + '\runtime\node.exe\"';
@@ -236,9 +269,13 @@ begin
       + node + ' ' + script + ' time-sync"',
     'สร้างงาน SDCAgentTimeSync');
 
+  // ทุก 30 นาที (เดิม 4 ชั่วโมง) โดยยึดนาทีประจำเครื่อง
+  // /F เขียนทับงานชื่อเดิม ดังนั้นการติดตั้งทับ 1.1.7 หรือ 1.1.8 จะได้จังหวะใหม่
+  // โดยไม่เหลืองานซ้ำ และงานอื่นของ Windows ไม่ถูกแตะ
+  startAt := UpdateCheckStartTime(node, script);
   RunTool('{sys}\schtasks.exe',
-    '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC HOURLY /MO 4 /TR "'
-      + node + ' ' + script + ' auto-update"',
+    '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC MINUTE /MO 30 /ST ' + startAt
+      + ' /TR "' + node + ' ' + script + ' auto-update"',
     'สร้างงาน SDCAgentAutoUpdate');
 
   // โฟลเดอร์อัปเดตต้องไม่ให้ผู้ใช้ทั่วไปเขียน
