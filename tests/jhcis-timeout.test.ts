@@ -230,6 +230,52 @@ describe("a JHCIS server that stops answering", () => {
     // holds whether or not a database is reachable.
     await expect(db.query("UPDATE visitdrug SET unit = 1")).rejects.toThrow(/read-only/i);
     await expect(db.query("DELETE FROM visit")).rejects.toThrow(/read-only/i);
+    await expect(db.query("DROP TABLE visit")).rejects.toThrow(/read-only/i);
+    await expect(db.query("ALTER TABLE cdrug CONVERT TO CHARACTER SET utf8")).rejects.toThrow(
+      /read-only/i,
+    );
+    await expect(db.query("TRUNCATE TABLE visitdrug")).rejects.toThrow(/read-only/i);
+    await expect(db.query("REPLACE INTO cdrug VALUES (1)")).rejects.toThrow(/read-only/i);
+    // Including the one statement the charset gate is allowed to send: the
+    // exception lives inside charsetReport on its own connection, and is not
+    // a hole in the general guard that anything else could reach through.
+    await expect(db.query("SET NAMES utf8")).rejects.toThrow(/read-only/i);
+    await expect(db.query("SET NAMES latin1")).rejects.toThrow(/read-only/i);
     await db.close();
+  });
+
+  it("sends exactly one non-read statement, and it changes only the session", () => {
+    // The whole surface, read from the source. JHCIS is read-only except for a
+    // SET NAMES that touches no table, no row and no schema - so this is the
+    // list that has to stay at one item.
+    const source = readFileSync(
+      resolve(process.cwd(), "agent/src/jhcis/connection.ts"),
+      "utf8",
+    );
+    const allowed = /const SESSION_CHARSET_SQL = "([^"]+)";/.exec(source)?.[1];
+    expect(allowed).toBe("SET NAMES utf8");
+    // It is an exact literal, not a pattern that "anything starting with SET"
+    // could satisfy later.
+    expect(source).not.toMatch(/SESSION_CHARSET_SQL\s*=\s*`/);
+    // And nothing in the JHCIS layer writes.
+    const layer = ["connection.ts", "extractor.ts", "schema-inspector.ts", "repositories.ts"]
+      .map((f) => {
+        try {
+          return readFileSync(resolve(process.cwd(), "agent/src/jhcis", f), "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n")
+      // Comments explain the forbidden statements by name, so they are removed
+      // before the scan rather than counted as occurrences.
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    for (const forbidden of [/INSERT\s+INTO/i, /UPDATE\s+\w+\s+SET/i, /DELETE\s+FROM/i,
+      /DROP\s+(TABLE|DATABASE)/i, /ALTER\s+TABLE/i, /TRUNCATE/i, /CREATE\s+TABLE/i]) {
+      expect(layer, `forbidden statement ${forbidden} reached the JHCIS layer`).not.toMatch(
+        forbidden,
+      );
+    }
   });
 });

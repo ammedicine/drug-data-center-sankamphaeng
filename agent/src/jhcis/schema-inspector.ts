@@ -143,13 +143,11 @@ export class SchemaInspector {
     // Before anything reads Thai, prove the session can carry it. A connection
     // that quietly stayed on latin1 turns every Thai character into "?" at the
     // server, and no later step can tell that from a drug genuinely named "???".
-    const charset = await this.db.charsetReport();
-    if (!charset.ok) {
-      warnings.push(
-        `พบปัญหาชุดอักขระของการเชื่อมต่อ (client ${charset.client} / connection ` +
-          `${charset.connection} / results ${charset.results}) ข้อความภาษาไทยอาจอ่านไม่ถูกต้อง`,
-      );
-    } else if (charset.repaired) {
+    // Not "reported and carried on": an unsafe session throws, and the run
+    // ends before a single Thai character is read. `agent doctor` catches it
+    // to show the diagnosis; the sync path deliberately does not.
+    const charset = await this.db.assertSafeCharset();
+    if (charset.repaired) {
       warnings.push("ตั้งชุดอักขระของการเชื่อมต่อเป็น utf8 ให้อัตโนมัติแล้ว");
     }
     for (const table of REQUIRED_TABLES) {

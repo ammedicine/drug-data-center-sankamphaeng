@@ -20,7 +20,7 @@
 import { desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { agents, facilities, syncBatches, users } from "@/lib/db/schema";
+import { agents, auditLogs, facilities, syncBatches, users } from "@/lib/db/schema";
 import {
   NO_CAPABILITIES,
   parseCapabilities,
@@ -293,14 +293,22 @@ export function resetReadiness(rows: FleetAgentRow[]): ResetReadinessRow[] {
 }
 
 /**
- * Changes what the centre has decided for one agent.
+ * The raw state change, with no actor and no audit. INTERNAL.
  *
- * Returns the new revision so a caller can report it. The revision is what
- * makes an instruction idempotent at the agent: the same PAUSED arriving on
- * every heartbeat for an hour is one instruction, acted on once, not one an
- * hour's worth of side effects.
+ * Nothing in the application may call this. A pause is the instruction that
+ * makes a reset safe, so "who stopped this สถานบริการ, and when" has to be
+ * answerable afterwards - and an audit written by a separate call is an audit
+ * a caller can forget to write. The production canary proved exactly that:
+ * fifteen agents paused and resumed with paused_by_user_id null and not one
+ * audit row, because the mutation was reachable without the wrapper.
+ *
+ * So the audited path below is the only way in, and this is kept exported
+ * solely so fixtures and migrations can arrange a starting state.
+ * `tests/pause-authorization.test.ts` fails if any file under src/ imports it.
+ *
+ * @internal
  */
-export async function setAgentSyncControl(input: {
+export async function unauditedSetAgentSyncControl(input: {
   agentId: string;
   desired: SyncControlState;
   actorUserId: string;
@@ -331,6 +339,153 @@ export async function setAgentSyncControl(input: {
     .where(eq(agents.id, input.agentId));
 
   return { changed: true, revision };
+}
+
+/** Refused because the actor is not a SUPER_ADMIN, or is not a usable account. */
+export class SyncControlAuthorizationError extends Error {
+  constructor(message = "เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่สั่งหยุด/เปิดการซิงก์ได้") {
+    super(message);
+    this.name = "SyncControlAuthorizationError";
+  }
+}
+
+/** Who is asking. The label is an email or username - never a credential. */
+export interface SyncControlActor {
+  userId: string;
+  label?: string | null;
+  ip?: string | null;
+}
+
+/** What happened to one agent, for the caller to report and for tests to read. */
+export interface SyncControlOutcome {
+  agentId: string;
+  facilityId: string | null;
+  agentName: string;
+  changed: boolean;
+  revision: number;
+  /** why nothing happened, when nothing did */
+  skipped: "ALREADY_IN_STATE" | "NOT_FOUND" | null;
+}
+
+/**
+ * The one way an administrator may stop or start an agent's sync.
+ *
+ * Three things are deliberately inside this function rather than around it:
+ *
+ * The role is re-read from the database rather than taken from the caller.
+ * A session says what somebody was when they signed in; an account demoted or
+ * disabled five minutes ago must not still be able to stop a สถานบริการ.
+ *
+ * The state change and its audit row are one transaction. If the audit cannot
+ * be written the pause does not happen, which is the opposite of the usual
+ * rule for audit writes - and correct here, because a pause nobody can attribute
+ * is exactly the thing that must not exist before a district-wide reset.
+ *
+ * Idempotence is decided by the state, not by the request. Pressing PAUSE twice
+ * is one transition and one audit row, because the second press changes nothing
+ * and an audit trail of non-events is a trail nobody reads.
+ */
+export async function changeAgentSyncControl(input: {
+  agentIds: string[];
+  desired: SyncControlState;
+  reason?: string | null;
+  actor: SyncControlActor;
+}): Promise<SyncControlOutcome[]> {
+  const [actor] = await db
+    .select({ id: users.id, role: users.role, isActive: users.isActive, email: users.email })
+    .from(users)
+    .where(eq(users.id, input.actor.userId))
+    .limit(1);
+  if (!actor || !actor.isActive || actor.role !== "SUPER_ADMIN") {
+    throw new SyncControlAuthorizationError();
+  }
+
+  const reason = input.reason?.trim().slice(0, 200) || null;
+  const label = input.actor.label ?? actor.email;
+  const ip = input.actor.ip ?? null;
+  const outcomes: SyncControlOutcome[] = [];
+
+  for (const agentId of input.agentIds) {
+    const [agent] = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        facilityId: agents.facilityId,
+        state: agents.syncControlState,
+        revision: agents.controlRevision,
+      })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .limit(1);
+
+    if (!agent) {
+      outcomes.push({
+        agentId,
+        facilityId: null,
+        agentName: agentId,
+        changed: false,
+        revision: 0,
+        skipped: "NOT_FOUND",
+      });
+      continue;
+    }
+
+    if (agent.state === input.desired) {
+      outcomes.push({
+        agentId,
+        facilityId: agent.facilityId,
+        agentName: agent.name,
+        changed: false,
+        revision: agent.revision,
+        skipped: "ALREADY_IN_STATE",
+      });
+      continue;
+    }
+
+    const revision = agent.revision + 1;
+    const pausing = input.desired === "PAUSED";
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(agents)
+        .set({
+          syncControlState: input.desired,
+          controlRevision: revision,
+          // Pause metadata identifies the administrator who stopped this
+          // สถานบริการ. Resuming clears the live fields and nothing else: the
+          // audit row below is the permanent record and is never rewritten.
+          ...(pausing
+            ? { pausedAt: new Date(), pausedByUserId: actor.id, pauseReason: reason }
+            : { pausedAt: null, pausedByUserId: null, pauseReason: null }),
+        })
+        .where(eq(agents.id, agentId));
+
+      await tx.insert(auditLogs).values({
+        actorType: "USER",
+        actorId: actor.id,
+        actorLabel: label,
+        action: pausing ? "AGENT_SYNC_PAUSED" : "AGENT_SYNC_RESUMED",
+        resource: "agent",
+        resourceId: agentId,
+        facilityId: agent.facilityId,
+        ip,
+        // Safe metadata only: who, which agent, why, which revision. No
+        // credential, no token, no payload, nothing about a patient.
+        metadata: { agentName: agent.name, reason, controlRevision: revision },
+      });
+    });
+
+    outcomes.push({
+      agentId,
+      facilityId: agent.facilityId,
+      agentName: agent.name,
+      changed: true,
+      revision,
+      skipped: null,
+    });
+  }
+
+  return outcomes;
 }
 
 /** The default an agent uses when it has never been told otherwise. */

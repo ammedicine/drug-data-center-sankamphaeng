@@ -6,7 +6,11 @@ import { revalidatePath } from "next/cache";
 
 import { issueEnrollmentToken } from "@/lib/agent-auth/enrollment";
 import { effectiveStatus, listRunningBatches } from "@/lib/services/monitoring";
-import { resolveAgentIds, setAgentSyncControl } from "@/lib/services/fleet";
+import {
+  changeAgentSyncControl,
+  resolveAgentIds,
+  SyncControlAuthorizationError,
+} from "@/lib/services/fleet";
 import { countFacilityUsage, purgeFacilityUsage } from "@/lib/services/sync";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
@@ -885,50 +889,40 @@ async function applySyncControl(
   reason: string | null,
 ): Promise<ActionState> {
   const user = await requireApiUser();
+  // Checked here as well as in the service, so an unauthorised request is
+  // refused with a sentence a person can read rather than an exception.
   if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่สั่งหยุด/เปิดการซิงก์ได้");
   if (!agentIds.length) return fail("ยังไม่ได้เลือก Agent");
 
   const ip = clientIp(await headers());
-  let changed = 0;
 
-  for (const agentId of agentIds) {
-    const [agent] = await db
-      .select({ id: agents.id, name: agents.name, facilityId: agents.facilityId })
-      .from(agents)
-      .where(eq(agents.id, agentId))
-      .limit(1);
-    if (!agent) continue;
-
-    const result = await setAgentSyncControl({
-      agentId,
+  // One call, one transaction per agent, one audit row per real transition.
+  // There is no separate audit step to forget.
+  let outcomes;
+  try {
+    outcomes = await changeAgentSyncControl({
+      agentIds,
       desired,
-      actorUserId: user.userId,
       reason,
+      actor: { userId: user.userId, label: user.email, ip },
     });
-    if (!result.changed) continue;
-    changed += 1;
-
-    await writeAudit({
-      actorType: "USER",
-      actorId: user.userId,
-      actorLabel: user.email,
-      action: desired === "PAUSED" ? "AGENT_SYNC_PAUSED" : "AGENT_SYNC_RESUMED",
-      resource: "agent",
-      resourceId: agentId,
-      facilityId: agent.facilityId,
-      ip,
-      // Safe metadata only: who, which agent, why, and which revision. No
-      // credential, no payload, nothing about a patient.
-      metadata: { agentName: agent.name, reason, controlRevision: result.revision },
-    });
+  } catch (error) {
+    if (error instanceof SyncControlAuthorizationError) return fail(error.message);
+    throw error;
   }
+
+  const changed = outcomes.filter((o) => o.changed).length;
 
   revalidatePath("/admin/agents");
   revalidatePath("/admin/monitoring");
+  revalidatePath("/admin/fleet");
   revalidatePath("/sync");
 
   if (!changed) {
-    return { success: desired === "PAUSED" ? "Agent ที่เลือกหยุดการซิงก์อยู่แล้ว" : "Agent ที่เลือกทำงานอยู่แล้ว" };
+    return {
+      success:
+        desired === "PAUSED" ? "Agent ที่เลือกหยุดการซิงก์อยู่แล้ว" : "Agent ที่เลือกทำงานอยู่แล้ว",
+    };
   }
   return {
     success:

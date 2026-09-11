@@ -237,43 +237,173 @@ describe("reset readiness", () => {
 });
 
 describe("changing what the centre has decided", () => {
-  it("bumps a revision so an agent obeys once, and is idempotent", async () => {
-    requireDatabase();
-    const first = await fleet.setAgentSyncControl({
-      agentId: "agent-run",
-      desired: "PAUSED",
-      actorUserId: "user-1",
-      reason: "ทดสอบ",
-    });
-    expect(first.changed).toBe(true);
-    expect(first.revision).toBe(1);
+  /**
+   * Every one of these goes through changeAgentSyncControl, because that is
+   * the only door production has. The canary proved why: fifteen agents were
+   * paused and resumed through the raw setter, and the centre ended up with
+   * paused_by_user_id null and not one audit row - a district-wide stop that
+   * nobody could be shown to have ordered.
+   */
+  async function auditRows(agentId: string, action?: string) {
+    const c = await mysql.createConnection({ ...SERVER, database: DB });
+    const [rows] = await c.query<mysql.RowDataPacket[]>(
+      `SELECT action, actor_id, actor_label, facility_id, metadata FROM audit_logs
+       WHERE resource = 'agent' AND resource_id = ?` +
+        (action ? " AND action = ?" : "") +
+        " ORDER BY id",
+      action ? [agentId, action] : [agentId],
+    );
+    await c.end();
+    return rows;
+  }
 
-    // Pausing something already paused is not a new instruction.
-    const again = await fleet.setAgentSyncControl({
-      agentId: "agent-run",
+  const actor = { userId: "user-1", label: "admin@example.test", ip: "203.0.113.7" };
+
+  it("pauses once, audits once, and names the administrator who did it", async () => {
+    requireDatabase();
+    const [outcome] = await fleet.changeAgentSyncControl({
+      agentIds: ["agent-run"],
       desired: "PAUSED",
-      actorUserId: "user-1",
       reason: "ทดสอบ",
+      actor,
     });
-    expect(again.changed).toBe(false);
-    expect(again.revision).toBe(1);
+    expect(outcome.changed).toBe(true);
+    expect(outcome.revision).toBe(1);
 
     const rows = await fleet.listFleet();
-    expect(rows.find((r) => r.agentId === "agent-run")!.ingestAllowed).toBe(false);
+    const paused = rows.find((r) => r.agentId === "agent-run")!;
+    expect(paused.ingestAllowed).toBe(false);
+    // The point of the whole exercise: attributable.
+    expect(paused.pausedByName).toBeTruthy();
 
-    // Resuming clears the reason and who paused it, rather than leaving a
-    // stale explanation on a running agent.
-    const resumed = await fleet.setAgentSyncControl({
-      agentId: "agent-run",
+    const audits = await auditRows("agent-run", "AGENT_SYNC_PAUSED");
+    expect(audits).toHaveLength(1);
+    expect(audits[0].actor_id).toBe("user-1");
+    expect(audits[0].facility_id).toBe("fac-a");
+    const meta =
+      typeof audits[0].metadata === "string"
+        ? JSON.parse(audits[0].metadata)
+        : audits[0].metadata;
+    expect(meta.controlRevision).toBe(1);
+    expect(meta.reason).toBe("ทดสอบ");
+    // Safe metadata only - nothing that could carry a credential.
+    expect(JSON.stringify(meta)).not.toMatch(/secret|password|token|keyId/i);
+  });
+
+  it("does not audit a request that changes nothing", async () => {
+    requireDatabase();
+    // The same standing instruction pressed twice is one decision. An audit
+    // trail padded with non-events is one nobody reads during an incident.
+    const [again] = await fleet.changeAgentSyncControl({
+      agentIds: ["agent-run"],
+      desired: "PAUSED",
+      reason: "ทดสอบ",
+      actor,
+    });
+    expect(again.changed).toBe(false);
+    expect(again.skipped).toBe("ALREADY_IN_STATE");
+    expect(again.revision).toBe(1);
+    expect(await auditRows("agent-run", "AGENT_SYNC_PAUSED")).toHaveLength(1);
+  });
+
+  it("resumes once, audits once, and clears the live pause fields only", async () => {
+    requireDatabase();
+    const [resumed] = await fleet.changeAgentSyncControl({
+      agentIds: ["agent-run"],
       desired: "RUNNING",
-      actorUserId: "user-1",
+      actor,
     });
     expect(resumed.changed).toBe(true);
     expect(resumed.revision).toBe(2);
+
     const after = (await fleet.listFleet()).find((r) => r.agentId === "agent-run")!;
     expect(after.pauseReason).toBeNull();
     expect(after.pausedAt).toBeNull();
     expect(after.ingestAllowed).toBe(true);
+
+    expect(await auditRows("agent-run", "AGENT_SYNC_RESUMED")).toHaveLength(1);
+    // History is not rewritten by resuming: the pause is still on the record.
+    expect(await auditRows("agent-run", "AGENT_SYNC_PAUSED")).toHaveLength(1);
+  });
+
+  it("refuses anyone who is not an active SUPER_ADMIN, and writes nothing", async () => {
+    requireDatabase();
+    const c = await mysql.createConnection({ ...SERVER, database: DB });
+    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+    await c.query(
+      `INSERT INTO users (id, username, email, full_name, password_hash, role, is_active,
+         facility_id, created_at, updated_at)
+       VALUES ('user-fac','facadmin','fac@example.test','หัวหน้าสถานบริการ','x','FACILITY_ADMIN',1,
+         'fac-a',?,?),
+              ('user-gone','exadmin','ex@example.test','อดีตผู้ดูแล','x','SUPER_ADMIN',0,NULL,?,?)`,
+      [now, now, now, now],
+    );
+    await c.end();
+
+    const before = (await fleet.listFleet()).find((r) => r.agentId === "agent-run")!;
+
+    for (const userId of ["user-fac", "user-gone", "no-such-user"]) {
+      await expect(
+        fleet.changeAgentSyncControl({
+          agentIds: ["agent-run"],
+          desired: "PAUSED",
+          reason: "ไม่ควรผ่าน",
+          actor: { userId },
+        }),
+      ).rejects.toBeInstanceOf(fleet.SyncControlAuthorizationError);
+    }
+
+    // A demoted or disabled account is refused even though its session may
+    // still say SUPER_ADMIN - the role is re-read, not taken on trust.
+    const after = (await fleet.listFleet()).find((r) => r.agentId === "agent-run")!;
+    expect(after.desiredSyncState).toBe(before.desiredSyncState);
+    expect(after.controlRevision).toBe(before.controlRevision);
+    expect(await auditRows("agent-run", "AGENT_SYNC_PAUSED")).toHaveLength(1);
+  });
+
+  it("audits every agent of a bulk pause, including two at one สถานบริการ", async () => {
+    requireDatabase();
+    const ids = await fleet.resolveAgentIds({ all: true });
+    const outcomes = await fleet.changeAgentSyncControl({
+      agentIds: ids,
+      desired: "PAUSED",
+      reason: "เตรียมล้างข้อมูลทั้งอำเภอ",
+      actor,
+    });
+    // agent-paused and agent-old were already paused, so they are not new
+    // decisions - agent-run is.
+    const changed = outcomes.filter((o) => o.changed).map((o) => o.agentId);
+    expect(changed).toEqual(["agent-run"]);
+
+    for (const agentId of changed) {
+      expect(await auditRows(agentId, "AGENT_SYNC_PAUSED")).not.toHaveLength(0);
+    }
+
+    // Two agents at one สถานบริการ stay independently attributable: pausing
+    // the facility must not merge them into one record.
+    const resumeOne = await fleet.changeAgentSyncControl({
+      agentIds: ["agent-paused"],
+      desired: "RUNNING",
+      actor,
+    });
+    expect(resumeOne[0].changed).toBe(true);
+    expect(await auditRows("agent-paused", "AGENT_SYNC_RESUMED")).toHaveLength(1);
+    expect(await auditRows("agent-run", "AGENT_SYNC_RESUMED")).toHaveLength(1);
+    const rows = await fleet.listFleet();
+    expect(rows.find((r) => r.agentId === "agent-run")!.ingestAllowed).toBe(false);
+    expect(rows.find((r) => r.agentId === "agent-paused")!.ingestAllowed).toBe(true);
+  });
+
+  it("reports an agent that does not exist instead of inventing one", async () => {
+    requireDatabase();
+    const [missing] = await fleet.changeAgentSyncControl({
+      agentIds: ["agent-that-never-enrolled"],
+      desired: "PAUSED",
+      actor,
+    });
+    expect(missing.changed).toBe(false);
+    expect(missing.skipped).toBe("NOT_FOUND");
+    expect(await auditRows("agent-that-never-enrolled")).toHaveLength(0);
   });
 
   it("resolves a bulk selection from the database, not from the browser", async () => {

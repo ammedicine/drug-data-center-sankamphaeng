@@ -5,6 +5,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // Runs before every file, so no test can write into the installed Agent.
+    setupFiles: ["./tests/setup-data-dir.ts"],
     testTimeout: 30_000,
   },
   resolve: {

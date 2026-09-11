@@ -100,7 +100,24 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       ...(body.network?.macAddress ? { macAddress: body.network.macAddress } : {}),
       ...(body.network?.ipAddress ? { ipAddress: body.network.ipAddress } : {}),
       ...(body.network?.interfaceName ? { networkInterface: body.network.interfaceName } : {}),
-      ...(body.lastError ? { lastError: body.lastError, lastErrorAt: now } : {}),
+      // An agent-reported error, and its removal.
+      //
+      // Only setting it was half a rule: nothing ever cleared it, so a refusal
+      // that was correct - a MANUAL_RANGE starting before the collection floor,
+      // which is a person choosing the wrong date, not a fault - stayed on the
+      // สถานบริการ's card for ever, and a genuinely broken agent looked exactly
+      // like a healthy one that had been asked something silly last week.
+      //
+      // A heartbeat that reports no error is the agent saying it has nothing
+      // wrong right now, so the stale text goes. A heartbeat carrying status
+      // ERROR is never treated as healthy even if the message is missing, so
+      // an active fault is never hidden. lastErrorAt is left as it was: when
+      // the last error happened is history, and history is not rewritten.
+      ...(body.lastError
+        ? { lastError: body.lastError, lastErrorAt: now }
+        : body.status === "ERROR"
+          ? {}
+          : { lastError: null }),
 
       // A watermark that has run ahead of real time is corrected here, on the
       // one request every agent makes whatever version it is running.

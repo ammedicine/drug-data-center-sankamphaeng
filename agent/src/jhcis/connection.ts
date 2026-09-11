@@ -18,6 +18,37 @@ import { log } from "../logger";
 
 const READ_ONLY = /^\s*(select|show|describe|desc|explain)\b/i;
 
+/**
+ * The single statement allowed through that is not a read.
+ *
+ * It changes one setting of one session and touches no table, no row and no
+ * schema - JHCIS stays read-only in every sense that matters. It is an exact
+ * literal rather than a pattern, so "anything starting with SET" can never
+ * become allowed by accident.
+ */
+const SESSION_CHARSET_SQL = "SET NAMES utf8";
+
+/**
+ * Thrown when the session cannot be made to carry Thai.
+ *
+ * Reading on through it is the one outcome worse than stopping: the server
+ * replaces every Thai character with "?" on its way out, so what arrives is
+ * indistinguishable from a drug genuinely named that, and the original bytes
+ * are gone before anything downstream could notice. Nothing is extracted and
+ * nothing is uploaded after this.
+ */
+export class UnsafeJhcisCharsetError extends Error {
+  readonly code = "UNSAFE_JHCIS_CHARSET";
+  constructor(readonly report: CharsetReport) {
+    super(
+      "การเชื่อมต่อ JHCIS ไม่สามารถใช้ชุดอักขระ UTF-8 ได้ " +
+        `(client ${report.client} / connection ${report.connection} / results ${report.results}) ` +
+        "หยุดการดึงและส่งข้อมูลเพื่อป้องกันข้อความภาษาไทยเสียหาย",
+    );
+    this.name = "UnsafeJhcisCharsetError";
+  }
+}
+
 /** Thrown when JHCIS accepted the work and then stopped answering. */
 export class JhcisTimeoutError extends Error {
   constructor(stage: string, ms: number) {
@@ -199,45 +230,85 @@ export class JhcisConnection {
    * a single row of JHCIS.
    */
   async charsetReport(): Promise<CharsetReport> {
-    const read = async (): Promise<Omit<CharsetReport, "ok" | "repaired">> => {
-      const row = await this.queryOne<
-        RowDataPacket & { v: string; cl: string; cn: string; r: string }
-      >(
-        "SELECT VERSION() AS v, @@character_set_client AS cl, " +
-          "@@character_set_connection AS cn, @@character_set_results AS r",
-      );
-      return {
-        version: String(row?.v ?? "unknown"),
-        client: String(row?.cl ?? "unknown"),
-        connection: String(row?.cn ?? "unknown"),
-        results: String(row?.r ?? "unknown"),
+    // One connection for the whole check.
+    //
+    // This is the entire fix. The old version read the session through the
+    // pool, sent SET NAMES through the pool, and read again through the pool -
+    // three acquisitions that are only the same socket when nothing else is
+    // running. During a sync something else is always running, so the repair
+    // could land on one connection and the verification on another, and the
+    // result was a report that contradicted the session it claimed to
+    // describe. Worse, the repair went through query(), whose read-only guard
+    // refused it outright: on a genuinely latin1 server nothing was ever
+    // repaired at all.
+    const connection: PoolConnection = await withDeadline(
+      this.getPool().getConnection(),
+      JHCIS_ACQUIRE_TIMEOUT_MS,
+      "รอช่องเชื่อมต่อ",
+    );
+
+    try {
+      const read = async (): Promise<Omit<CharsetReport, "ok" | "repaired">> => {
+        const [rows] = await connection.query<
+          (RowDataPacket & { v: string; cl: string; cn: string; r: string })[]
+        >({
+          sql:
+            "SELECT VERSION() AS v, @@character_set_client AS cl, " +
+            "@@character_set_connection AS cn, @@character_set_results AS r",
+          timeout: JHCIS_QUERY_TIMEOUT_MS,
+        });
+        const row = rows[0];
+        return {
+          version: String(row?.v ?? "unknown"),
+          client: String(row?.cl ?? "unknown"),
+          connection: String(row?.cn ?? "unknown"),
+          results: String(row?.r ?? "unknown"),
+        };
       };
-    };
 
-    let seen = await read();
-    let repaired = false;
+      let seen = await read();
+      let repaired = false;
 
-    if (!utf8Family(seen.client) || !utf8Family(seen.connection) || !utf8Family(seen.results)) {
-      log.warn("การเชื่อมต่อ JHCIS ไม่ได้ใช้ชุดอักขระ UTF-8 กำลังตั้งใหม่ให้ session นี้", {
-        client: seen.client,
-        connection: seen.connection,
-        results: seen.results,
-      });
-      // Session-scoped, and the only form every supported version accepts.
-      await this.query("SET NAMES utf8");
-      seen = await read();
-      repaired = true;
+      if (!utf8Family(seen.client) || !utf8Family(seen.connection) || !utf8Family(seen.results)) {
+        log.warn("การเชื่อมต่อ JHCIS ไม่ได้ใช้ชุดอักขระ UTF-8 กำลังตั้งใหม่ให้ session นี้", {
+          client: seen.client,
+          connection: seen.connection,
+          results: seen.results,
+        });
+        // Session-scoped, on THIS connection, and the only form every supported
+        // version accepts. It writes nothing to JHCIS.
+        await connection.query({ sql: SESSION_CHARSET_SQL, timeout: JHCIS_QUERY_TIMEOUT_MS });
+        // Re-read on the same socket, so the answer is about the session that
+        // was just corrected rather than whichever one the pool handed back.
+        seen = await read();
+        repaired = true;
+      }
+
+      const ok = utf8Family(seen.client) && utf8Family(seen.connection) && utf8Family(seen.results);
+      if (!ok) {
+        log.error("ตั้งชุดอักขระของการเชื่อมต่อ JHCIS ไม่สำเร็จ", {
+          client: seen.client,
+          connection: seen.connection,
+          results: seen.results,
+        });
+      }
+      return { ...seen, ok, repaired };
+    } finally {
+      connection.release();
     }
+  }
 
-    const ok = utf8Family(seen.client) && utf8Family(seen.connection) && utf8Family(seen.results);
-    if (!ok) {
-      log.error("ตั้งชุดอักขระของการเชื่อมต่อ JHCIS ไม่สำเร็จ", {
-        client: seen.client,
-        connection: seen.connection,
-        results: seen.results,
-      });
-    }
-    return { ...seen, ok, repaired };
+  /**
+   * The gate every read passes before any Thai is fetched.
+   *
+   * Reporting an encoding problem and carrying on was never enough: a warning
+   * in a schema report is read by somebody afterwards, while "?" in a drug name
+   * is permanent the moment it is stored. So an unsafe session stops the run.
+   */
+  async assertSafeCharset(): Promise<CharsetReport> {
+    const report = await this.charsetReport();
+    if (!report.ok) throw new UnsafeJhcisCharsetError(report);
+    return report;
   }
 
   async ping(): Promise<void> {

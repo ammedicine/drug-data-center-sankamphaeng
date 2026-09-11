@@ -30,7 +30,7 @@ import {
 import { userInfo } from "node:os";
 
 import { CentralClient } from "./central/client";
-import { JhcisConnection } from "./jhcis/connection";
+import { JhcisConnection, UnsafeJhcisCharsetError } from "./jhcis/connection";
 import { UsageExtractor } from "./jhcis/extractor";
 import { SchemaInspector } from "./jhcis/schema-inspector";
 import { log } from "./logger";
@@ -74,7 +74,28 @@ async function doctor(): Promise<void> {
     console.log("Status: CONNECTED\n");
 
     const inspector = new SchemaInspector(db);
-    const { report, mapping } = await inspector.inspect();
+    let inspected;
+    try {
+      inspected = await inspector.inspect();
+    } catch (error) {
+      // The one failure a diagnostic tool must explain rather than re-throw:
+      // somebody running `agent doctor` because Thai looks wrong needs to be
+      // told that is exactly what was found, and what the session ended up on.
+      if (error instanceof UnsafeJhcisCharsetError) {
+        console.log("## ชุดอักขระ");
+        console.log(`สถานะ: UNSAFE_JHCIS_CHARSET`);
+        console.log(`client: ${error.report.client}`);
+        console.log(`connection: ${error.report.connection}`);
+        console.log(`results: ${error.report.results}`);
+        console.log(`MySQL version: ${error.report.version}`);
+        console.log(`
+${error.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+    const { report, mapping } = inspected;
 
     console.log("## Database");
     console.log(`MySQL version: ${report.mysqlVersion}`);
@@ -265,6 +286,14 @@ async function verify(): Promise<void> {
     repair: !has("check-only"),
     }),
   );
+
+  if (result.skipped === "PAUSED") {
+    // Never "complete": nothing was compared. Somebody preparing a reset has
+    // to be able to tell "checked and correct" from "not checked at all".
+    console.log("ข้ามการตรวจสอบ เนื่องจาก Agent ถูกหยุดโดยผู้ดูแลระบบ");
+    console.log("ยังไม่ทราบความครบถ้วนของข้อมูล เพราะไม่ได้ตรวจสอบเดือนใดเลย");
+    return;
+  }
 
   console.log(`ตรวจสอบ ${result.checked} เดือน`);
   if (!result.mismatched.length) {

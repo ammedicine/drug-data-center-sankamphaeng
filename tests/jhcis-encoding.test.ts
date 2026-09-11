@@ -38,6 +38,22 @@ const FIXTURES = [
 ];
 
 let available = false;
+let setupError: unknown = null;
+
+/**
+ * Fails rather than skips. This is the gate that stands between JHCIS and
+ * 2,919 drug names arriving as "???" - a green run that happened because
+ * nobody started MySQL would be worse than no gate at all.
+ */
+function requireDatabase() {
+  if (!available) {
+    const detail = setupError instanceof Error ? setupError.message : String(setupError);
+    throw new Error(
+      `The charset gate needs MySQL on ${SERVER.host}:${SERVER.port} and must never pass ` +
+        `without it. Cause: ${detail}`,
+    );
+  }
+}
 
 beforeAll(async () => {
   try {
@@ -65,7 +81,9 @@ beforeAll(async () => {
     await c.query("INSERT INTO cdrug (drugcode, drugname, drugnamethai) VALUES ('D007', NULL, NULL)");
     await c.end();
     available = true;
-  } catch {
+  } catch (error) {
+    console.error("[charset gate] setup failed:", error);
+    setupError = error;
     available = false;
   }
 }, 120_000);
@@ -95,7 +113,7 @@ describe("the charset the Agent asks for", () => {
 
 describe("Thai text through a real server", () => {
   it("comes back exactly as it went in", async () => {
-    if (!available) return;
+    requireDatabase();
     const c = await mysql.createConnection({ ...SERVER, database: DB, charset: "utf8_general_ci" });
     const [rows] = (await c.query("SELECT drugcode, drugname FROM cdrug ORDER BY drugcode")) as [
       Array<Record<string, unknown>>,
@@ -119,7 +137,7 @@ describe("Thai text through a real server", () => {
   }, 60_000);
 
   it("survives the connection charset the server maps to something else", async () => {
-    if (!available) return;
+    requireDatabase();
     // MySQL 8 reports this session as utf8mb3; 5.1 reports it as utf8. Same
     // three-byte family, same bytes, and Thai lives entirely inside it.
     const c = await mysql.createConnection({ ...SERVER, database: DB, charset: "utf8_general_ci" });
@@ -139,7 +157,7 @@ describe("Thai text through a real server", () => {
 
 describe("the session assertion", () => {
   it("repairs a session that came up on the wrong charset", async () => {
-    if (!available) return;
+    requireDatabase();
     // Reproduces the production failure: a connection that ends up on latin1.
     // The assertion has to notice and fix it rather than read Thai through it.
     const { JhcisConnection } = await import("../agent/src/jhcis/connection");
@@ -178,7 +196,7 @@ describe("the session assertion", () => {
 
 describe("the fallback, when the session comes up wrong", () => {
   it("detects an unsafe session, repairs it, and only then reads", async () => {
-    if (!available) return;
+    requireDatabase();
     // The whole point of the fallback: a server that ignores the handshake
     // charset. Forced here by asking for latin1 - which is exactly the state
     // MySQL 5.1 was left in when it was handed a charset it did not know.
@@ -213,26 +231,180 @@ describe("the fallback, when the session comes up wrong", () => {
     await db.close();
   }, 60_000);
 
-  it("reports an encoding problem rather than reading through it", async () => {
-    if (!available) return;
-    // When the session cannot be made safe, the schema report must carry a
-    // warning - uploading "???" silently is the one outcome worse than failing,
-    // because it is indistinguishable from a drug genuinely named that.
+  /**
+   * The cross-connection false failure, which is what production actually hit.
+   *
+   * charsetReport() used to read the session through the pool, send SET NAMES
+   * through the pool, and read again through the pool. Three acquisitions are
+   * only the same socket when nothing else is running, and during a sync
+   * something always is - so the answer could describe a different session
+   * from the one it repaired. With a pool of two and concurrent work in
+   * flight, every report must still be about the connection it corrected.
+   */
+  it("stays correct with a pool of two and other queries in flight", async () => {
+    requireDatabase();
+    const { JhcisConnection } = await import("../agent/src/jhcis/connection");
+    const db = new JhcisConnection({
+      host: SERVER.host, port: SERVER.port, user: SERVER.user,
+      password: SERVER.password, database: DB, charset: "latin1_swedish_ci",
+    } as never);
+
+    // Keep the other connection of the pool busy for the whole check, so a
+    // report that borrows the wrong socket has every chance to do so.
+    const noise = async () => {
+      for (let i = 0; i < 12; i++) {
+        await db.query("SELECT drugname FROM cdrug WHERE drugcode = 'D001'");
+      }
+    };
+
+    const [a, b, , thai] = await Promise.all([
+      db.charsetReport(),
+      db.charsetReport(),
+      noise(),
+      db.query<{ drugname: string } & RowDataPacket>(
+        "SELECT drugname FROM cdrug WHERE drugcode = 'D002'",
+      ),
+    ]);
+
+    for (const report of [a, b]) {
+      expect(report.ok).toBe(true);
+      expect(report.client).toMatch(/^utf8(mb3)?$/);
+      expect(report.connection).toMatch(/^utf8(mb3)?$/);
+      expect(report.results).toMatch(/^utf8(mb3)?$/);
+    }
+    // And nothing was corrupted while all that was happening.
+    expect(thai[0]?.drugname).toBe("อะม็อกซีซิลลิน");
+    await db.close();
+  }, 60_000);
+
+  it("repairs on the same connection it then verifies", async () => {
+    requireDatabase();
+    // Proven by connection id: the SET NAMES and both reads have to be one
+    // session, or the verdict is about somebody else's socket.
     const { JhcisConnection } = await import("../agent/src/jhcis/connection");
     const db = new JhcisConnection({
       host: SERVER.host, port: SERVER.port, user: SERVER.user,
       password: SERVER.password, database: DB,
     } as never);
 
-    // Stub the reader so the session always looks unsafe, however often it is
-    // re-read - the shape of a server that refuses to change.
-    const stuck = { v: "5.1.73", cl: "latin1", cn: "latin1", r: "latin1" };
-    (db as unknown as { queryOne: unknown }).queryOne = async () => stuck;
-    (db as unknown as { query: unknown }).query = async () => [];
+    const seen: number[] = [];
+    const pool = (db as unknown as { getPool: () => { getConnection: () => Promise<unknown> } }).getPool.call(db);
+    const original = pool.getConnection.bind(pool);
+    pool.getConnection = async () => {
+      const connection = (await original()) as {
+        query: (...args: unknown[]) => Promise<unknown>;
+        threadId?: number;
+      };
+      if (typeof connection.threadId === "number") seen.push(connection.threadId);
+      return connection;
+    };
+
+    const report = await db.charsetReport();
+    expect(report.ok).toBe(true);
+    // Exactly one connection was taken for the entire read/repair/re-read.
+    expect(seen).toHaveLength(1);
+    await db.close();
+  }, 60_000);
+
+  it("accepts utf8mb3, which is what MySQL 8 calls the same family", async () => {
+    requireDatabase();
+    // 5.1 says "utf8", 8.x says "utf8mb3" for the identical three-byte family.
+    // Refusing the newer name would stop every สถานบริการ that upgraded.
+    const source = readFileSync(resolve(process.cwd(), "agent/src/jhcis/connection.ts"), "utf8");
+    const pattern = /function utf8Family\(name: string\): boolean \{\s*return (.+);/.exec(source);
+    expect(pattern).toBeTruthy();
+    const test = new Function("name", `return ${pattern![1].replace("String(name ?? \"\").trim()", "String(name)")};`);
+    expect(test("utf8")).toBe(true);
+    expect(test("utf8mb3")).toBe(true);
+    expect(test("utf8mb4")).toBe(true);
+    expect(test("latin1")).toBe(false);
+    expect(test("tis620")).toBe(false);
+  });
+
+  it("refuses to read at all when the session cannot be made safe", async () => {
+    requireDatabase();
+    // A server that takes SET NAMES and stays where it is. Reading on through
+    // this is the one outcome worse than stopping: "???" is indistinguishable
+    // from a drug genuinely named that, and the bytes are gone by then.
+    const { JhcisConnection, UnsafeJhcisCharsetError } = await import(
+      "../agent/src/jhcis/connection"
+    );
+    const db = new JhcisConnection({
+      host: SERVER.host, port: SERVER.port, user: SERVER.user,
+      password: SERVER.password, database: DB,
+    } as never);
+
+    const statements: string[] = [];
+    const pool = (
+      db as unknown as { getPool: () => { getConnection: () => Promise<unknown> } }
+    ).getPool.call(db);
+    pool.getConnection = async () => ({
+      query: async (arg: { sql: string } | string) => {
+        const sql = typeof arg === "string" ? arg : arg.sql;
+        statements.push(sql);
+        if (/character_set_client/i.test(sql)) {
+          return [[{ v: "5.1.73", cl: "latin1", cn: "latin1", r: "latin1" }]];
+        }
+        return [[]]; // SET NAMES accepted and ignored, as such a server does
+      },
+      release: () => undefined,
+      destroy: () => undefined,
+    });
 
     const report = await db.charsetReport();
     expect(report.ok).toBe(false);
     expect(report.repaired).toBe(true); // it did try
+    // It tried on the same connection, and re-read there: read, repair, read.
+    expect(statements).toHaveLength(3);
+    expect(statements[1]).toBe("SET NAMES utf8");
+
+    let thrown: unknown;
+    try {
+      await db.assertSafeCharset();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(UnsafeJhcisCharsetError);
+    expect((thrown as { code: string }).code).toBe("UNSAFE_JHCIS_CHARSET");
+    await db.close();
+  }, 60_000);
+
+  it("stops the schema inspector before a single Thai character is read", async () => {
+    requireDatabase();
+    // The gate is not advisory. inspect() is what every read path goes through
+    // first, and an unsafe session must end the run there - so no extraction
+    // query is ever issued and no chunk is ever queued.
+    const { JhcisConnection, UnsafeJhcisCharsetError } = await import(
+      "../agent/src/jhcis/connection"
+    );
+    const { SchemaInspector } = await import("../agent/src/jhcis/schema-inspector");
+    const db = new JhcisConnection({
+      host: SERVER.host, port: SERVER.port, user: SERVER.user,
+      password: SERVER.password, database: DB,
+    } as never);
+
+    let reads = 0;
+    const pool = (
+      db as unknown as { getPool: () => { getConnection: () => Promise<unknown> } }
+    ).getPool.call(db);
+    pool.getConnection = async () => ({
+      query: async (arg: { sql: string } | string) => {
+        const sql = typeof arg === "string" ? arg : arg.sql;
+        if (/character_set_client/i.test(sql)) {
+          return [[{ v: "5.1.73", cl: "latin1", cn: "latin1", r: "latin1" }]];
+        }
+        if (/^\s*select/i.test(sql) || /^\s*show/i.test(sql)) reads += 1;
+        return [[]];
+      },
+      release: () => undefined,
+      destroy: () => undefined,
+    });
+
+    await expect(new SchemaInspector(db).inspect()).rejects.toBeInstanceOf(
+      UnsafeJhcisCharsetError,
+    );
+    // Not one table was inspected and not one row was fetched afterwards.
+    expect(reads).toBe(0);
     await db.close();
   }, 60_000);
 });

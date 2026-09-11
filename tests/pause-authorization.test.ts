@@ -12,7 +12,7 @@
  * be built on nothing. So the guard is checked against a real paused row in a
  * real database, and every mutating entry point is checked for calling it.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import mysql from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -60,12 +60,19 @@ beforeAll(async () => {
       [now, now],
     );
     await c.query(
+      `INSERT INTO users (id, username, email, full_name, password_hash, role, is_active,
+         created_at, updated_at)
+       VALUES ('user-super','super','super@example.test','ผู้ดูแลส่วนกลาง','x','SUPER_ADMIN',1,?,?)`,
+      [now, now],
+    );
+    await c.query(
       `INSERT INTO agents (id, facility_id, name, status, sync_interval_minutes, reprocess_days,
          pending_batches, sync_count, failed_count, sync_control_state, control_revision,
          pause_reason, created_at, updated_at)
        VALUES ('agent-paused','fac-1','หยุดอยู่','ONLINE',60,7,0,0,0,'PAUSED',1,'เตรียมล้างข้อมูล',?,?),
-              ('agent-running','fac-1','ทำงานอยู่','ONLINE',60,7,0,0,0,'RUNNING',0,NULL,?,?)`,
-      [now, now, now, now],
+              ('agent-running','fac-1','ทำงานอยู่','ONLINE',60,7,0,0,0,'RUNNING',0,NULL,?,?),
+              ('agent-action','fac-1','ผ่านหน้าเว็บ','ONLINE',60,7,0,0,0,'RUNNING',0,NULL,?,?)`,
+      [now, now, now, now, now, now],
     );
     await c.end();
     available = true;
@@ -123,10 +130,12 @@ describe("the barrier itself", () => {
   it("reads the database every time, so a pause takes effect immediately", async () => {
     requireDatabase();
     const { assertAgentSyncAllowed } = await import("@/lib/agent-auth/sync-control");
-    const { setAgentSyncControl } = await import("@/lib/services/fleet");
+    // The internal setter, used here only to arrange a starting state - the
+    // audited path is exercised by the server-action tests below.
+    const { unauditedSetAgentSyncControl } = await import("@/lib/services/fleet");
 
     await expect(assertAgentSyncAllowed("agent-running")).resolves.toBeUndefined();
-    await setAgentSyncControl({
+    await unauditedSetAgentSyncControl({
       agentId: "agent-running",
       desired: "PAUSED",
       actorUserId: "user-1",
@@ -232,5 +241,129 @@ describe("who may press the button", () => {
 
     vi.doUnmock("@/lib/auth/rbac");
     vi.resetModules();
+  });
+
+  /**
+   * The production path, end to end, with a real administrator.
+   *
+   * This is the test the canary could not be: on 05957 the pause was applied
+   * through the service, so paused_by_user_id stayed null and no audit row was
+   * written, and nothing in the suite noticed. Here the server action itself is
+   * called - the same function the button posts to - and the database is read
+   * afterwards to see what it left behind.
+   */
+  it("writes exactly one audit row per real transition, through the action", async () => {
+    requireDatabase();
+    vi.resetModules();
+    vi.doMock("@/lib/auth/rbac", () => ({
+      requireApiUser: async () => ({
+        userId: "user-super",
+        email: "super@example.test",
+        role: "SUPER_ADMIN",
+        facilityId: null,
+        fullName: "ผู้ดูแลส่วนกลาง",
+      }),
+      isSuperAdmin: (user: { role: string }) => user.role === "SUPER_ADMIN",
+      canApproveRegistration: () => true,
+      canManageFacility: () => true,
+      canManageUsers: () => true,
+      canTriggerSync: () => true,
+    }));
+    vi.doMock("next/headers", () => ({
+      headers: async () => new Headers({ "x-forwarded-for": "203.0.113.9" }),
+    }));
+    vi.doMock("next/cache", () => ({ revalidatePath: () => undefined }));
+
+    const actions = await import("@/app/(app)/admin/actions");
+    const form = new FormData();
+    form.set("scope", "selected");
+    form.append("agentId", "agent-action");
+    form.set("reason", "เตรียมล้างข้อมูล");
+
+    const paused = await actions.pauseAgentSyncAction({}, form);
+    expect(paused.error).toBeUndefined();
+    expect(paused.success).toBeTruthy();
+
+    const c = await mysql.createConnection({ ...SERVER, database: DB });
+    const audits = async (action: string) => {
+      const [rows] = await c.query<mysql.RowDataPacket[]>(
+        "SELECT actor_id, actor_label, ip, facility_id, metadata FROM audit_logs " +
+          "WHERE resource='agent' AND resource_id='agent-action' AND action=? ORDER BY id",
+        [action],
+      );
+      return rows;
+    };
+    const agentRow = async () => {
+      const [rows] = await c.query<mysql.RowDataPacket[]>(
+        "SELECT sync_control_state, control_revision, paused_by_user_id, pause_reason " +
+          "FROM agents WHERE id='agent-action'",
+      );
+      return rows[0];
+    };
+
+    const afterPause = await agentRow();
+    expect(afterPause.sync_control_state).toBe("PAUSED");
+    // Attributable, which was the whole point.
+    expect(afterPause.paused_by_user_id).toBe("user-super");
+
+    const pauseAudits = await audits("AGENT_SYNC_PAUSED");
+    expect(pauseAudits).toHaveLength(1);
+    expect(pauseAudits[0].actor_id).toBe("user-super");
+    expect(pauseAudits[0].ip).toBe("203.0.113.9");
+    expect(pauseAudits[0].facility_id).toBe("fac-1");
+
+    // Pressing it again is not a second decision.
+    await actions.pauseAgentSyncAction({}, form);
+    expect(await audits("AGENT_SYNC_PAUSED")).toHaveLength(1);
+    expect((await agentRow()).control_revision).toBe(afterPause.control_revision);
+
+    const resumedAction = await actions.resumeAgentSyncAction({}, form);
+    expect(resumedAction.error).toBeUndefined();
+    const afterResume = await agentRow();
+    expect(afterResume.sync_control_state).toBe("RUNNING");
+    expect(afterResume.paused_by_user_id).toBeNull();
+    expect(afterResume.pause_reason).toBeNull();
+    expect(await audits("AGENT_SYNC_RESUMED")).toHaveLength(1);
+    // The pause is still on the record afterwards: resuming clears the live
+    // fields, never the history.
+    expect(await audits("AGENT_SYNC_PAUSED")).toHaveLength(1);
+
+    await c.end();
+    vi.doUnmock("@/lib/auth/rbac");
+    vi.resetModules();
+  });
+
+  /**
+   * The bypass itself, closed by construction.
+   *
+   * A wrapper that callers must remember to use is a wrapper somebody will one
+   * day forget - and the forgetting is silent. So the application is not
+   * allowed to reach the raw setter at all, and this fails the build if it ever
+   * does again.
+   */
+  it("keeps the unaudited setter out of the application entirely", () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = resolve(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name)) {
+          const body = readFileSync(full, "utf8");
+          if (body.includes("unauditedSetAgentSyncControl") && !full.includes("services")) {
+            offenders.push(full);
+          }
+        }
+      }
+    };
+    walk(resolve(process.cwd(), "src"));
+    expect(offenders, `these reach the unaudited setter: ${offenders.join(", ")}`).toEqual([]);
+
+    // And the audited one is what the admin action uses.
+    const action = readFileSync(
+      resolve(process.cwd(), "src/app/(app)/admin/actions.ts"),
+      "utf8",
+    );
+    expect(action).toContain("changeAgentSyncControl");
+    expect(action).not.toContain("unauditedSetAgentSyncControl");
   });
 });

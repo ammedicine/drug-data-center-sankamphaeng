@@ -1314,11 +1314,16 @@ export class SyncRunner {
     /** months still different after a repair attempt (rows JHCIS holds but central rejects) */
     unresolved: Array<{ month: string; jhcis: number; central: number }>;
     repaired: number;
+    /** set when nothing was examined, so nobody reads "0 months" as "all fine" */
+    skipped: "PAUSED" | null;
   }> {
     if (syncPaused()) {
       log.info("ข้ามการตรวจสอบความครบถ้วนเพราะถูกหยุดโดยผู้ดูแลระบบส่วนกลาง");
       writeStatus({ message: pausedMessage(), lastError: null });
-      return { checked: 0, mismatched: [], unresolved: [], repaired: 0 };
+      // "checked 0 months" followed by "complete" is a true sentence and a
+      // false impression: nothing was compared, so nothing may be claimed
+      // about completeness. The caller is told which of the two happened.
+      return { checked: 0, mismatched: [], unresolved: [], repaired: 0, skipped: "PAUSED" };
     }
     const db = new JhcisConnection();
     try {
@@ -1411,7 +1416,7 @@ export class SyncRunner {
           : "ข้อมูลครบถ้วนตรงกับ JHCIS",
       });
 
-      return { checked: local.length, mismatched, unresolved, repaired };
+      return { checked: local.length, mismatched, unresolved, repaired, skipped: null };
     } finally {
       await db.close().catch(() => undefined);
     }
