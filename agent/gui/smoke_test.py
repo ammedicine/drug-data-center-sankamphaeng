@@ -431,6 +431,116 @@ def check(theme) -> list[str]:
         "the restart window must be longer than the cooldown, or the cap never applies",
     )
 
+    # --- one failed read must not kill a healthy worker ----------------------
+    # Production 05957, 2026-09-11 04:38:41Z: the worker had written a fresh
+    # tick three seconds earlier, the tray's read of status.json failed once
+    # (the file is replaced by rename every thirty seconds), read_json turned
+    # that into {}, the missing stamp was read as "never heard", the grace
+    # from first_seen had long expired, and a healthy worker was restarted.
+    steady = dict(
+        should_run=True, now=now, first_seen=now - timedelta(hours=1),
+        last_checked=now - timedelta(seconds=30), restarts=[],
+    )
+    good = theme.parse_iso((now - timedelta(seconds=25)).isoformat())
+
+    # W1: a healthy worker with a valid recent tick is left alone.
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=good, **steady)
+    expect(not restart, f"W1 healthy worker must not be restarted, got {why}")
+
+    # W2: one read exception -> the bridge yields {} -> no stamp this round.
+    # Carried forward, the last good stamp still stands and no restart happens.
+    retained = theme.remember_tick(good, {}.get("lastWorkerTickAt"))
+    expect(retained == good, "W2/W4 a failed read must keep the last known good tick")
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=retained, **steady)
+    expect(not restart, f"W2 one failed status read must never restart a worker, got {why}")
+
+    # W3: a malformed or partial read - wrong type, garbage, empty string.
+    for junk in (None, "", "not-a-date", 12345, {"nested": True}, "2026-09-11T"):
+        kept = theme.remember_tick(good, junk)
+        expect(kept == good, f"W3 malformed tick {junk!r} must not replace the last good one")
+        restart, why = theme.watchdog_decision(child_running=True, last_tick=kept, **steady)
+        expect(not restart, f"W3 malformed read {junk!r} must not restart, got {why}")
+
+    # W4: the retained stamp is exactly the earlier valid one, not now, not a
+    # fresh invention - so a genuinely silent worker still ages out (W6).
+    expect(theme.remember_tick(None, None) is None, "W4 nothing retained from nothing")
+    newer = theme.parse_iso((now - timedelta(seconds=5)).isoformat())
+    expect(theme.remember_tick(good, newer.isoformat()) == newer, "W4 a valid newer tick replaces the old one")
+
+    # W5: repeated failures with NO prior valid tick respect the first-seen grace:
+    # inside it, no restart; once it runs out, the worker that truly never spoke
+    # is restarted (W7). Same rule as before - the fix must not weaken it.
+    none_yet = None
+    for _ in range(5):
+        none_yet = theme.remember_tick(none_yet, {}.get("lastWorkerTickAt"))
+    expect(none_yet is None, "W5 repeated failures without any valid tick retain nothing")
+    restart, why = theme.watchdog_decision(
+        child_running=True, last_tick=none_yet, should_run=True, now=now,
+        first_seen=now - timedelta(seconds=theme.WATCHDOG_GRACE_SECONDS - 30),
+        last_checked=now - timedelta(seconds=30), restarts=[],
+    )
+    expect(not restart, f"W5 inside the grace a never-heard worker is given room, got {why}")
+    restart, why = theme.watchdog_decision(
+        child_running=True, last_tick=none_yet, should_run=True, now=now,
+        first_seen=now - timedelta(seconds=theme.WATCHDOG_GRACE_SECONDS + 30),
+        last_checked=now - timedelta(seconds=30), restarts=[],
+    )
+    expect(restart and "ไม่รายงานจังหวะ" in why, f"W7 a worker that never ticks is still restarted after grace, got {why}")
+
+    # W6: a retained stamp keeps ageing. A worker that reported and then went
+    # silent is still caught by the stale threshold, failed reads or not.
+    old = theme.parse_iso((now - timedelta(seconds=theme.WATCHDOG_STALE_SECONDS + 60)).isoformat())
+    still_old = theme.remember_tick(old, {}.get("lastWorkerTickAt"))
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=still_old, **steady)
+    expect(restart and "ไม่ตอบสนอง" in why, f"W6 a genuinely stale worker must still be restarted, got {why}")
+
+    # W8: recovery. Failed read, then the next round reads a valid newer tick:
+    # the newer one takes over and nothing was restarted along the way.
+    after_failure = theme.remember_tick(good, {}.get("lastWorkerTickAt"))
+    recovered = theme.remember_tick(after_failure, (now - timedelta(seconds=3)).isoformat())
+    expect(recovered > good, "W8 a valid tick after a failed read replaces the retained one")
+    restart, why = theme.watchdog_decision(child_running=True, last_tick=recovered, **steady)
+    expect(not restart, f"W8 recovery must not involve a restart, got {why}")
+
+    # W2 again, at the file level: simulate the rename race the worker's
+    # temp+rename write creates, and prove the tray's reader plus the retained
+    # stamp survive every phase of it. read_json is the real bridge function.
+    import tempfile
+    read_json = load_app().read_json
+    with tempfile.TemporaryDirectory() as tmp:
+        status_path = Path(tmp) / "status.json"
+        # Phase 1: a valid file.
+        status_path.write_text(json.dumps({"lastWorkerTickAt": good.isoformat()}), encoding="utf-8")
+        seen = theme.remember_tick(None, read_json(status_path).get("lastWorkerTickAt"))
+        expect(seen == good, "race: a valid file is read")
+        # Phase 2: the moment between the old file going away and the new one
+        # arriving - nothing to read.
+        status_path.unlink()
+        seen = theme.remember_tick(seen, read_json(status_path).get("lastWorkerTickAt"))
+        expect(seen == good, "race: a missing file keeps the last good tick")
+        restart, why = theme.watchdog_decision(child_running=True, last_tick=seen, **steady)
+        expect(not restart, f"race: a missing file must not restart, got {why}")
+        # Phase 3: a half-written temp file that was mistaken for the target.
+        status_path.write_text('{"lastWorkerTickAt": "2026-09-11T04:38', encoding="utf-8")
+        seen = theme.remember_tick(seen, read_json(status_path).get("lastWorkerTickAt"))
+        expect(seen == good, "race: a truncated file keeps the last good tick")
+        restart, why = theme.watchdog_decision(child_running=True, last_tick=seen, **steady)
+        expect(not restart, f"race: a truncated file must not restart, got {why}")
+        # Phase 4: the rename lands; the new tick is read and takes over.
+        status_path.write_text(json.dumps({"lastWorkerTickAt": (now - timedelta(seconds=2)).isoformat()}), encoding="utf-8")
+        seen = theme.remember_tick(seen, read_json(status_path).get("lastWorkerTickAt"))
+        expect(seen > good, "race: the renamed file's tick replaces the retained one")
+
+    # W9/W10: ownership is unchanged by this fix. The tray restarts only the
+    # child it holds a handle to; nothing here matches processes by name.
+    gui_source = (HERE / "sdc_agent_gui.py").read_text(encoding="utf-8")
+    body = re.sub(r"#.*", "", gui_source)
+    expect("taskkill" not in body, "W9 the tray must never taskkill")
+    expect("/IM" not in body, "W9 the tray must never match by image name")
+    expect("self.background.terminate()" in gui_source, "W9 restart goes through the owned child handle")
+    expect("_worker_last_tick = theme.remember_tick(" in gui_source, "the tray carries the last good tick forward")
+    expect("self._worker_last_tick = None" in gui_source, "the retained tick is dropped with the worker it belonged to")
+
     # --- tokens are a system, not a pile of numbers -------------------------
     expect(sorted(theme.SPACE.values()) == [4, 8, 12, 16, 24, 32], "spacing scale changed")
     expect(theme.WINDOW_MIN[0] <= theme.WINDOW_DEFAULT[0], "default window smaller than minimum")

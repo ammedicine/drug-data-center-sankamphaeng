@@ -659,6 +659,10 @@ class AgentApp(ctk.CTk):
         # restart is remembered across polls - that is what stops a failing
         # worker being restarted every two seconds.
         self._worker_seen_at: datetime | None = None
+        # The last valid tick read from status.json, carried across rounds so
+        # one failed read (the file is replaced by rename every 30s) cannot
+        # look like a worker that has never reported. See theme.remember_tick.
+        self._worker_last_tick: datetime | None = None
         self._watchdog_checked_at: datetime | None = None
         # Times of recent restarts, so the allowance is per window rather
         # than per lifetime - a machine that recovered five times over a
@@ -1603,11 +1607,19 @@ class AgentApp(ctk.CTk):
             self._worker_seen_at = now
         if not running:
             self._worker_seen_at = None
+            self._worker_last_tick = None
+
+        # A read that fails, or a file with no usable stamp, changes nothing:
+        # the previous good stamp stands and keeps ageing. Only a valid stamp
+        # replaces it.
+        self._worker_last_tick = theme.remember_tick(
+            self._worker_last_tick, self.bridge.status().get("lastWorkerTickAt"),
+        )
 
         restart, reason = theme.watchdog_decision(
             child_running=running,
             should_run=self._worker_should_run,
-            last_tick=self.bridge.status().get("lastWorkerTickAt"),
+            last_tick=self._worker_last_tick,
             now=now,
             first_seen=self._worker_seen_at,
             last_checked=self._watchdog_checked_at,
@@ -1619,6 +1631,9 @@ class AgentApp(ctk.CTk):
 
         self._watchdog_restarts.append(now)
         self._worker_seen_at = None
+        # The stamp belonged to the worker being replaced; the new one starts
+        # with nothing and gets its own grace.
+        self._worker_last_tick = None
         self.bridge.note(
             "watchdog restarting worker",
             {"reason": reason, "restartsInWindow": len(self._watchdog_restarts)},

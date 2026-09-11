@@ -167,7 +167,10 @@ def watchdog_decision(
         # offline until something starts it again.
         return True, "ตัวทำงานเบื้องหลังหยุดไปเอง"
 
-    stamp = parse_iso(last_tick)
+    # Either a stamp the caller has already carried forward (see remember_tick)
+    # or the raw value from the file. A datetime is trusted as-is so a transient
+    # read failure this round cannot turn a known tick back into "none".
+    stamp = last_tick if isinstance(last_tick, datetime) else parse_iso(last_tick)
     # A stamp older than this worker was written by the one before it.
     #
     # status.json outlives the process that wrote it, so after any restart -
@@ -184,6 +187,11 @@ def watchdog_decision(
     if unheard:
         # Nothing from THIS worker yet: either brand new, or an older worker
         # that never reports one. Both deserve room rather than a restart.
+        #
+        # This branch is only reachable with positive evidence: no valid tick
+        # has ever been retained for this worker. A round on which the file
+        # merely could not be read never lands here, because the caller keeps
+        # the last good stamp and passes that instead of nothing.
         started = first_seen or now
         if (now - started).total_seconds() < WATCHDOG_GRACE_SECONDS:
             return False, "เพิ่งเริ่มทำงาน"
@@ -238,6 +246,27 @@ class SyncView:
 #: on screen admitting it. What is stored never changes - the agent and the
 #: server keep talking in UTC, and this is only how it is read out.
 THAI_TZ = timezone(timedelta(hours=7))
+
+
+def remember_tick(previous: datetime | None, observed: Any) -> datetime | None:
+    """
+    The last tick this tray has actually seen from the worker, carried forward.
+
+    status.json is replaced by rename every thirty seconds, and a read that
+    lands during the replace can fail. The bridge turns any failure into an
+    empty dict, so for one round the file appears to have no tick at all - and
+    the watchdog used to read that as "this worker has never reported", which
+    after the grace window is a restart. Production 05957 lost a healthy worker
+    that way on 2026-09-11, three seconds after it had written a fresh tick.
+
+    A failed or malformed read therefore means "unknown": whatever was last
+    known stays known. Only a valid stamp replaces it. The watchdog still sees
+    a genuinely silent worker, because a retained stamp keeps ageing, and it
+    still sees a worker that has never spoken, because there is nothing to
+    retain.
+    """
+    parsed = parse_iso(observed)
+    return parsed if parsed is not None else previous
 
 
 def parse_iso(value: Any) -> datetime | None:
