@@ -2,8 +2,12 @@ import { Lock, Server, Wifi, WifiOff, PauseCircle, TriangleAlert } from "lucide-
 
 import { Card, PageHeader, StatCard, Section, relativeTime } from "@/components/ui/primitives";
 import { requireSuperAdmin } from "@/lib/auth/rbac";
+import { getLatestAgentRelease } from "@/lib/services/agent-release";
 import { listFleet, resetReadiness, summariseFleet } from "@/lib/services/fleet";
+import { latestUpdateCommands } from "@/lib/services/update-commands";
 import { toThaiDate } from "@/lib/shared/sync-control";
+import { TERMINAL_UPDATE_STATES } from "@/lib/shared/update-command";
+import { isNewerVersion } from "@/lib/shared/version";
 
 import { FleetControls, type FleetRowView } from "./fleet-controls";
 
@@ -25,6 +29,11 @@ export default async function FleetPage() {
   const rows = await listFleet();
   const summary = summariseFleet(rows);
   const readiness = resetReadiness(rows);
+  // The command rows are the record; the agents table holds the agent's own
+  // last word. Both are shown, because they can legitimately differ for a
+  // minute (the centre delivered; the agent has not heartbeated yet).
+  const [commands, latestRelease] = await Promise.all([latestUpdateCommands(), getLatestAgentRelease()]);
+  const latestVersion = latestRelease?.version.replace(/^v/i, "") ?? null;
 
   const view: FleetRowView[] = rows.map((r) => ({
     agentId: r.agentId,
@@ -53,6 +62,33 @@ export default async function FleetPage() {
         }
       : null,
     supportsRemotePause: r.capabilities.remotePause,
+    supportsRemoteUpdate: r.capabilities.remoteUpdate,
+    latestVersion,
+    updateAvailable: latestVersion ? isNewerVersion(latestVersion, r.version) : false,
+    command: (() => {
+      const c = commands.get(r.agentId);
+      if (!c) return null;
+      return {
+        id: c.id,
+        status: c.status,
+        targetVersion: c.targetVersion,
+        requestedAtLabel: relativeTime(c.requestedAt),
+        requestedByName: c.requestedByName,
+        errorCode: c.lastErrorCode,
+        errorMessage: c.lastErrorMessage,
+        terminal: TERMINAL_UPDATE_STATES.includes(c.status),
+        completedAtLabel: c.completedAt ? relativeTime(c.completedAt) : null,
+      };
+    })(),
+    updater: {
+      state: r.update.state,
+      checkedAtLabel: r.update.checkedAt ? relativeTime(r.update.checkedAt) : null,
+      succeededAtLabel: r.update.succeededAt ? relativeTime(r.update.succeededAt) : null,
+      errorCode: r.update.errorCode,
+      error: r.update.error,
+      errorAtLabel: r.update.errorAt ? relativeTime(r.update.errorAt) : null,
+      task: r.update.task,
+    },
   }));
 
   const ready = readiness.filter((r) => r.safeToReset).length;

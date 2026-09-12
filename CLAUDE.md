@@ -502,6 +502,44 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 - **ข้อจำกัด bootstrap**: v1.1.6 อัปเดตตัวเองไม่ได้เพราะยังไม่มีตัวอัปเดต
   ต้องติดตั้ง v1.1.7 ด้วยมือครั้งเดียว หลังจากนั้นรุ่นถัดไปจึงอัปเดตเองได้
 
+## 8.8 อัปเดตจากศูนย์กลาง + ต้นเหตุที่ 1.1.8 ไม่อัปเดตเอง (v1.1.10)
+
+### ต้นเหตุจริง (สืบจาก tag v1.1.8 กับข้อมูลใน Central ของ DESKTOP-741A6BC)
+- งาน `SDCAgentAutoUpdate` ของ 1.1.8 สร้างด้วย `schtasks /Create /SC HOURLY /MO 4` ปล่อยค่าที่เหลือเป็น
+  ค่าเริ่มต้น -> **StartWhenAvailable ปิด** (รอบที่พลาดตอนเครื่องปิด = หายไปเลย) และ
+  **DisallowStartIfOnBatteries เปิด** (โน้ตบุ๊กถอดสายไม่เคยตรวจ) และไม่มี trigger ตอนบูต
+- เครื่องจริงลงทะเบียน 09:04Z (หลัง 1.1.9 เผยแพร่ 1 ชม.) เปิดเครื่องช่วง 09:03-09:12 กับ 01:50-05:03Z
+  ของวันถัดไป trigger ทุก 4 ชม. จากนาทีที่ติดตั้ง = 13:03/17:03/21:03/01:03/05:03 ตกช่วงเครื่องปิด
+  ทั้งหมด ยกเว้น 05:03 ซึ่งห่าง heartbeat สุดท้าย 20 วินาที (ปิดเครื่องพอดี) — จำลองใน
+  `tests/update-root-cause.test.ts`
+- ซ้ำเติมอีก 3 อย่างที่พบตอนไล่โค้ด: `[Run] ... skipifsilent` = ติดตั้งเงียบผ่าน SYSTEM แล้ว **ไม่เปิด
+  tray กลับ** (เครื่องเงียบจนกว่าจะ login ใหม่) · `stop-owned-agent.ps1` เลือก node.exe ใต้โฟลเดอร์ติดตั้ง
+  ซึ่ง**รวมตัวอัปเดต SYSTEM ที่กำลังเรียก installer อยู่** (ฆ่าตัวเองกลางทาง) · Central ไม่รู้อะไรเลย
+  เกี่ยวกับ updater ของเครื่อง (ไม่มีรายงาน)
+
+### สิ่งที่ 1.1.10 เปลี่ยน
+- งานสร้างจาก **XML** (`agent update-task-xml --out` -> `register-update-task.ps1`): PT30M ที่นาทีประจำเครื่อง +
+  BootTrigger 3 นาที + StartWhenAvailable + ทำงานบนแบตเตอรี่ + SYSTEM/HighestAvailable + SDDL ให้
+  Users มีสิทธิ์ **สั่งรัน** (GRGX) แต่แก้ไม่ได้ · ตัวติดตั้งยัง fallback เป็น schtasks /SC MINUTE /MO 30 ถ้าเขียน XML ไม่ได้
+- `stop-owned-agent.ps1` ข้ามสาย ancestor ของตัวเอง (installer/updater) · หลังติดตั้งเงียบ SYSTEM เปิด tray
+  ให้ผู้ใช้ที่ login อยู่ผ่าน scheduled task ครั้งเดียวแบบ Interactive แล้วลบทิ้ง (`relaunchTrayForConsoleUser`)
+- **คำสั่งอัปเดตจากศูนย์กลาง**: ตาราง `agent_update_commands` (migration 0011, additive) 1 แถวต่อ Agent ต่อการกด
+  ปักรุ่น/ชื่อไฟล์/ขนาด/SHA-256 ตอนกด · สถานะ REQUESTED→DELIVERED→…→SUCCESS/FAILED ตามตาราง
+  `src/lib/shared/update-command.ts` (`canTransition`) · ส่งผ่าน heartbeat response `config.updateCommand`
+  (agent เก่าไม่อ่าน key นี้) · agent รายงานกลับใน heartbeat field `update` **เฉพาะเมื่อเปลี่ยน**
+- **จำกัดการปล่อย 2 เครื่องพร้อมกัน** (`MAX_ACTIVE_ROLLOUT`) ด้วย UPDATE เงื่อนไขนับใน DB เดียวกัน ไม่มี state ใน memory
+  (Vercel) · slot ค้างเกิน 45 นาทีไม่นับ · คำสั่งค้างเกิน 24 ชม. -> FAILED UPDATE_TIMED_OUT
+- Agent: ไฟล์ `update-command.json` ใน dataDir เป็นความจริงในเครื่อง · worker รับคำสั่ง -> เขียนไฟล์ -> `schtasks /Run`
+  (ถ้าทำได้) · งาน SYSTEM ทำ state machine เดียว (`runUpdateEngine`) ทั้งรอบปกติและคำสั่ง · เริ่มโปรแกรมใหม่
+  แล้วอ่านไฟล์: INSTALLING + รุ่น >= เป้าหมาย = SUCCESS (`reconcileUpdateCommandAfterRestart`)
+- **ไม่รองรับใน 1.1.7/1.1.8/1.1.9** (ไม่มี capability `remoteUpdate`) -> ศูนย์กลางตอบ UNSUPPORTED_CLIENT ไม่สร้างแถว
+  เครื่องพวกนั้นอัปเดตเองตามรอบเดิม หรือติดตั้งด้วยมืออีกครั้งเดียว
+- ค่าใช้จ่ายวัดจริง (general_log): heartbeat เดิม 1 read/4 write · 1.1.10 +1 read (ไม่มีคำสั่ง) +2 read (มีรายงาน)
+  **+0 write** เมื่อไม่มีอะไรเปลี่ยน · การตรวจรุ่นตามรอบยังไม่แตะ TiDB เลย
+- harness: `build/fleet/update.mts` (15 เครื่องผสมรุ่น/ออฟไลน์/หยุด, ฆ่า Central กลางทาง) ·
+  `build/fleet/fleet-env.mts` **ต้อง import ก่อนเสมอ** — `agent/src/config.ts` เรียก `dotenv.config()` ตอน import
+  ซึ่งโหลด DATABASE_URL ของ production จาก `.env` ก่อนที่ `??=` ในสคริปต์จะทำงาน (เกือบชี้ migrate ไป TiDB จริง)
+
 ## 9. ท่อส่งข้อมูล (Phase 3) — วัดก่อนแก้เสมอ
 
 - อ่านกับส่ง**ทำงานพร้อมกัน**แล้ว (เดิมอ่านจนจบค่อยส่ง) รายละเอียดใน `docs/SYNC.md` §4.1-4.2, §7

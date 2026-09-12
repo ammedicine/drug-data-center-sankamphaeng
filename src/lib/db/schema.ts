@@ -9,6 +9,7 @@
 import { relations } from "drizzle-orm";
 
 import { EFFECTIVE_SYNC_STATES, SYNC_CONTROL_STATES } from "@/lib/shared/sync-control";
+import { UPDATE_COMMAND_STATES } from "@/lib/shared/update-command";
 import {
   bigint,
   boolean,
@@ -255,6 +256,24 @@ export const agents = mysqlTable(
     /** earliest dispensing date the agent is configured to collect */
     syncStartDate: date("sync_start_date", { mode: "string" }),
 
+    /* ------------------------------------------ software update reporting */
+    /**
+     * What the agent last said about updating itself. Reporting only - the
+     * command rows are the record; these are the latest snapshot so the
+     * fleet screen is one query. Written only when the agent's report
+     * changed, never on every heartbeat.
+     */
+    updateState: varchar("update_state", { length: 24 }),
+    updateCommandId: id("update_command_id"),
+    updateTargetVersion: varchar("update_target_version", { length: 40 }),
+    updateCheckedAt: datetime("update_checked_at"),
+    updateErrorCode: varchar("update_error_code", { length: 40 }),
+    updateError: varchar("update_error", { length: 400 }),
+    updateErrorAt: datetime("update_error_at"),
+    updateSucceededAt: datetime("update_succeeded_at"),
+    /** the agent's own view of its scheduled update task: present, cadence, run-as, last run/result */
+    updaterTask: json("updater_task"),
+
     createdAt,
     updatedAt,
   },
@@ -264,6 +283,57 @@ export const agents = mysqlTable(
     ownerIdx: index("agents_owner_idx").on(t.ownerUserId),
     heartbeatIdx: index("agents_heartbeat_idx").on(t.lastHeartbeatAt),
     seenIdx: index("agents_seen_idx").on(t.lastSeenAt),
+  }),
+);
+
+/**
+ * A remote software update, one row per Agent per request.
+ *
+ * Durable in the database because Vercel has no process that outlives a
+ * request. An operator's click becomes a REQUESTED row; the Agent is handed
+ * it on its next heartbeat (DELIVERED) and reports each phase back on the
+ * same channel; the row reaches SUCCESS or FAILED and stays as the record.
+ * A machine that is switched off keeps its REQUESTED row until it comes back.
+ *
+ * The target is pinned at request time - version, asset name, size and the
+ * SHA-256 GitHub recorded - so what the operator approved is what gets
+ * installed, and an Agent can prove the bytes it downloaded are those bytes.
+ * Nothing secret is stored here: no credential, no token, no installer.
+ */
+export const agentUpdateCommands = mysqlTable(
+  "agent_update_commands",
+  {
+    id: id("id").primaryKey(),
+    agentId: id("agent_id").notNull(),
+    facilityId: id("facility_id"),
+    /** shared by every row created from one multi-select click, for the screen */
+    groupId: id("group_id"),
+    targetVersion: varchar("target_version", { length: 40 }).notNull(),
+    targetAssetName: varchar("target_asset_name", { length: 120 }).notNull(),
+    targetSize: bigint("target_size", { mode: "number", unsigned: true }),
+    targetSha256: char("target_sha256", { length: 64 }).notNull(),
+    /** what the agent was running when the operator asked */
+    versionAtRequest: varchar("version_at_request", { length: 40 }),
+    requestedByUserId: id("requested_by_user_id").notNull(),
+    requestedAt: datetime("requested_at").notNull(),
+    status: mysqlEnum("status", UPDATE_COMMAND_STATES).notNull().default("REQUESTED"),
+    statusChangedAt: datetime("status_changed_at").notNull(),
+    deliveredAt: datetime("delivered_at"),
+    completedAt: datetime("completed_at"),
+    /** how many times the agent has started work on this command */
+    attempts: int("attempts").notNull().default(0),
+    lastErrorCode: varchar("last_error_code", { length: 40 }),
+    lastErrorMessage: varchar("last_error_message", { length: 400 }),
+    lastErrorAt: datetime("last_error_at"),
+    /** the version the agent reported after finishing, for the record */
+    resultVersion: varchar("result_version", { length: 40 }),
+    createdAt,
+    updatedAt,
+  },
+  (t) => ({
+    agentStatusIdx: index("agent_update_commands_agent_idx").on(t.agentId, t.status),
+    statusIdx: index("agent_update_commands_status_idx").on(t.status, t.statusChangedAt),
+    groupIdx: index("agent_update_commands_group_idx").on(t.groupId),
   }),
 );
 

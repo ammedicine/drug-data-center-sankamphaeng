@@ -7,6 +7,11 @@ import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
 import { agents } from "@/lib/db/schema";
 import { UPLOAD_CHUNK_SIZE } from "@/lib/services/sync";
+import {
+  applyAgentUpdateReport,
+  deliverUpdateCommand,
+  openCommandsFor,
+} from "@/lib/services/update-commands";
 import { parseBuildId, parseCapabilities } from "@/lib/shared/agent-build";
 
 export const runtime = "nodejs";
@@ -52,6 +57,27 @@ const schema = z.object({
       macAddress: z.string().max(32).nullable(),
       ipAddress: z.string().max(45).nullable(),
       interfaceName: z.string().max(80).nullable(),
+    })
+    .nullable()
+    .optional(),
+
+  /* ------------------------------------------------- software update report */
+  /**
+   * How the agent's updater is getting on - a command it was handed, or its
+   * own scheduled check. Optional: 1.1.7 - 1.1.9 send nothing here. Sent by
+   * newer agents only when it changed, so an idle fleet costs no writes.
+   */
+  update: z
+    .object({
+      commandId: z.string().max(30).nullable().optional(),
+      state: z.string().max(24).nullable().optional(),
+      targetVersion: z.string().max(40).nullable().optional(),
+      errorCode: z.string().max(40).nullable().optional(),
+      errorMessage: z.string().max(400).nullable().optional(),
+      errorAt: z.string().max(40).nullable().optional(),
+      succeededAt: z.string().max(40).nullable().optional(),
+      checkedAt: z.string().max(40).nullable().optional(),
+      task: z.record(z.unknown()).nullable().optional(),
     })
     .nullable()
     .optional(),
@@ -156,6 +182,30 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
     })
     .where(eq(agents.id, agent.agentId));
 
+  // The update channel. The agent's report is applied first, so a SUCCESS it
+  // sends on the heartbeat after an install closes the command before the
+  // same request could hand the command back out again. Delivery is only
+  // offered to a client that says it can act on one.
+  //
+  // Cost: one indexed read per heartbeat for a client that can act on
+  // commands, nothing at all for one that cannot, and writes only when a
+  // state actually changes.
+  let updateCommand = null;
+  if (parseCapabilities(body.capabilities ?? null).remoteUpdate) {
+    const open = await openCommandsFor(agent.agentId);
+    const stillOpen = await applyAgentUpdateReport({
+      agentId: agent.agentId,
+      runningVersion: body.agentVersion,
+      report: body.update ?? null,
+      open,
+    });
+    updateCommand = await deliverUpdateCommand({
+      agentId: agent.agentId,
+      capabilities: body.capabilities ?? null,
+      open: stillOpen,
+    });
+  }
+
   return NextResponse.json({
     ok: true,
     serverTime: now.toISOString(),
@@ -178,6 +228,9 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       syncControlState: agent.syncControlState,
       controlRevision: agent.controlRevision,
       pauseReason: agent.pauseReason,
+      // A remote update, if one is owed and a rollout slot was free. Null is
+      // the ordinary answer. Older agents never read this key.
+      updateCommand,
     },
   });
 });

@@ -28,6 +28,7 @@ import {
   writeStatus,
 } from "./config";
 import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { userInfo } from "node:os";
 
 import { CentralClient } from "./central/client";
@@ -46,12 +47,20 @@ import { OfflineQueue } from "./queue/queue";
 import { SyncRunner, type SyncMode } from "./sync";
 import { CLOCK_CHECK_MIN_INTERVAL_MS, CLOCK_SYNC_COOLDOWN_MS, healClock } from "./clock";
 import {
-  decideUpdate,
-  downloadVerified,
-  fetchManifest,
-  installUpdate,
-  syncIsBusy,
+  readUpdaterTaskHealth,
+  relaunchTrayForConsoleUser,
+  repairUpdaterTask,
+  runningAsSystem,
+  runUpdateEngine,
+  updaterTaskNeedsRepair,
 } from "./updater";
+import { updateTaskDefinition, updateTaskXml } from "./task-definition";
+import {
+  isTerminal,
+  loadUpdateCommand,
+  reconcileUpdateCommandAfterRestart,
+  saveUpdaterTaskHealth,
+} from "./update-command";
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -548,6 +557,10 @@ async function run(): Promise<void> {
     }
   };
 
+  // Settle any update this process inherited: an install that completed is
+  // SUCCESS now, and the first heartbeat carries it to the centre.
+  reconcileUpdateCommandAfterRestart();
+
   const settings = loadSettings();
   log.info("agent started", {
     facility: credential.facilityCode,
@@ -852,7 +865,32 @@ async function timeSync(): Promise<void> {
 }
 
 /**
- * `agent auto-update` - the other elevated task.
+ * `agent update-slot [--out <file>]` - the one line the installer needs.
+ *
+ * Prints the `HH:MM` at which this machine's update check is anchored, so
+ * the scheduled task lands in this clinic's own minute of the half hour.
+ * Read-only apart from the file the installer names; nothing secret.
+ *
+ * Identity is the agentId when enrolled and the hostname when not. On an
+ * upgrade the credential is already there, so a clinic keeps its slot.
+ */
+function updateSlot(): void {
+  const identity = loadCredential()?.agentId ?? machineHostname();
+  const value = updateCheckStartTime(identity);
+  console.log(value);
+  const out = arg("out");
+  if (out) writeFileSync(out, `${value}
+`, "utf8");
+}
+
+/**
+ * `agent auto-update` - the SYSTEM task, and the only thing that installs.
+ *
+ * Runs every thirty minutes at this machine's slot, a few minutes after
+ * boot, and whenever the worker asks Task Scheduler to run it because the
+ * centre handed down a command. Whichever way it started, the work is the
+ * same engine: a held command from the centre is honoured first; failing
+ * that, the ordinary "is anything newer" check.
  *
  * Everything it acts on it fetches itself: the manifest from Central, the
  * hash from that manifest, the file from the fixed download route. It accepts
@@ -860,35 +898,16 @@ async function timeSync(): Promise<void> {
  * unprivileged tray and this process is not. It also refuses to install while
  * a sync is mid-flight - the queue would survive, but there is no reason to
  * interrupt a run that is nearly done.
- */
-/**
- * `agent update-slot` - the one line the installer needs from this program.
  *
- * Prints the `HH:MM` at which this machine's update check should be anchored,
- * so the scheduled task the installer writes lands in this clinic's own minute
- * of the half hour rather than in everybody's. Read-only: touches no file, no
- * network and no database, and prints nothing that is secret.
- *
- * Identity is the agentId when the machine is enrolled and the hostname when
- * it is not. On an upgrade the credential is already there, so a clinic keeps
- * the slot it has had all along; on a first install the hostname stands in,
- * and it is just as stable.
+ * As SYSTEM it can also see its own scheduled task, so it checks the task is
+ * the one v1.1.10 wants and repairs it if not - a task written by an older
+ * installer without catch-up or battery flags is exactly what left a machine
+ * on v1.1.8 for a day.
  */
-function updateSlot(): void {
-  const identity = loadCredential()?.agentId ?? machineHostname();
-  const value = updateCheckStartTime(identity);
-  console.log(value);
-  // The installer cannot capture stdout without going through cmd.exe, and
-  // cmd.exe's quoting rules silently broke exactly that on the first canary -
-  // the task got the 00:00 fallback and nobody was told. So the value can be
-  // written straight to a file the installer names, with no shell in between.
-  const out = arg("out");
-  if (out) writeFileSync(out, `${value}\n`, "utf8");
-}
-
 async function autoUpdate(): Promise<void> {
   const credential = loadCredential();
   const baseUrl = credential?.centralApiUrl ?? centralApiUrl();
+  const appDir = resolve(process.execPath, "..", "..");
 
   // Recorded on every path below, so "the task never ran" and "the task ran
   // and found nothing" stop looking the same from outside.
@@ -900,92 +919,87 @@ async function autoUpdate(): Promise<void> {
       autoUpdateTaskLastResult: `${result} as=${account}`,
     });
 
-  const manifest = await fetchManifest(baseUrl);
-  const decision = decideUpdate(manifest, AGENT_VERSION);
+  // The task's own health, only where it can be seen (SYSTEM). Written for
+  // the worker to report; repaired when it is not what this version wants.
+  if (runningAsSystem()) {
+    const health = await readUpdaterTaskHealth();
+    const repair = await repairUpdaterTask({
+      appDir,
+      identity: credential?.agentId ?? machineHostname(),
+      health,
+    });
+    saveUpdaterTaskHealth({ ...health, repaired: repair.repaired, error: repair.repaired ? null : (updaterTaskNeedsRepair(health) ? repair.reason : null) });
+  }
+
+  // A command inherited from before a restart is settled before anything
+  // else: an install that completed is SUCCESS now, not "installing" for ever.
+  reconcileUpdateCommandAfterRestart();
+  const held = loadUpdateCommand();
+  const command = held && held.commandId && !isTerminal(held.state) ? held : null;
+  const trigger = command ? "command" : "scheduled";
+
+  const result = await runUpdateEngine({ baseUrl, trigger, command, force: has("force") });
   const checkedAt = new Date().toISOString();
-  if (decision.action === "none") {
-    writeStatus({
-      updateState: "NONE",
-      updateLatestVersion: manifest.version ?? AGENT_VERSION,
-      updateCheckedAt: checkedAt,
-      updateDetail: null,
-    });
-    record(`NONE latest=${manifest.version ?? AGENT_VERSION} running=${AGENT_VERSION}`);
-    console.log(decision.reason);
-    return;
-  }
-  if (decision.action === "blocked") {
-    writeStatus({
-      updateState: "BLOCKED",
-      updateLatestVersion: decision.version,
-      updateCheckedAt: checkedAt,
-      updateDetail: decision.reason,
-    });
-    record(`BLOCKED version=${decision.version} ${decision.reason}`);
-    log.warn("มีรุ่นใหม่แต่ติดตั้งอัตโนมัติไม่ได้", {
-      version: decision.version,
-      reason: decision.reason,
-    });
-    console.log(`พบรุ่น ${decision.version} แต่ ${decision.reason}`);
-    process.exitCode = 1;
-    return;
-  }
+  const cmdTag = command ? ` command=${command.commandId}` : "";
 
-  if (syncIsBusy() && !has("force")) {
-    // The queue would survive an interruption, but there is no reason to cut
-    // a run short when the next scheduled check is half an hour away.
-    writeStatus({
-      updateState: "READY",
-      updateLatestVersion: decision.version,
-      updateCheckedAt: checkedAt,
-      updateDetail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง",
-    });
-    record(`WAITING_FOR_SYNC version=${decision.version}`);
-    console.log("กำลังซิงก์อยู่ จะติดตั้งรุ่นใหม่รอบถัดไป");
-    return;
+  switch (result.state) {
+    case "NONE":
+      writeStatus({ updateState: "NONE", updateLatestVersion: result.version ?? AGENT_VERSION, updateCheckedAt: checkedAt, updateDetail: null });
+      record(`NONE latest=${result.version ?? AGENT_VERSION} running=${AGENT_VERSION}${cmdTag}`);
+      console.log(result.detail);
+      return;
+    case "BLOCKED":
+      writeStatus({ updateState: "BLOCKED", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail });
+      record(`BLOCKED version=${result.version} ${result.detail}${cmdTag}`);
+      log.warn("มีรุ่นใหม่แต่ติดตั้งอัตโนมัติไม่ได้", { version: result.version, reason: result.detail });
+      console.log(`พบรุ่น ${result.version} แต่ ${result.detail}`);
+      process.exitCode = 1;
+      return;
+    case "WAITING_FOR_IDLE":
+      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail });
+      record(`WAITING_FOR_SYNC version=${result.version}${cmdTag}`);
+      console.log("กำลังซิงก์อยู่ จะติดตั้งรุ่นใหม่รอบถัดไป");
+      return;
+    case "INSTALLING":
+      // The installer is replacing this program as we speak, so whatever is
+      // written here is what the screen shows until the new build starts and
+      // writes its own. "Downloading" would be a lie for that whole window.
+      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: "ติดตั้งแล้ว รอเริ่มโปรแกรมใหม่" });
+      record(`INSTALLED version=${result.version}${cmdTag}`);
+      console.log(`ติดตั้งรุ่น ${result.version} แล้ว`);
+      // Unattended: nobody is there to reopen the tray the installer closed.
+      if (runningAsSystem()) await relaunchTrayForConsoleUser(appDir);
+      return;
+    case "FAILED":
+    default: {
+      const message = result.detail;
+      // A failed update must never make the thing it was updating unusable.
+      // Nothing here touches the queue, the credential or the watermark.
+      log.warn("อัปเดตไม่สำเร็จ จะใช้รุ่นเดิมต่อไป", { version: result.version, code: result.errorCode, error: message });
+      writeStatus({ updateState: "FAILED", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: message.slice(0, 200) });
+      record(`FAILED version=${result.version ?? "?"} ${result.errorCode ?? ""} ${message.slice(0, 120)}${cmdTag}`);
+      process.exitCode = 1;
+      return;
+    }
   }
+}
 
-  try {
-    writeStatus({
-      updateState: "DOWNLOADING",
-      updateLatestVersion: decision.version,
-      updateCheckedAt: checkedAt,
-      updateDetail: null,
-    });
-    const installer = await downloadVerified({
-      baseUrl,
-      version: decision.version,
-      assetName: decision.assetName,
-      sha256: decision.sha256,
-      size: decision.size,
-    });
-    record(`INSTALLING version=${decision.version}`);
-    await installUpdate(installer, decision.version);
-    // The installer is replacing this program as we speak, so whatever is
-    // written here is what the screen shows until the new build starts and
-    // writes its own. "Downloading" would be a lie for that whole window.
-    writeStatus({
-      updateState: "READY",
-      updateLatestVersion: decision.version,
-      updateCheckedAt: checkedAt,
-      updateDetail: "ติดตั้งแล้ว รอเริ่มโปรแกรมใหม่",
-    });
-    record(`INSTALLED version=${decision.version}`);
-    console.log(`ติดตั้งรุ่น ${decision.version} แล้ว`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // A failed update must never make the thing it was updating unusable.
-    // Nothing here touches the queue, the credential or the watermark.
-    log.warn("อัปเดตไม่สำเร็จ จะใช้รุ่นเดิมต่อไป", { version: decision.version, error: message });
-    writeStatus({
-      updateState: "FAILED",
-      updateLatestVersion: decision.version,
-      updateCheckedAt: checkedAt,
-      updateDetail: message.slice(0, 200),
-    });
-    record(`FAILED version=${decision.version} ${message.slice(0, 120)}`);
-    process.exitCode = 1;
-  }
+/**
+ * `agent update-task-xml --out <file>` - the task definition for the installer.
+ *
+ * The installer registers the scheduled task from this XML rather than from
+ * schtasks switches, so every setting that left a v1.1.8 machine unable to
+ * update - no catch-up of missed triggers, no start on battery, no boot
+ * trigger - is stated explicitly and tested. Read-only apart from the file
+ * the installer names.
+ */
+function updateTaskXmlCommand(): void {
+  const identity = loadCredential()?.agentId ?? machineHostname();
+  const appDir = arg("app-dir") ?? resolve(process.execPath, "..", "..");
+  const xml = updateTaskXml(updateTaskDefinition({ appDir, identity }));
+  const out = arg("out");
+  if (out) writeFileSync(out, "\uFEFF" + xml, { encoding: "utf16le" });
+  else console.log(xml);
 }
 
 async function main(): Promise<void> {
@@ -1016,6 +1030,8 @@ async function main(): Promise<void> {
       return autoUpdate();
     case "update-slot":
       return updateSlot();
+    case "update-task-xml":
+      return updateTaskXmlCommand();
     default:
       console.log(
         [
@@ -1033,6 +1049,7 @@ async function main(): Promise<void> {
           "                                  ดู/ตั้งค่าตารางการซิงก์ในเครื่อง",
           "  jhcis [--set]                   ดูการเชื่อมต่อ JHCISDB (--set = อ่านค่าใหม่เป็น JSON ทาง stdin)",
           "  update-slot [--out <file>]      เวลาเริ่ม (HH:MM) ของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (ตัวติดตั้งใช้)",
+          "  update-task-xml [--out <file>]  นิยามงานตรวจรุ่นใหม่ (Task Scheduler XML) ประจำเครื่องนี้ (ตัวติดตั้งใช้)",
         ].join("\n"),
       );
   }

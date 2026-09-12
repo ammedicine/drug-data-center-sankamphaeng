@@ -39,6 +39,29 @@ function Write-Step([string] $Message) { Write-Output "[stop-owned-agent] $Messa
 # definition part of this installation. The worker.lock PID is used as
 # corroboration and to catch a worker whose tray has already died - the orphan
 # case that held runtime\node.exe open during the v1.1.7 upgrade.
+# The processes this script must never touch: itself and everything above it.
+#
+# When the SYSTEM updater runs the installer, the chain is
+#   node.exe (agent.js auto-update, under the install dir) -> SDCAgent-Setup.exe
+#   -> powershell.exe (this script)
+# and that node.exe is exactly what the path rule below would select. Killing
+# it would cut the updater off mid-install: no status written, no tray
+# relaunched, and a machine that goes dark until somebody signs in again.
+function Get-AncestorPids {
+  $chain = @()
+  $all = @{}
+  foreach ($p in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) { $all[[int]$p.ProcessId] = [int]$p.ParentProcessId }
+  $cursor = [int]$PID
+  $guard = 0
+  while ($cursor -and $all.ContainsKey($cursor) -and $guard -lt 32) {
+    $chain += $cursor
+    $cursor = $all[$cursor]
+    $guard++
+  }
+  return $chain
+}
+$script:Ancestors = Get-AncestorPids
+
 function Get-OwnedProcesses {
   $root = $Root.TrimEnd('\')
   $owned = @()
@@ -46,6 +69,7 @@ function Get-OwnedProcesses {
   foreach ($p in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) {
     if (-not $p.ExecutablePath) { continue }
     if ($p.Name -ne 'SDCAgent.exe' -and $p.Name -ne 'node.exe') { continue }
+    if ($script:Ancestors -contains [int]$p.ProcessId) { continue }
     if ($p.ExecutablePath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
       $owned += [pscustomobject]@{
         ProcessId = $p.ProcessId
@@ -69,7 +93,8 @@ function Get-OwnedProcesses {
           # Only if it really is our worker: a recycled PID belonging to
           # something unrelated must not be touched.
           if ($held -and $held.Name -eq 'node.exe' -and $held.CommandLine -and
-              $held.CommandLine.ToLower().Contains('agent.js')) {
+              $held.CommandLine.ToLower().Contains('agent.js') -and
+              -not ($script:Ancestors -contains [int]$held.ProcessId)) {
             $owned += [pscustomobject]@{
               ProcessId = $held.ProcessId
               Name      = $held.Name

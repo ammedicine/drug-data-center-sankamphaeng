@@ -162,6 +162,8 @@ export interface HeartbeatRequest {
   effectiveSyncState?: EffectiveSyncState | null;
   /** the highest control revision the agent has acted on */
   appliedControlRevision?: number | null;
+  /** the updater's progress, sent only when it changed; absent on 1.1.7 - 1.1.9 */
+  update?: AgentUpdateReport | null;
   hostname: string;
   installationId: string;
   status: "ONLINE" | "SYNCING" | "ERROR";
@@ -229,6 +231,34 @@ export interface AgentConfigResponse {
   syncControlState?: SyncControlState;
   controlRevision?: number;
   pauseReason?: string | null;
+
+  /**
+   * A remote software update the centre wants this Agent to perform. Absent
+   * or null almost always. Pinned to one published release: the Agent
+   * verifies the downloaded bytes against this SHA-256 and this size, and
+   * never installs anything older than or equal to what it is running.
+   * Older Agents never read this key.
+   */
+  updateCommand?: {
+    id: string;
+    targetVersion: string;
+    assetName: string;
+    size: number | null;
+    sha256: string;
+  } | null;
+}
+
+/** What the Agent tells the centre about its updater, in the heartbeat. */
+export interface AgentUpdateReport {
+  commandId: string | null;
+  state: string | null;
+  targetVersion: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  errorAt: string | null;
+  succeededAt: string | null;
+  checkedAt: string | null;
+  task: Record<string, unknown> | null;
 }
 
 export interface SyncStartRequest {

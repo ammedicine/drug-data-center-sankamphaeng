@@ -81,6 +81,19 @@ export interface FleetAgentRow {
   failedCount: number;
   lastError: string | null;
 
+  /** the agent's own report of its updater, as last heard */
+  update: {
+    state: string | null;
+    commandId: string | null;
+    targetVersion: string | null;
+    checkedAt: Date | null;
+    errorCode: string | null;
+    error: string | null;
+    errorAt: Date | null;
+    succeededAt: Date | null;
+    task: Record<string, unknown> | null;
+  };
+
   /** at most one genuinely live batch, or null */
   current: {
     batchRef: string;
@@ -144,6 +157,15 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       pendingBatches: agents.pendingBatches,
       failedCount: agents.failedCount,
       lastError: agents.lastError,
+      updateState: agents.updateState,
+      updateCommandId: agents.updateCommandId,
+      updateTargetVersion: agents.updateTargetVersion,
+      updateCheckedAt: agents.updateCheckedAt,
+      updateErrorCode: agents.updateErrorCode,
+      updateError: agents.updateError,
+      updateErrorAt: agents.updateErrorAt,
+      updateSucceededAt: agents.updateSucceededAt,
+      updaterTask: agents.updaterTask,
     })
     .from(agents)
     .innerJoin(facilities, eq(facilities.id, agents.facilityId))
@@ -203,6 +225,17 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       pendingBatches: r.pendingBatches,
       failedCount: r.failedCount,
       lastError: r.lastError,
+      update: {
+        state: r.updateState,
+        commandId: r.updateCommandId,
+        targetVersion: r.updateTargetVersion,
+        checkedAt: r.updateCheckedAt,
+        errorCode: r.updateErrorCode,
+        error: r.updateError,
+        errorAt: r.updateErrorAt,
+        succeededAt: r.updateSucceededAt,
+        task: (r.updaterTask as Record<string, unknown> | null) ?? null,
+      },
       current: current
         ? {
             batchRef: current.batchRef,

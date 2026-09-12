@@ -68,6 +68,7 @@ Source: "..\..\docs\AGENT.md";          DestDir: "{app}"; DestName: "คู่�
 ; สคริปต์ปิด Agent ของการติดตั้งนี้ — dontcopy: ใช้ตอนติดตั้งเท่านั้น ไม่ต้องวางลงเครื่อง
 ; เก็บเป็นไฟล์จริงเพื่ออ่าน/ทดสอบได้ ไม่ต้องฝัง PowerShell ไว้ในสตริง Pascal
 Source: "stop-owned-agent.ps1";         DestDir: "{app}"; Flags: dontcopy
+Source: "register-update-task.ps1";     DestDir: "{app}"; Flags: dontcopy
 
 [Dirs]
 ; ข้อมูลใช้งาน (คิว/บันทึก/credential) อยู่นอก Program Files เพื่อให้เขียนได้โดยไม่ต้องเป็นผู้ดูแล
@@ -223,20 +224,34 @@ end;
 //
 // **คำสั่งตายตัวทั้งคู่ ไม่รับ argument จากภายนอก** ถ้าเปลี่ยนให้รับ path
 // จากที่อื่นเมื่อไร จะกลายเป็นช่องยกระดับสิทธิ์ในเครื่องทันที
-// เวลาเริ่มของงานตรวจรุ่นใหม่ประจำเครื่องนี้ (HH:MM ภายในครึ่งชั่วโมงแรกของวัน)
+// นิยามงานตรวจรุ่นใหม่ประจำเครื่องนี้ (Task Scheduler XML)
 //
-// ถามจากโปรแกรมเอง (`agent update-slot --out <ไฟล์>`) เพื่อให้มีที่คำนวณที่เดียวและทดสอบได้
-// ค่านี้มาจาก hash ของ agentId (หรือชื่อเครื่องถ้ายังไม่ลงทะเบียน) จึงคงที่ต่อเครื่อง
-// schtasks จะยึดนาทีนี้เป็นจังหวะ: เริ่ม 00:07 ทุก 30 นาที = :07 และ :37 ของทุกชั่วโมง
-// สิบห้าสถานบริการจึงกระจายกันไปคนละนาที ไม่ถามศูนย์กลางพร้อมกันในวินาทีเดียว
+// ขอจากโปรแกรมเอง (`agent update-task-xml --out <ไฟล์>`) เพื่อให้มีที่คำนวณที่เดียวและทดสอบได้
+// XML ระบุทุกอย่างชัดเจน: ทุก 30 นาทีที่นาทีประจำเครื่อง (hash ของ agentId หรือชื่อเครื่อง),
+// ตรวจหลังบูต 3 นาที, **ทำงานชดเชยเมื่อพลาดรอบตอนเครื่องปิด** (StartWhenAvailable),
+// **ทำงานได้ตอนใช้แบตเตอรี่**, รันเป็น SYSTEM สิทธิ์สูงสุด
 //
-// **ไม่ผ่าน cmd.exe** — canary รอบแรกใช้ `cmd /C "node" "script" > ไฟล์` แล้ว cmd ตัด
-// เครื่องหมายคำพูดตัวแรกกับตัวสุดท้ายทิ้ง (กฎของ cmd เมื่อคำสั่งขึ้นต้นด้วย ") path จึงพัง
-// เงียบ ๆ และงานได้ค่าสำรอง 00:00 โดยไม่มีใครรู้ ตอนนี้เรียก node.exe ตรง ๆ แล้วให้
-// โปรแกรมเขียนไฟล์เอง ไม่มี shell คั่นกลาง
+// ทำไมต้องเป็น XML: `schtasks /Create /SC HOURLY /MO 4` ของ 1.1.8 ปล่อยค่าที่เหลือเป็นค่าเริ่มต้น
+// ซึ่งไม่ชดเชยรอบที่พลาดและไม่ทำงานบนแบตเตอรี่ -> เครื่องที่เปิดวันละไม่กี่ชั่วโมงไม่เคยได้อัปเดต
 //
-// ถ้าอ่านไม่ได้ด้วยเหตุใดก็ตาม ใช้ 00:00 — ยังตรวจทุก 30 นาทีเหมือนเดิม แค่ไม่กระจาย
-// และบันทึกไว้ใน log ของตัวติดตั้งว่าเป็นค่าสำรอง
+// **ไม่ผ่าน cmd.exe** (canary 1.1.9 เคยพังเพราะกฎการตัดเครื่องหมายคำพูดของ cmd)
+// ถ้าเขียน XML ไม่ได้ จะบันทึกไว้ใน log แล้วสร้างงานแบบเดิม (schtasks /SC MINUTE /MO 30) เป็นค่าสำรอง
+function WriteUpdateTaskXml(app: String; var xmlFile: String): Boolean;
+var
+  code: Integer;
+begin
+  Result := False;
+  xmlFile := ExpandConstant('{tmp}\SDCAgentAutoUpdate.xml');
+  DeleteFile(xmlFile);
+  if Exec(app + '\runtime\node.exe',
+          '"' + app + '\app\agent.js" update-task-xml --out "' + xmlFile + '"',
+          '', SW_HIDE, ewWaitUntilTerminated, code) and (code = 0) and FileExists(xmlFile) then
+    Result := True
+  else
+    Log('!! update-task-xml: เรียกโปรแกรมไม่สำเร็จ (exit ' + IntToStr(code) + ')');
+end;
+
+// เวลาเริ่มสำรอง (HH:MM) ใช้เฉพาะเมื่อเขียน XML ไม่ได้
 function UpdateCheckStartTime(app: String): String;
 var
   code: Integer;
@@ -253,7 +268,6 @@ begin
     if LoadStringsFromFile(slotFile, lines) and (GetArrayLength(lines) > 0) then
     begin
       raw := Trim(lines[0]);
-      // รับเฉพาะรูป 00:MM ที่ MM อยู่ใน 00-29 เท่านั้น ค่าอื่นถือว่าไม่ถูกต้อง
       if (Length(raw) = 5) and (Copy(raw, 1, 3) = '00:')
          and (StrToIntDef(Copy(raw, 4, 2), -1) >= 0)
          and (StrToIntDef(Copy(raw, 4, 2), -1) <= 29) then
@@ -271,7 +285,7 @@ end;
 
 procedure CreateScheduledTasks();
 var
-  app, node, script, updates, startAt: String;
+  app, node, script, updates, startAt, xmlFile, ps: String;
 begin
   app := ExpandConstant('{app}');
   node := '\"' + app + '\runtime\node.exe\"';
@@ -282,14 +296,24 @@ begin
       + node + ' ' + script + ' time-sync"',
     'สร้างงาน SDCAgentTimeSync');
 
-  // ทุก 30 นาที (เดิม 4 ชั่วโมง) โดยยึดนาทีประจำเครื่อง
-  // /F เขียนทับงานชื่อเดิม ดังนั้นการติดตั้งทับ 1.1.7 หรือ 1.1.8 จะได้จังหวะใหม่
-  // โดยไม่เหลืองานซ้ำ และงานอื่นของ Windows ไม่ถูกแตะ
-  startAt := UpdateCheckStartTime(app);
-  RunTool('{sys}\schtasks.exe',
-    '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC MINUTE /MO 30 /ST ' + startAt
-      + ' /TR "' + node + ' ' + script + ' auto-update"',
-    'สร้างงาน SDCAgentAutoUpdate');
+  // งานตรวจรุ่นใหม่: จาก XML ผ่านสคริปต์ที่ตั้งสิทธิ์ให้ผู้ใช้สั่งรันได้ด้วย
+  // /F ในสคริปต์เขียนทับงานชื่อเดิม ดังนั้นการติดตั้งทับ 1.1.7/1.1.8/1.1.9 ได้งานเดียว ไม่ซ้ำ
+  // และงานอื่นของ Windows ไม่ถูกแตะ
+  if WriteUpdateTaskXml(app, xmlFile) then
+  begin
+    ExtractTemporaryFile('register-update-task.ps1');
+    ps := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
+          + ExpandConstant('{tmp}\register-update-task.ps1') + '" -XmlPath "' + xmlFile + '"';
+    RunTool('{sys}\WindowsPowerShell\v1.0\powershell.exe', ps, 'สร้างงาน SDCAgentAutoUpdate (XML)');
+  end
+  else
+  begin
+    startAt := UpdateCheckStartTime(app);
+    RunTool('{sys}\schtasks.exe',
+      '/Create /F /TN "SDCAgentAutoUpdate" /RU SYSTEM /RL HIGHEST /SC MINUTE /MO 30 /ST ' + startAt
+        + ' /TR "' + node + ' ' + script + ' auto-update"',
+      'สร้างงาน SDCAgentAutoUpdate (สำรอง)');
+  end;
 
   // โฟลเดอร์อัปเดตต้องไม่ให้ผู้ใช้ทั่วไปเขียน
   //

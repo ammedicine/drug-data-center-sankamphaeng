@@ -35,6 +35,12 @@ export interface AgentCapabilities {
   workerLock: boolean;
   /** drains the worker's console into a bounded file */
   boundedWorkerLog: boolean;
+  /**
+   * Acts on an update command handed down in the heartbeat response, and
+   * reports the command's progress back. Absent on 1.1.7 - 1.1.9, which only
+   * ever update on their own scheduled task.
+   */
+  remoteUpdate: boolean;
 }
 
 export const NO_CAPABILITIES: AgentCapabilities = {
@@ -44,6 +50,7 @@ export const NO_CAPABILITIES: AgentCapabilities = {
   charsetGate: false,
   workerLock: false,
   boundedWorkerLog: false,
+  remoteUpdate: false,
 };
 
 /**
@@ -64,6 +71,7 @@ export function parseCapabilities(raw: unknown): AgentCapabilities {
     charsetGate: flag("charsetGate"),
     workerLock: flag("workerLock"),
     boundedWorkerLog: flag("boundedWorkerLog"),
+    remoteUpdate: flag("remoteUpdate"),
   };
 }
 

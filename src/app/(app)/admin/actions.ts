@@ -31,6 +31,12 @@ import {
 } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
 import { clientIp, writeAudit } from "@/lib/services/audit";
+import {
+  cancelUpdateCommand,
+  NoInstallableReleaseError,
+  requestAgentUpdates,
+  UpdateAuthorizationError,
+} from "@/lib/services/update-commands";
 
 export interface ActionState {
   error?: string;
@@ -947,6 +953,75 @@ export async function resumeAgentSyncAction(
 ): Promise<ActionState> {
   const ids = await resolveSelection(formData);
   return applySyncControl(ids, "RUNNING", null);
+}
+
+/* ------------------------------------------------ remote software update */
+
+/**
+ * "Update now", for one Agent or the selection.
+ *
+ * SUPER_ADMIN only - checked here for a readable refusal, and again inside
+ * requestAgentUpdates by re-reading the user from the database, because a
+ * session says what somebody was when they signed in. One durable command
+ * per Agent; the outcomes are summarised in plain Thai so an operator can see
+ * at once which machines will update, which already had, and which cannot.
+ */
+export async function requestAgentUpdateAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่สั่งอัปเดต Agent ได้");
+  const agentIds = await resolveSelection(formData);
+  if (!agentIds.length) return fail("ยังไม่ได้เลือก Agent");
+
+  const ip = clientIp(await headers());
+  let result;
+  try {
+    result = await requestAgentUpdates({ agentIds, actor: { userId: user.userId, label: user.email, ip } });
+  } catch (error) {
+    if (error instanceof UpdateAuthorizationError || error instanceof NoInstallableReleaseError) {
+      return fail(error.message);
+    }
+    throw error;
+  }
+
+  revalidatePath("/admin/fleet");
+  revalidatePath("/admin/agents");
+
+  const count = (k: string) => result.outcomes.filter((o) => o.outcome === k).length;
+  const parts: string[] = [];
+  if (count("REQUESTED")) parts.push(`สั่งอัปเดตเป็นรุ่น ${result.target.version} ให้ ${count("REQUESTED")} Agent แล้ว`);
+  if (count("DUPLICATE")) parts.push(`${count("DUPLICATE")} Agent มีคำสั่งอัปเดตค้างอยู่แล้ว`);
+  if (count("ALREADY_UP_TO_DATE")) parts.push(`${count("ALREADY_UP_TO_DATE")} Agent เป็นรุ่นล่าสุดแล้ว`);
+  if (count("UNSUPPORTED_CLIENT")) {
+    parts.push(
+      `${count("UNSUPPORTED_CLIENT")} Agent เป็นรุ่นเก่าที่ยังไม่รองรับคำสั่งจากศูนย์กลาง (จะอัปเดตเองตามรอบ หรือต้องติดตั้งด้วยมืออีกครั้ง)`,
+    );
+  }
+  if (count("NOT_FOUND")) parts.push(`${count("NOT_FOUND")} Agent ไม่พบในระบบ`);
+  return { success: parts.join(" · ") || "ไม่มีอะไรเปลี่ยนแปลง" };
+}
+
+/** Withdraws a command an Agent has not picked up yet. */
+export async function cancelAgentUpdateAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่ยกเลิกคำสั่งอัปเดตได้");
+  const commandId = String(formData.get("commandId") ?? "").trim();
+  if (!commandId) return fail("ไม่พบคำสั่ง");
+  const ip = clientIp(await headers());
+  let ok = false;
+  try {
+    ok = await cancelUpdateCommand({ commandId, actor: { userId: user.userId, label: user.email, ip } });
+  } catch (error) {
+    if (error instanceof UpdateAuthorizationError) return fail(error.message);
+    throw error;
+  }
+  revalidatePath("/admin/fleet");
+  return ok ? { success: "ยกเลิกคำสั่งอัปเดตแล้ว" } : fail("ยกเลิกไม่ได้ Agent รับคำสั่งไปแล้ว");
 }
 
 /**

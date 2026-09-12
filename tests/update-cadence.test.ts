@@ -26,13 +26,42 @@ const CLI = resolve(process.cwd(), "agent", "src", "cli.ts");
 describe("the scheduled task the installer writes", () => {
   const source = () => readFileSync(ISS, "utf8");
 
-  it("1. a new installation gets the 30-minute cadence", () => {
+  it("1. a new installation gets the 30-minute cadence - from XML first, schtasks switches only as a fallback", () => {
+    // v1.1.10: the task is registered from the XML the program writes, so
+    // catch-up of missed triggers, battery start and the boot trigger are
+    // explicit. The plain schtasks form is kept only for the case where the
+    // XML could not be produced, and even that form is 30 minutes.
     const create = /\/Create \/F \/TN "SDCAgentAutoUpdate"[^\n]*/.exec(source())?.[0] ?? "";
     expect(create).toContain("/SC MINUTE /MO 30");
     expect(create).not.toContain("HOURLY");
-    // Anchored to this machine's slot, not to whenever the installer happened
-    // to run.
     expect(create).toContain("/ST ' + startAt");
+    const tasks = source().slice(source().indexOf("procedure CreateScheduledTasks"));
+    expect(tasks.indexOf("WriteUpdateTaskXml(app, xmlFile)")).toBeLessThan(tasks.indexOf("/SC MINUTE /MO 30"));
+    expect(tasks).toContain("register-update-task.ps1");
+    expect(source()).toContain("update-task-xml --out");
+    expect(source()).toContain('Source: "register-update-task.ps1"');
+  });
+
+  it("registers the task with a descriptor that lets the signed-in user start it, and nothing more", () => {
+    const script = readFileSync(resolve(process.cwd(), "agent", "installer", "register-update-task.ps1"), "utf8");
+    expect(script).toContain("schtasks.exe /Create /TN $TaskName /XML $XmlPath /F");
+    // SYSTEM and Administrators full control; Users generic read + execute.
+    expect(script).toContain("D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)");
+    expect(script).not.toContain("FA;;;BU");
+    expect(script).not.toContain("GW;;;BU");
+    expect(script).not.toContain("taskkill");
+  });
+
+  it("the self-close never kills the process that is running the installer", () => {
+    // The SYSTEM updater is node.exe under the install directory - exactly
+    // what the path rule selects. Its whole ancestry is excluded.
+    const script = readFileSync(resolve(process.cwd(), "agent", "installer", "stop-owned-agent.ps1"), "utf8");
+    expect(script).toContain("function Get-AncestorPids");
+    expect(script).toContain("$script:Ancestors -contains [int]$p.ProcessId");
+    expect(script).toContain("-not ($script:Ancestors -contains [int]$held.ProcessId)");
+    const body = script.replace(/#.*$/gm, "");
+    expect(body).not.toMatch(/taskkill/i);
+    expect(body).not.toMatch(/\/IM/);
   });
 
   it("2./3. upgrading over v1.1.7 or v1.1.8 replaces the 4-hour task in place", () => {
@@ -80,6 +109,18 @@ describe("the scheduled task the installer writes", () => {
     const updater = readFileSync(resolve(process.cwd(), "agent", "src", "updater.ts"), "utf8");
     expect(updater).toContain('"/VERYSILENT", "/NORESTART"');
     expect(updater).not.toContain("SUPPRESSMSGBOXES\"");
+  });
+
+  it("asks the program for the task XML without a shell in between", () => {
+    const fn = source().slice(
+      source().indexOf("function WriteUpdateTaskXml"),
+      source().indexOf("function UpdateCheckStartTime"),
+    );
+    expect(fn).toContain("Exec(app + '\\runtime\\node.exe'");
+    expect(fn).toContain("update-task-xml --out");
+    expect(fn).not.toContain("{cmd}");
+    expect(fn).not.toContain("/C ");
+    expect(fn).not.toContain('> "');
   });
 
   it("asks the program for the slot without a shell in between", () => {
@@ -239,7 +280,10 @@ let manifest: Record<string, unknown>;
 beforeEach(async () => {
   home = mkdtempSync(resolve(tmpdir(), "sdc-update-"));
   hits = [];
-  manifest = { available: true, version: "1.1.9", assetName: "SDCAgent-Setup-1.1.9.exe",
+  // The manifest offers exactly the running version, so the check is a no-op
+  // whatever the source currently says AGENT_VERSION is.
+  const running = /AGENT_VERSION = "([^"]+)"/.exec(readFileSync(resolve(process.cwd(), "agent", "src", "config.ts"), "utf8"))![1];
+  manifest = { available: true, version: running, assetName: `SDCAgent-Setup-${running}.exe`,
     size: 1, sha256: "a".repeat(64), autoInstall: true };
   central = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
@@ -313,7 +357,7 @@ describe("a check that finds nothing new", () => {
     // And the local status records the check without inventing an update.
     const status = JSON.parse(readFileSync(join(home, "status.json"), "utf8"));
     expect(status.updateState).toBe("NONE");
-    expect(status.autoUpdateTaskLastResult).toMatch(/^NONE latest=1\.1\.9 running=1\.1\.9/);
+    expect(status.autoUpdateTaskLastResult).toMatch(/^NONE latest=(\S+) running=\1/);
   }, 180_000);
 
   it("7. still checks while sync is paused by the centre", async () => {

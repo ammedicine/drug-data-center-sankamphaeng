@@ -43,6 +43,12 @@ import {
   shouldStopForPause,
   syncPaused,
 } from "./control";
+import {
+  acceptUpdateCommand,
+  buildUpdateReport,
+  reportFingerprint,
+} from "./update-command";
+import { requestUpdateTaskRun } from "./updater";
 import { log } from "./logger";
 import { OfflineQueue } from "./queue/queue";
 import { resolveNetworkIdentity } from "./network";
@@ -282,6 +288,15 @@ function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length * p) / 100))];
 }
+
+/**
+ * The last update report actually sent, so an unchanged one is not sent again.
+ *
+ * Process-local on purpose: the centre keeps the durable copy, and after a
+ * restart the first heartbeat sends the report once regardless, which is also
+ * how a SUCCESS written by the new build reaches the centre.
+ */
+let lastUpdateReportSent: string | null = null;
 
 export class SyncRunner {
   /**
@@ -1511,6 +1526,15 @@ export class SyncRunner {
       // just lets an operator see whether the instruction has landed yet.
       effectiveSyncState: effectiveSyncState(),
       appliedControlRevision: loadState().appliedControlRevision ?? 0,
+      // The updater's progress - a command from the centre, or the machine's
+      // own scheduled check - sent only when it differs from what was last
+      // sent, so an idle fleet costs the centre nothing here.
+      ...(() => {
+        const report = buildUpdateReport({ checkedAt: loadStatus().updateCheckedAt ?? null });
+        const fingerprint = reportFingerprint(report);
+        if (fingerprint === lastUpdateReportSent) return {};
+        return { update: report };
+      })(),
       });
     } catch (error) {
       // The attempt stands; the acknowledgement does not. Nothing after this
@@ -1521,8 +1545,30 @@ export class SyncRunner {
 
     log.debug("heartbeat acknowledged", { config: response.config });
     writeStatus({ ...this.centralAck(), pendingChunks: queue.count("PENDING") });
+    // Acknowledged, so what was sent is now what the centre holds.
+    lastUpdateReportSent = reportFingerprint(
+      buildUpdateReport({ checkedAt: loadStatus().updateCheckedAt ?? null }),
+    );
     this.adoptCentralWatermark(response.config.lastSyncedVisitDate);
     applyControlInstruction(response.config);
+    // A remote update, if the centre handed one down. Written to disk first -
+    // that file is what the SYSTEM task acts on - then the task is asked to
+    // run now; if it cannot be asked, its own schedule finds the file within
+    // the half hour. Independent of pause: a paused clinic can still be fixed.
+    const command = response.config.updateCommand;
+    if (command && typeof command.id === "string" && typeof command.targetVersion === "string") {
+      const accepted = acceptUpdateCommand({
+        id: command.id,
+        targetVersion: command.targetVersion,
+        assetName: String(command.assetName ?? ""),
+        size: typeof command.size === "number" ? command.size : null,
+        sha256: String(command.sha256 ?? "").toLowerCase(),
+      });
+      if (accepted.accepted) {
+        lastUpdateReportSent = null; // report the new state on the next heartbeat
+        void requestUpdateTaskRun();
+      }
+    }
     return response.config;
   }
 

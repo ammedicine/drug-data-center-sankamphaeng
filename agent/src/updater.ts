@@ -18,17 +18,25 @@
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, writeFileSync } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
+import { MAX_UPDATE_ATTEMPTS, type UpdateCommandState, type UpdateErrorCode } from "@shared/update-command";
 import { isNewerVersion } from "@shared/version";
 
-import { dataDir, loadStatus } from "./config";
+import { AGENT_VERSION, dataDir, loadStatus } from "./config";
 import { log } from "./logger";
+import { UPDATE_CHECK_INTERVAL_MINUTES } from "./schedule";
+import { SYSTEM_SID, UPDATE_TASK_NAME, updateTaskDefinition, updateTaskXml } from "./task-definition";
+import {
+  advanceUpdateCommand,
+  type LocalUpdateCommand,
+  type UpdaterTaskHealth,
+} from "./update-command";
 
 const run = promisify(execFile);
 
@@ -192,4 +200,368 @@ export async function installUpdate(installerPath: string, version: string): Pro
     throw new Error(`ตัวติดตั้งจบด้วยรหัส ${code}`);
   }
   log.info("ติดตั้งรุ่นใหม่แล้ว", { version, logPath, exitCode: 0 });
+}
+
+/* ====================================================== the update engine */
+
+/**
+ * One state machine for both ways an update can start.
+ *
+ * The scheduled task asks "is there anything newer?"; the centre's command
+ * says "install this one". Both arrive here, and from here on there is no
+ * difference: the same manifest check, the same size and SHA-256 gate, the
+ * same wait for an idle sync, the same installer with the same flags. Two
+ * implementations would be two places for the next bug.
+ *
+ * Every step is written to the durable command file before it happens, so a
+ * PC switched off mid-download tells the next run exactly where it stopped,
+ * and the worker can report the same file to the centre.
+ */
+export type UpdateTrigger = "scheduled" | "command";
+
+export interface UpdateEngineResult {
+  /** what the run concluded, in the command vocabulary */
+  state: UpdateCommandState | "NONE" | "BLOCKED";
+  detail: string;
+  errorCode?: UpdateErrorCode | null;
+  version?: string | null;
+  installed?: boolean;
+}
+
+function classifyDownloadFailure(message: string): UpdateErrorCode {
+  if (/SHA-256/.test(message)) return "DIGEST_MISMATCH";
+  if (/ขนาดไฟล์/.test(message)) return "SIZE_MISMATCH";
+  return "DOWNLOAD_FAILED";
+}
+
+export async function runUpdateEngine(input: {
+  baseUrl: string;
+  trigger: UpdateTrigger;
+  /** the held command, when the trigger is "command" */
+  command: LocalUpdateCommand | null;
+  force?: boolean;
+  /** injectable for tests */
+  fetchManifestFn?: typeof fetchManifest;
+  downloadFn?: typeof downloadVerified;
+  installFn?: typeof installUpdate;
+  busyFn?: typeof syncIsBusy;
+}): Promise<UpdateEngineResult> {
+  const getManifest = input.fetchManifestFn ?? fetchManifest;
+  const download = input.downloadFn ?? downloadVerified;
+  const install = input.installFn ?? installUpdate;
+  const busy = input.busyFn ?? syncIsBusy;
+  const command = input.trigger === "command" ? input.command : null;
+
+  if (command) advanceUpdateCommand("CHECKING");
+
+  let manifest: UpdateManifest;
+  try {
+    manifest = await getManifest(input.baseUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (command) {
+      // Transient: the centre will be there next time. The command stays
+      // open and the next run tries again from CHECKING.
+      advanceUpdateCommand("DELIVERED");
+    }
+    return { state: "FAILED", detail: message, errorCode: "CENTRAL_UNAVAILABLE" };
+  }
+
+  const decision = decideUpdate(manifest, AGENT_VERSION);
+
+  if (decision.action === "none") {
+    if (command) {
+      // The centre asked for something this build already is, or nothing is
+      // published above it. Either way there is nothing to install.
+      advanceUpdateCommand("SUCCESS");
+    }
+    return { state: "NONE", detail: decision.reason, version: manifest.version ?? AGENT_VERSION };
+  }
+
+  if (decision.action === "blocked") {
+    if (command) {
+      advanceUpdateCommand("FAILED", {
+        errorCode: manifest.sha256 ? "ASSET_NAME_INVALID" : "DIGEST_MISSING",
+        errorMessage: decision.reason,
+      });
+    }
+    return { state: "BLOCKED", detail: decision.reason, version: decision.version };
+  }
+
+  // A command pins one release. If the centre now publishes something else,
+  // installing "whatever is latest" is not what the operator approved.
+  if (command) {
+    if (decision.version !== command.targetVersion || decision.sha256 !== command.sha256.toLowerCase()) {
+      advanceUpdateCommand("FAILED", {
+        errorCode: "TARGET_NOT_AVAILABLE",
+        errorMessage: `ศูนย์กลางเผยแพร่รุ่น ${decision.version} แต่คำสั่งระบุรุ่น ${command.targetVersion}`,
+      });
+      return {
+        state: "FAILED",
+        detail: `target ${command.targetVersion} is no longer what the centre publishes (${decision.version})`,
+        errorCode: "TARGET_NOT_AVAILABLE",
+        version: decision.version,
+      };
+    }
+  }
+
+  if (busy() && !input.force) {
+    if (command) advanceUpdateCommand("WAITING_FOR_IDLE");
+    return { state: "WAITING_FOR_IDLE", detail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง", version: decision.version };
+  }
+
+  if (command) advanceUpdateCommand("DOWNLOADING", { attempt: true });
+  let installer: string;
+  try {
+    installer = await download({
+      baseUrl: input.baseUrl,
+      version: decision.version,
+      assetName: decision.assetName,
+      sha256: decision.sha256,
+      size: decision.size,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = classifyDownloadFailure(message);
+    if (command) {
+      if (code === "DOWNLOAD_FAILED" && command.attempts + 1 < MAX_UPDATE_ATTEMPTS) {
+        // Network, most likely. Keep the command; try again next run.
+        advanceUpdateCommand("DELIVERED");
+      } else {
+        // A wrong digest is not going to become right by trying again.
+        advanceUpdateCommand("FAILED", { errorCode: code, errorMessage: message });
+      }
+    }
+    return { state: "FAILED", detail: message, errorCode: code, version: decision.version };
+  }
+
+  if (command) advanceUpdateCommand("VERIFYING");
+  // The download already verified size and digest before renaming into
+  // place; verifying again here proves the file on disk is still that file,
+  // in a directory the signed-in user cannot write.
+  const digest = await sha256Of(installer);
+  if (digest !== decision.sha256) {
+    await rm(installer, { force: true });
+    if (command) advanceUpdateCommand("FAILED", { errorCode: "DIGEST_MISMATCH", errorMessage: "ไฟล์บนดิสก์ไม่ตรงกับค่าตรวจสอบ" });
+    return { state: "FAILED", detail: "installer on disk no longer matches its digest", errorCode: "DIGEST_MISMATCH", version: decision.version };
+  }
+
+  // Idle is re-checked right before the installer runs: a sync may have
+  // started during a slow download.
+  if (busy() && !input.force) {
+    if (command) advanceUpdateCommand("WAITING_FOR_IDLE");
+    return { state: "WAITING_FOR_IDLE", detail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง", version: decision.version };
+  }
+
+  if (command) advanceUpdateCommand("INSTALLING");
+  try {
+    await install(installer, decision.version);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (command) advanceUpdateCommand("FAILED", { errorCode: "INSTALLER_FAILED", errorMessage: message });
+    return { state: "FAILED", detail: message, errorCode: "INSTALLER_FAILED", version: decision.version };
+  }
+  // SUCCESS is not written here on purpose: the installer has just replaced
+  // this program. The new build's first start reads INSTALLING, sees its own
+  // version at the target, and records SUCCESS - the state that survives the
+  // restart is the one the restart proves.
+  return { state: "INSTALLING", detail: `ติดตั้งรุ่น ${decision.version} แล้ว รอเริ่มโปรแกรมใหม่`, version: decision.version, installed: true };
+}
+
+/* ================================================= the task, from inside */
+
+const TASK_HEALTH_TIMEOUT_MS = 20_000;
+
+/** True when this process runs as LocalSystem - the only context that may touch the task. */
+export function runningAsSystem(): boolean {
+  const name = String(process.env.USERNAME ?? "").toUpperCase();
+  return name === "SYSTEM" || name.endsWith("$");
+}
+
+/**
+ * Reads the Agent's own scheduled task, as SYSTEM sees it.
+ *
+ * A standard user cannot see a SYSTEM task at all, so this only runs from
+ * the task itself. What it finds is written to updater-task.json for the
+ * worker to report, so the fleet screen can say "this machine has no update
+ * task" instead of the machine just never updating.
+ */
+export async function readUpdaterTaskHealth(): Promise<UpdaterTaskHealth> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const { stdout } = await run("schtasks", ["/Query", "/TN", UPDATE_TASK_NAME, "/XML"], {
+      timeout: TASK_HEALTH_TIMEOUT_MS,
+      windowsHide: true,
+      encoding: "utf8",
+    });
+    const xml = String(stdout);
+    const pick = (tag: string) => new RegExp(`<${tag}>([^<]*)</${tag}>`).exec(xml)?.[1] ?? null;
+    let lastRun: string | null = null;
+    let lastResult: string | null = null;
+    try {
+      const { stdout: list } = await run(
+        "schtasks",
+        ["/Query", "/TN", UPDATE_TASK_NAME, "/FO", "LIST", "/V"],
+        { timeout: TASK_HEALTH_TIMEOUT_MS, windowsHide: true, encoding: "utf8" },
+      );
+      lastRun = /Last Run Time:\s*(.+)/.exec(String(list))?.[1]?.trim() ?? null;
+      lastResult = /Last Result:\s*(.+)/.exec(String(list))?.[1]?.trim() ?? null;
+    } catch {
+      /* the XML alone is enough to judge the definition */
+    }
+    const start = pick("StartBoundary");
+    return {
+      present: true,
+      cadence: pick("Interval"),
+      runAs: pick("UserId"),
+      lastRun,
+      lastResult,
+      startWhenAvailable: pick("StartWhenAvailable") === "true",
+      allowOnBatteries: pick("DisallowStartIfOnBatteries") === "false",
+      slot: start ? start.slice(11, 16) : null,
+      checkedAt,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      present: false,
+      cadence: null,
+      runAs: null,
+      lastRun: null,
+      lastResult: null,
+      startWhenAvailable: null,
+      allowOnBatteries: null,
+      slot: null,
+      checkedAt,
+      error: message.slice(0, 200),
+    };
+  }
+}
+
+/**
+ * Whether the task as found is the task v1.1.10 wants.
+ *
+ * Pure, so the repair decision can be tested without a Task Scheduler.
+ */
+export function updaterTaskNeedsRepair(health: UpdaterTaskHealth): string | null {
+  if (!health.present) return "task missing";
+  if (health.cadence !== `PT${UPDATE_CHECK_INTERVAL_MINUTES}M`) return `cadence ${health.cadence}`;
+  if (health.runAs !== SYSTEM_SID) return `run-as ${health.runAs}`;
+  if (health.startWhenAvailable !== true) return "missed triggers are not caught up";
+  if (health.allowOnBatteries !== true) return "does not start on battery";
+  return null;
+}
+
+/**
+ * Re-registers the Agent's own task from the canonical definition.
+ *
+ * Only as SYSTEM, only by its fixed name, and only when the existing task
+ * (if any) points at this installation - a task of that name belonging to
+ * some other program is left alone and reported, not overwritten.
+ */
+export async function repairUpdaterTask(input: {
+  appDir: string;
+  identity: string;
+  health: UpdaterTaskHealth;
+}): Promise<{ repaired: boolean; reason: string }> {
+  const reason = updaterTaskNeedsRepair(input.health);
+  if (!reason) return { repaired: false, reason: "healthy" };
+  if (!runningAsSystem()) return { repaired: false, reason: `${reason}; not SYSTEM, cannot repair` };
+
+  if (input.health.present) {
+    // Ownership: the action must be our runtime under our install directory.
+    try {
+      const { stdout } = await run("schtasks", ["/Query", "/TN", UPDATE_TASK_NAME, "/XML"], {
+        timeout: TASK_HEALTH_TIMEOUT_MS,
+        windowsHide: true,
+        encoding: "utf8",
+      });
+      const command = /<Command>([^<]*)<\/Command>/.exec(String(stdout))?.[1] ?? "";
+      const ours = command.toLowerCase().startsWith(input.appDir.replace(/[\\/]+$/, "").toLowerCase());
+      if (!ours) return { repaired: false, reason: `${reason}; task belongs to ${command || "unknown"}, left alone` };
+    } catch {
+      return { repaired: false, reason: `${reason}; could not read existing task` };
+    }
+  }
+
+  const xml = updateTaskXml(updateTaskDefinition({ appDir: input.appDir, identity: input.identity }));
+  const file = join(dataDir(), "updater-task.xml");
+  writeFileSync(file, "\uFEFF" + xml, { encoding: "utf16le" });
+  try {
+    await run("schtasks", ["/Create", "/TN", UPDATE_TASK_NAME, "/XML", file, "/F"], {
+      timeout: TASK_HEALTH_TIMEOUT_MS,
+      windowsHide: true,
+      encoding: "utf8",
+    });
+    log.info("ซ่อมงานตรวจรุ่นใหม่ของตัวเองแล้ว", { reason });
+    return { repaired: true, reason };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.warn("ซ่อมงานตรวจรุ่นใหม่ไม่สำเร็จ", { reason, error: message.slice(0, 200) });
+    return { repaired: false, reason: `${reason}; repair failed: ${message.slice(0, 120)}` };
+  } finally {
+    await rm(file, { force: true });
+  }
+}
+
+/**
+ * Asks Task Scheduler to run the update task now.
+ *
+ * Works when the task's security descriptor lets the signed-in user run it,
+ * which the v1.1.10 installer arranges. On an installation that did not, it
+ * fails quietly and the task's own 30-minute schedule picks the command up.
+ */
+export async function requestUpdateTaskRun(): Promise<boolean> {
+  try {
+    await run("schtasks", ["/Run", "/TN", UPDATE_TASK_NAME], { timeout: 15_000, windowsHide: true });
+    log.info("ขอให้งานตรวจรุ่นใหม่ทำงานทันที");
+    return true;
+  } catch (error) {
+    log.debug("could not start the update task on demand; the schedule will", {
+      error: error instanceof Error ? error.message.slice(0, 120) : String(error),
+    });
+    return false;
+  }
+}
+
+/**
+ * Brings the tray back for the signed-in person after an unattended install.
+ *
+ * The installer runs `[Run]` with skipifsilent, and under SYSTEM there is no
+ * "original user" to run it as anyway - so after a silent install the tray
+ * the installer closed simply stayed closed, and with it the worker, until
+ * somebody next signed in. Here the console user is looked up and a one-shot
+ * interactive task starts the program in their session, then removes itself.
+ * Best effort: a failure is logged and the next logon still starts it.
+ */
+export async function relaunchTrayForConsoleUser(appDir: string): Promise<boolean> {
+  const exe = join(appDir, "SDCAgent.exe");
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$user = (Get-CimInstance Win32_ComputerSystem).UserName",
+    "if (-not $user) { Write-Output 'no console user'; exit 2 }",
+    "$name = 'SDCAgentRelaunch'",
+    `$action = New-ScheduledTaskAction -Execute '${exe.replace(/'/g, "''")}'`,
+    "$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive",
+    "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+    "Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings -Force | Out-Null",
+    "Start-ScheduledTask -TaskName $name",
+    "Start-Sleep -Seconds 3",
+    "Unregister-ScheduledTask -TaskName $name -Confirm:$false",
+    "Write-Output \"relaunched for $user\"",
+  ].join("; ");
+  try {
+    const { stdout } = await run(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { timeout: 60_000, windowsHide: true, encoding: "utf8" },
+    );
+    log.info("เปิดหน้าจอให้ผู้ใช้ที่ล็อกอินอยู่แล้ว", { detail: String(stdout).trim().slice(0, 120) });
+    return true;
+  } catch (error) {
+    log.warn("เปิดหน้าจอให้ผู้ใช้ไม่สำเร็จ จะเปิดเองเมื่อล็อกอินครั้งถัดไป", {
+      error: error instanceof Error ? error.message.slice(0, 200) : String(error),
+    });
+    return false;
+  }
 }

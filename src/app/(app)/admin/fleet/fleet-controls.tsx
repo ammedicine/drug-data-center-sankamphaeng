@@ -6,7 +6,14 @@ import { useFormStatus } from "react-dom";
 import { Button, Notice, inputClass } from "@/components/ui/primitives";
 import { toThaiDate, type ControlAckState } from "@/lib/shared/sync-control";
 
-import { pauseAgentSyncAction, resumeAgentSyncAction, type ActionState } from "../actions";
+import {
+  cancelAgentUpdateAction,
+  pauseAgentSyncAction,
+  requestAgentUpdateAction,
+  resumeAgentSyncAction,
+  type ActionState,
+} from "../actions";
+import { UPDATE_ERROR_LABELS, UPDATE_STATE_LABELS, type UpdateErrorCode } from "@/lib/shared/update-command";
 
 /**
  * One row per agentId, never per facility.
@@ -37,7 +44,65 @@ export interface FleetRowView {
   problem: boolean;
   current: { recordsRead: number; recordsAccepted: number; progress: number } | null;
   supportsRemotePause: boolean;
+
+  /* ------------------------------------------------------ software update */
+  supportsRemoteUpdate: boolean;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  /** the newest command row for this agent, or null */
+  command: {
+    id: string;
+    status: string;
+    targetVersion: string;
+    requestedAtLabel: string;
+    requestedByName: string | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    terminal: boolean;
+    completedAtLabel: string | null;
+  } | null;
+  /** the agent's own last word about its updater */
+  updater: {
+    state: string | null;
+    checkedAtLabel: string | null;
+    succeededAtLabel: string | null;
+    errorCode: string | null;
+    error: string | null;
+    errorAtLabel: string | null;
+    task: Record<string, unknown> | null;
+  };
 }
+
+/**
+ * What the update column says, in Thai, without needing a log.
+ *
+ * The command row is the record; the agent's own report refines it. An
+ * offline machine with a REQUESTED row is "waiting for the machine", not
+ * "waiting for the agent" - the difference is whether anyone needs to go
+ * and switch something on.
+ */
+function updateLabel(row: FleetRowView): { text: string; tone: "ok" | "warn" | "danger" | "muted" } {
+  const c = row.command;
+  if (c && !c.terminal) {
+    if (c.status === "REQUESTED" && row.status === "OFFLINE") {
+      return { text: UPDATE_STATE_LABELS.OFFLINE_REQUESTED, tone: "warn" };
+    }
+    const label = UPDATE_STATE_LABELS[c.status as keyof typeof UPDATE_STATE_LABELS] ?? c.status;
+    return { text: `${label} → ${c.targetVersion}`, tone: "warn" };
+  }
+  if (c?.status === "FAILED") {
+    const reason = c.errorCode ? (UPDATE_ERROR_LABELS[c.errorCode as UpdateErrorCode] ?? c.errorCode) : null;
+    return { text: `${UPDATE_STATE_LABELS.FAILED}${reason ? ` · ${reason}` : ""}`, tone: "danger" };
+  }
+  if (!row.supportsRemoteUpdate) {
+    return { text: "รุ่นนี้อัปเดตเองตามรอบ 30 นาที (ยังไม่รับคำสั่งจากศูนย์กลาง)", tone: "muted" };
+  }
+  if (!row.updateAvailable) return { text: UPDATE_STATE_LABELS.ALREADY_UP_TO_DATE, tone: "ok" };
+  if (c?.status === "SUCCESS") return { text: `${UPDATE_STATE_LABELS.SUCCESS} ${c.completedAtLabel ?? ""}`, tone: "ok" };
+  return { text: `มีรุ่น ${row.latestVersion} ให้อัปเดต`, tone: "warn" };
+}
+
+const TONE_CLASS = { ok: "text-emerald-700", warn: "text-amber-700", danger: "text-rose-700", muted: "text-slate-500" } as const;
 
 const FILTERS = [
   { key: "all", label: "ทั้งหมด" },
@@ -47,6 +112,8 @@ const FILTERS = [
   { key: "paused", label: "หยุดแล้ว" },
   { key: "waiting", label: "รอรับคำสั่ง" },
   { key: "problem", label: "มีปัญหา" },
+  { key: "updatable", label: "มีรุ่นใหม่" },
+  { key: "updating", label: "กำลังอัปเดต" },
 ] as const;
 
 /** Text and an icon, never colour alone. */
@@ -84,6 +151,10 @@ function Submit({ label, variant = "secondary" }: { label: string; variant?: "pr
 export function FleetControls({ rows }: { rows: FleetRowView[] }) {
   const [pauseState, pause] = useActionState(pauseAgentSyncAction, {} as ActionState);
   const [resumeState, resume] = useActionState(resumeAgentSyncAction, {} as ActionState);
+  const [updateState, requestUpdate] = useActionState(requestAgentUpdateAction, {} as ActionState);
+  const [cancelState, cancelUpdate] = useActionState(cancelAgentUpdateAction, {} as ActionState);
+  const [confirmUpdate, setConfirmUpdate] = useState<null | "one" | "selected">(null);
+  const [updateTarget, setUpdateTarget] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("all");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -112,6 +183,10 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
           return r.ack === "PAUSE_PENDING" || r.ack === "RESUME_PENDING";
         case "problem":
           return r.problem;
+        case "updatable":
+          return r.updateAvailable;
+        case "updating":
+          return Boolean(r.command && !r.command.terminal);
         default:
           return true;
       }
@@ -140,6 +215,16 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
       {resumeState.error || resumeState.success ? (
         <Notice tone={resumeState.error ? "danger" : "ok"}>
           {resumeState.error ?? resumeState.success}
+        </Notice>
+      ) : null}
+      {updateState.error || updateState.success ? (
+        <Notice tone={updateState.error ? "danger" : "ok"}>
+          {updateState.error ?? updateState.success}
+        </Notice>
+      ) : null}
+      {cancelState.error || cancelState.success ? (
+        <Notice tone={cancelState.error ? "danger" : "ok"}>
+          {cancelState.error ?? cancelState.success}
         </Notice>
       ) : null}
 
@@ -191,6 +276,51 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
           <input type="hidden" name="scope" value="selected" />
           <Submit label={`เปิดการซิงก์ ${selectedRows.length} Agent`} />
         </form>
+
+        {/* Remote software update for the selection. Confirmed first, with the
+            machines listed, because a click here installs software on real
+            clinic PCs. Every agent gets its own command; the centre hands them
+            out no more than two at a time. */}
+        {confirmUpdate === "selected" ? (
+          <form action={requestUpdate} className="flex w-full flex-col gap-2 rounded-md border border-amber-300 bg-amber-50 p-3">
+            {selectedRows.map((r) => (
+              <input key={r.agentId} type="hidden" name="agentId" value={r.agentId} />
+            ))}
+            <input type="hidden" name="scope" value="selected" />
+            <div className="text-sm font-medium">
+              จะสั่งอัปเดต {selectedRows.length} Agent เป็นรุ่นล่าสุด{selectedRows[0]?.latestVersion ? ` (${selectedRows[0].latestVersion})` : ""}
+            </div>
+            <ul className="max-h-40 overflow-y-auto text-xs text-slate-700">
+              {selectedRows.map((r) => (
+                <li key={r.agentId}>
+                  {r.facilityName} · {r.agentName} · ปัจจุบัน {r.version ?? "-"}
+                  {!r.supportsRemoteUpdate ? " · รุ่นนี้ไม่รับคำสั่ง จะถูกข้าม" : ""}
+                  {!r.updateAvailable ? " · เป็นรุ่นล่าสุดแล้ว จะถูกข้าม" : ""}
+                  {r.status === "OFFLINE" ? " · ออฟไลน์ จะรอจนกว่าเครื่องออนไลน์" : ""}
+                </li>
+              ))}
+            </ul>
+            <div className="text-xs text-slate-600">
+              ศูนย์กลางจะปล่อยให้ติดตั้งครั้งละไม่เกิน 2 เครื่อง · Agent ที่กำลังซิงก์จะรอให้ซิงก์เสร็จก่อน · เครื่องที่ปิดอยู่จะได้รับคำสั่งเมื่อเปิด
+            </div>
+            <div className="flex gap-2">
+              <Submit label={`ยืนยันอัปเดต ${selectedRows.length} Agent`} variant="primary" />
+              <Button type="button" size="sm" variant="secondary" onClick={() => setConfirmUpdate(null)}>
+                ยกเลิก
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={!selectedRows.length}
+            onClick={() => setConfirmUpdate("selected")}
+          >
+            อัปเดตที่เลือก
+          </Button>
+        )}
 
         <div className="ml-auto flex items-center gap-2">
           {confirming === "pauseAll" ? (
@@ -248,6 +378,7 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
               <th className="p-2">เริ่มเก็บข้อมูล</th>
               <th className="p-2">งานปัจจุบัน</th>
               <th className="p-2">เห็นล่าสุด</th>
+              <th className="p-2">อัปเดตซอฟต์แวร์</th>
               <th className="p-2">คำสั่ง</th>
             </tr>
           </thead>
@@ -324,6 +455,74 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
                 </td>
                 <td className="p-2 text-slate-600">{r.lastSeenLabel}</td>
                 <td className="p-2">
+                  {(() => {
+                    const label = updateLabel(r);
+                    return <div className={TONE_CLASS[label.tone]}>{label.text}</div>;
+                  })()}
+                  <div className="text-xs text-slate-500">
+                    {r.latestVersion ? `ล่าสุด ${r.latestVersion}` : "ยังไม่มีรุ่นเผยแพร่"}
+                    {r.updater.checkedAtLabel ? ` · ตรวจ ${r.updater.checkedAtLabel}` : ""}
+                    {r.updater.succeededAtLabel ? ` · สำเร็จ ${r.updater.succeededAtLabel}` : ""}
+                  </div>
+                  {r.updater.errorCode && !(r.command && !r.command.terminal) ? (
+                    <div className="text-xs text-rose-700">
+                      {UPDATE_ERROR_LABELS[r.updater.errorCode as UpdateErrorCode] ?? r.updater.errorCode}
+                      {r.updater.errorAtLabel ? ` (${r.updater.errorAtLabel})` : ""}
+                    </div>
+                  ) : null}
+                  {r.command && !r.command.terminal ? (
+                    <div className="text-xs text-slate-500">
+                      สั่งโดย {r.command.requestedByName ?? "-"} {r.command.requestedAtLabel}
+                      {r.command.status === "REQUESTED" ? (
+                        <form action={cancelUpdate} className="mt-1">
+                          <input type="hidden" name="commandId" value={r.command.id} />
+                          <Submit label="ยกเลิกคำสั่ง" />
+                        </form>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {r.updater.task && typeof r.updater.task === "object" && "present" in r.updater.task && r.updater.task.present === false ? (
+                    <div className="text-xs text-rose-700">⚠ ไม่พบงานตรวจรุ่นใหม่ในเครื่อง</div>
+                  ) : null}
+                  {r.supportsRemoteUpdate && r.updateAvailable && !(r.command && !r.command.terminal) ? (
+                    confirmUpdate === "one" && updateTarget === r.agentId ? (
+                      <form action={requestUpdate} className="mt-1 flex flex-col gap-1 rounded-md border border-amber-300 bg-amber-50 p-2">
+                        <input type="hidden" name="agentId" value={r.agentId} />
+                        <input type="hidden" name="scope" value="selected" />
+                        <div className="text-xs">
+                          {r.facilityName} · {r.agentName}
+                          <br />
+                          {r.version ?? "-"} → {r.latestVersion}
+                          {r.status === "OFFLINE" ? (
+                            <>
+                              <br />
+                              <span className="text-amber-700">เครื่องออฟไลน์ คำสั่งจะรอจนกว่าเครื่องออนไลน์</span>
+                            </>
+                          ) : null}
+                        </div>
+                        <div className="flex gap-1">
+                          <Submit label="ยืนยัน" variant="primary" />
+                          <Button type="button" size="sm" variant="secondary" onClick={() => setConfirmUpdate(null)}>
+                            ยกเลิก
+                          </Button>
+                        </div>
+                      </form>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setUpdateTarget(r.agentId);
+                          setConfirmUpdate("one");
+                        }}
+                      >
+                        อัปเดตตอนนี้
+                      </Button>
+                    )
+                  ) : null}
+                </td>
+                <td className="p-2">
                   {r.desiredSyncState === "RUNNING" ? (
                     <form action={pause} className="flex flex-col gap-1">
                       <input type="hidden" name="agentId" value={r.agentId} />
@@ -347,7 +546,7 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
             ))}
             {!visible.length ? (
               <tr>
-                <td colSpan={12} className="p-6 text-center text-slate-500">
+                <td colSpan={13} className="p-6 text-center text-slate-500">
                   ไม่พบ Agent ตามเงื่อนไขที่เลือก
                 </td>
               </tr>
