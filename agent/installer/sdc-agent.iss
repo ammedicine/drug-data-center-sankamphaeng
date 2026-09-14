@@ -64,6 +64,10 @@ Source: "{#BuildDir}\gui\SDCAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\app\agent.js";     DestDir: "{app}\app"; Flags: ignoreversion
 Source: "{#BuildDir}\runtime\node.exe"; DestDir: "{app}\runtime"; Flags: ignoreversion
 Source: "..\.env.example";              DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist
+; ตัวกลางระหว่างตัวอัปเดตกับตัวติดตั้ง — ต้องวางลงเครื่อง (ไม่ใช่ dontcopy) เพราะ
+; ตัวอัปเดตของรุ่นถัดไปเรียกใช้ตอน "อัปเดตตอนนี้" มันรันด้วย node สำเนา (นอกโฟลเดอร์
+; runtime ที่กำลังถูกแทนที่) จึงรอให้ node.exe ตัวเก่าออกก่อนค่อยเริ่มติดตั้ง
+Source: "run-installer.mjs";             DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\AGENT.md";          DestDir: "{app}"; DestName: "คู่มือการใช้งาน.md"; Flags: ignoreversion skipifsourcedoesntexist
 ; สคริปต์ปิด Agent ของการติดตั้งนี้ — dontcopy: ใช้ตอนติดตั้งเท่านั้น ไม่ต้องวางลงเครื่อง
 ; เก็บเป็นไฟล์จริงเพื่ออ่าน/ทดสอบได้ ไม่ต้องฝัง PowerShell ไว้ในสตริง Pascal

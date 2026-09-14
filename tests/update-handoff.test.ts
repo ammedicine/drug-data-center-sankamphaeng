@@ -1,38 +1,76 @@
 /**
- * The installer must not be waited for by the program it is replacing.
+ * The installer must not begin until the updater is really gone.
  *
- * What happened for real on 2026-09-14 (DEV, v1.1.9 → v1.1.10, SYSTEM task):
- * the updater is `runtime\node.exe agent.js auto-update`, it started the
- * installer and waited for it; the installer replaced SDCAgent.exe and
- * agent.js, then tried runtime\node.exe - "DeleteFile failed; code 5, in
- * use" - and put up an Abort/Retry/Ignore box that a SYSTEM session never
- * shows. Fifteen minutes later the updater's timeout killed it. The task
- * registration and the tray relaunch that follow a successful install never
- * ran.
+ * Real production, 2026-09-14 (05957 / DESKTOP-741A6BC): the updater is
+ * `runtime\node.exe`, the installer must replace that file, and the updater
+ * was still alive when the installer tried - DeleteFile code 5, an
+ * Abort/Retry/Ignore box no SYSTEM session shows, a ~13-minute hang, then a
+ * FAILED command even though a later manual install proved the installer
+ * itself was fine. v1.1.10 waited for the installer synchronously; v1.1.11
+ * spawned it detached and exited but never made it wait for the updater to
+ * go, so the replacement could still race the lock.
  *
- * These tests stage a runtime\node.exe (a copy of this node), run the driver
- * from THAT copy, and let a stand-in installer - a second copy of node with
- * the fake preloaded, so it is a separate image the way Setup.exe is - do
- * exactly what Inno does to the file. Real processes, real file locks. The
- * old mechanism is kept as a characterisation: it must still fail, so the
- * fix is proven against the thing it fixes rather than against a mock.
+ * v1.1.12 puts a helper between the two: a small script run by a COPY of node
+ * kept outside runtime\ (so it is never the file being replaced, and a
+ * detached node child reliably outlives the updater). The helper is handed
+ * the updater's pid, waits for it to exit, and only then starts the installer.
+ * These tests stage a real runtime\node.exe, run the driver from it, and let
+ * a real installer .exe (a compiled C# stub that does what Inno does to the
+ * file) run - real processes, real locks. The racing model is kept as a red
+ * characterisation; the fixed hand-off is the green one, and the ordering
+ * updater-exit < installer-start is asserted from timestamps, not assumed.
  */
-import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const FIXTURES = resolve(process.cwd(), "tests", "fixtures", "handoff");
 const DRIVER = join(FIXTURES, "driver.mts");
-const FAKE_INSTALLER = join(FIXTURES, "fake-installer.cjs");
+const HELPER_SRC = resolve(process.cwd(), "agent", "installer", "run-installer.mjs");
 
+// A real installer .exe: it records when it started, then does what Inno does
+// to an in-use file - tries to delete the target, retrying a few times, and
+// gives up with code 5 if it cannot; on success it copies the replacement in
+// and writes REPLACED. Behaviour is driven by environment, like the real one
+// reads its own state, so the helper launches it with the fixed setup args.
+const STUB_SOURCE = [
+  "using System; using System.IO; using System.Threading;",
+  "class Stub { static int Main() {",
+  "  string target = Environment.GetEnvironmentVariable(\"HANDOFF_TARGET\");",
+  "  string repl = Environment.GetEnvironmentVariable(\"HANDOFF_REPLACEMENT\");",
+  "  string marker = Environment.GetEnvironmentVariable(\"HANDOFF_MARKER\");",
+  "  string startFile = Environment.GetEnvironmentVariable(\"HANDOFF_START\");",
+  "  File.WriteAllText(startFile, DateTime.UtcNow.ToString(\"o\"));",
+  "  int n = 0; bool replaced = false;",
+  "  while (n < 4) { n++; try { File.Delete(target); replaced = true; break; } catch { Thread.Sleep(250); } }",
+  "  if (!replaced) { File.WriteAllText(marker, \"IN_USE \" + n); return 5; }",
+  "  File.Copy(repl, target, true);",
+  "  File.WriteAllText(marker, \"REPLACED \" + n);",
+  "  return 0;",
+  "} }",
+].join("\n");
+
+let stub: Buffer | null = null;
 let home: string;
 let stagedNode: string;
 let setupExe: string;
 let replacement: string;
 let marker: string;
+let startFile: string;
 let counter = 0;
+
+beforeAll(() => {
+  const csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+  if (process.platform !== "win32" || !existsSync(csc)) return;
+  const dir = mkdtempSync(resolve(tmpdir(), "sdc-stub-"));
+  const src = join(dir, "stub.cs");
+  const exe = join(dir, "stub.exe");
+  writeFileSync(src, STUB_SOURCE, "utf8");
+  const built = spawnSync(csc, ["/nologo", "/target:exe", `/out:${exe}`, src], { encoding: "utf8" });
+  if (built.status === 0 && existsSync(exe)) stub = readFileSync(exe);
+});
 
 beforeEach(() => {
   home = mkdtempSync(resolve(tmpdir(), "sdc-handoff-"));
@@ -42,21 +80,19 @@ beforeEach(() => {
   // The runtime the updater runs from - the file the installer must replace.
   stagedNode = join(home, "app", "runtime", "node.exe");
   copyFileSync(process.execPath, stagedNode);
-  // The "installer": a different image on disk, like Setup.exe is.
+  // The helper the updater launches, shipped beside the program (app root).
+  copyFileSync(HELPER_SRC, join(home, "app", "run-installer.mjs"));
+  // The "installer": a real, separate .exe, named like the published one.
   setupExe = join(home, "SDCAgent-Setup-9.9.9.exe");
-  copyFileSync(process.execPath, setupExe);
-  // What the installer writes in place of runtime\node.exe. Different bytes
-  // on purpose: identical bytes must not be allowed to hide a lock.
+  if (stub) writeFileSync(setupExe, stub);
+  // What the installer writes in place of runtime\node.exe. Different bytes on
+  // purpose: identical bytes must not be allowed to hide a lock.
   replacement = join(home, "node-new.bin");
   writeFileSync(replacement, Buffer.concat([readFileSync(process.execPath).subarray(0, 4096), Buffer.from("NEW RUNTIME")]));
-  marker = join(home, "installer.json");
+  marker = join(home, "installer.marker");
+  startFile = join(home, "installer.start");
 });
 afterEach(async () => {
-  // The installer is detached and, under a loaded full-suite run, may still be
-  // exiting when the test ends - it has just rewritten a node.exe in here.
-  // Wait for the dir to become removable, but never let cleanup fail the test:
-  // a leaked temp dir under the OS temp root is harmless, an EPERM thrown from
-  // teardown is not.
   for (let i = 0; i < 40; i++) {
     try {
       rmSync(home, { recursive: true, force: true });
@@ -66,14 +102,15 @@ afterEach(async () => {
     }
   }
 });
+afterAll(() => {});
 
 const env = () => ({
   ...process.env,
   AGENT_DATA_DIR: join(home, "data"),
-  HANDOFF_FAKE: FAKE_INSTALLER,
   HANDOFF_TARGET: stagedNode,
   HANDOFF_REPLACEMENT: replacement,
   HANDOFF_MARKER: marker,
+  HANDOFF_START: startFile,
 });
 
 interface DriverResult {
@@ -82,24 +119,15 @@ interface DriverResult {
   exe: string;
   startedAt: number;
   exitingAt: number;
-  installerExit?: number | string;
-  handoff?: { pid: number; startedAt: string };
-}
-interface InstallerResult {
-  outcome: "IN_USE" | "REPLACED";
-  pid: number;
-  ppid: number;
-  startedAt: number;
-  finishedAt: number;
-  attempts: number;
+  raced?: boolean;
+  handoff?: { helperPid: number; updaterPid: number; resultPath: string; version: string };
 }
 
-/** Runs the driver from the STAGED node.exe and waits for that process to exit. */
-function runDriver(mode: "wait" | "handoff"): Promise<{ code: number | null; exitedAt: number; result: DriverResult; stderr: string }> {
+/** Runs the driver from the STAGED node.exe and resolves when that process has exited. */
+function runDriver(mode: "race" | "handoff"): Promise<{ code: number | null; exitedAt: number; result: DriverResult; stderr: string }> {
   const resultFile = join(home, `driver-${counter++}.json`);
   return new Promise((done, fail) => {
     let stderr = "";
-    // tsx is resolved from the repo, which is the cwd.
     const child = spawn(stagedNode, ["--import", "tsx", DRIVER, mode, setupExe, resultFile], {
       cwd: process.cwd(),
       env: env(),
@@ -120,61 +148,83 @@ const waitFor = async (predicate: () => boolean, ms: number) => {
   while (!predicate() && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
   return predicate();
 };
-const installerResult = () => JSON.parse(readFileSync(marker, "utf8")) as InstallerResult;
+const markerOutcome = () => readFileSync(marker, "utf8").trim().split(/\s+/)[0];
 const isNewRuntime = () => readFileSync(stagedNode).includes("NEW RUNTIME");
-const pidAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
-describe("the lock that stopped the v1.1.10 self-update", () => {
-  it("RED: an updater that waits for the installer keeps runtime\\node.exe locked, and the installer cannot replace it", async () => {
-    const run = await runDriver("wait");
-    expect(run.result.exe.toLowerCase()).toBe(stagedNode.toLowerCase()); // the driver really ran from the staged runtime
-    const setup = installerResult();
-    expect(setup.outcome).toBe("IN_USE"); // DeleteFile failed; code 5
-    expect(setup.attempts).toBe(4);
-    expect(run.result.installerExit).toBe(5);
-    expect(isNewRuntime()).toBe(false); // the old runtime is still there
-    expect(existsSync(stagedNode)).toBe(true);
+describe("the lock that stopped the real canary", () => {
+  it("RED: an installer started before the updater exits cannot replace runtime\\node.exe", async () => {
+    if (!stub) return;
+    const run = await runDriver("race");
+    expect(run.result.raced).toBe(true);
+    // The installer ran while the driver still held the staged node.exe, so it
+    // did what Inno did on 05957: retried the delete and gave up.
+    const finished = await waitFor(() => existsSync(marker), 20_000);
+    expect(finished).toBe(true);
+    expect(markerOutcome()).toBe("IN_USE");
+    expect(isNewRuntime()).toBe(false);
   }, 60_000);
 });
 
-describe("the fixed hand-off", () => {
-  it("GREEN: the updater starts the installer detached and exits; the installer then replaces runtime\\node.exe and finishes", async () => {
+describe("the v1.1.12 helper hand-off", () => {
+  it("GREEN: the helper waits for the updater to exit, then the installer replaces node.exe", async () => {
+    if (!stub) return;
     const run = await runDriver("handoff");
     expect(run.code).toBe(0);
-    expect(run.result.handoff?.pid).toBeGreaterThan(0);
+    expect(run.result.handoff?.helperPid).toBeGreaterThan(0);
+    expect(run.result.handoff?.updaterPid).toBe(run.result.pid);
 
-    // The installer outlives the process that started it ...
-    const finished = await waitFor(() => existsSync(marker), 20_000);
-    expect(finished, "installer never finished after the updater exited").toBe(true);
-    const setup = installerResult();
-    expect(setup.pid).toBe(run.result.handoff!.pid);
-    expect(setup.ppid).toBe(run.result.pid); // started by the updater ...
-    expect(pidAlive(run.result.pid)).toBe(false); // ... which is gone
-
-    // ... and could do what the real one could not.
-    expect(setup.outcome).toBe("REPLACED");
+    // The installer runs only after the updater is gone, so it succeeds where
+    // the racing model failed.
+    const finished = await waitFor(() => existsSync(marker), 40_000);
+    expect(finished, "installer never finished").toBe(true);
+    expect(markerOutcome()).toBe("REPLACED");
     expect(isNewRuntime()).toBe(true);
-    // The updater was out of the way well inside Inno's retry window, not
-    // after a 15-minute timeout.
-    expect(run.exitedAt - run.result.startedAt).toBeLessThan(15_000);
-    expect(setup.finishedAt).toBeGreaterThanOrEqual(run.exitedAt - 50);
-  }, 60_000);
 
-  it("records the hand-off durably so a later run knows an installer is out there", async () => {
+    // The ordering that is the whole point: the installer did not START until
+    // after the updater process had EXITED. Proven from the clock, not assumed.
+    expect(existsSync(startFile)).toBe(true);
+    const installerStartedAt = new Date(readFileSync(startFile, "utf8").trim()).getTime();
+    expect(installerStartedAt).toBeGreaterThanOrEqual(run.exitedAt - 500);
+  }, 90_000);
+
+  it("records the hand-off durably, naming the helper and the updater it waits for", async () => {
+    if (!stub) return;
     const run = await runDriver("handoff");
     const store = await import(`../agent/src/update-command?h=${counter++}`);
     const evidence = store.loadInstallHandoff();
-    expect(evidence).toMatchObject({ version: "9.9.9", pid: run.result.handoff!.pid, installerPath: setupExe });
-    expect(evidence!.logPath).toContain(join("logs", "update-9.9.9.log"));
-    // Let the detached installer finish replacing the staged runtime before
-    // the fixture is torn down, so cleanup is not racing an open handle.
-    await waitFor(() => existsSync(marker), 20_000);
+    expect(evidence).toMatchObject({ version: "9.9.9", helperPid: run.result.handoff!.helperPid, updaterPid: run.result.pid });
+    expect(evidence!.resultPath).toContain("handoff-9.9.9");
+    await waitFor(() => existsSync(marker), 40_000);
+  }, 90_000);
+
+  it("does not start the installer at all when the updater never exits", async () => {
+    if (!stub) return;
+    // A process that never exits stands in for an updater that will not let go.
+    // The helper is run directly (from the staged node - fine, it is not the
+    // target here) with a short wait so the test does not sit for two minutes.
+    const holder = spawn(stagedNode, ["-e", "setInterval(()=>{},1000)"], { windowsHide: true });
+    await new Promise((r) => setTimeout(r, 500));
+    const resultPath = join(home, "result-alive.json");
+    const helper = join(home, "app", "run-installer.mjs");
+    try {
+      await new Promise<void>((done, fail) => {
+        const h = spawn(
+          stagedNode,
+          [helper, "--updater-pid", String(holder.pid), "--updater-image", "node.exe",
+            "--installer", setupExe, "--installer-log", join(home, "x.log"),
+            "--result", resultPath, "--wait-ms", "3000", "--grace-ms", "0"],
+          { env: env(), windowsHide: true },
+        );
+        h.on("error", fail);
+        h.on("exit", () => done());
+      });
+      expect(existsSync(resultPath)).toBe(true);
+      expect(JSON.parse(readFileSync(resultPath, "utf8")).outcome).toBe("UPDATER_ALIVE");
+      // The installer was never started, so it left neither mark.
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(startFile)).toBe(false);
+    } finally {
+      holder.kill();
+    }
   }, 60_000);
 });

@@ -18,9 +18,9 @@
  */
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { createReadStream, createWriteStream, writeFileSync } from "node:fs";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { createReadStream, createWriteStream, existsSync, statSync, writeFileSync } from "node:fs";
+import { copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
@@ -35,8 +35,8 @@ import { SYSTEM_SID, UPDATE_TASK_NAME, updateTaskDefinition, updateTaskXml } fro
 import {
   advanceUpdateCommand,
   clearInstallHandoff,
+  handoffInProgress,
   type InstallHandoff,
-  installerStillRunning,
   loadInstallHandoff,
   type LocalUpdateCommand,
   saveInstallHandoff,
@@ -178,41 +178,87 @@ export function syncIsBusy(): boolean {
   return phase === "READING" || phase === "UPLOADING" || phase === "VERIFYING";
 }
 
+/** The helper script the installer is launched through - shipped beside the program, not under runtime\. */
+export function installerHelperPath(appDir = resolve(process.execPath, "..", "..")): string {
+  return join(appDir, "run-installer.mjs");
+}
+
+/** A copy of node kept in the updates directory, used to run the helper so it is never the file being replaced. */
+export function handoffRuntimePath(): string {
+  return join(updatesDir(), "handoff-node.exe");
+}
+
 /**
- * Starts the installer and gets out of its way.
+ * Hands the install to a helper that starts it only after this updater is gone.
  *
- * This program is `runtime\node.exe agent.js auto-update`, and among the
- * files the installer replaces is runtime\node.exe. Every release up to
- * v1.1.10 started the installer and waited for it - so the updater's own
- * image stayed locked, Inno's DeleteFile failed with code 5, and the
- * Abort/Retry/Ignore box it put up was in a SYSTEM session nobody can see.
- * Fifteen minutes later the timeout killed the installer, after it had
- * already replaced the other files. That happened on a real machine on
- * 2026-09-14 (update-1.1.10.log).
+ * This program is `runtime\node.exe agent.js auto-update`, and among the files
+ * the installer replaces is runtime\node.exe. v1.1.10 started the installer
+ * and waited for it, so node.exe stayed locked - Inno's DeleteFile failed
+ * with code 5, an Abort/Retry/Ignore box no SYSTEM session can show, then a
+ * fifteen-minute timeout (real machine, 2026-09-14). v1.1.11 spawned the
+ * installer detached and exited, but nothing made the installer wait for this
+ * process to actually go, so the replacement could still race the lock.
  *
- * So: the installer is spawned detached, with its own console and no pipes
- * back to this process, and this process returns at once - the caller
- * exits, the lock goes with it, and the installer proceeds on its own. The
- * hand-off is written down first (install-handoff.json), because from here
- * on nothing in memory survives: the next run, or the newly installed build,
- * reads that file and the command file to know what happened.
+ * So the installer is never started by this process. A helper is - Windows
+ * PowerShell (run-installer.ps1), running from System32, not from the runtime
+ * being replaced. It is given this updater's own pid, waits for it to exit,
+ * proves it is gone, and only then runs the installer. This process writes the
+ * hand-off record (install-handoff.json, naming the helper, the updater pid
+ * and the result file) and returns so the caller can exit; from here on
+ * nothing in memory survives, and the next run - or the freshly installed
+ * build - reads those files to know what happened.
  *
- * /VERYSILENT is the mode that has actually been proven on this installer.
- * /SUPPRESSMSGBOXES is deliberately absent: it turns Inno's pre-flight
- * questions into an automatic Cancel, which is how a silent install of 1.1.5
- * failed three times in a row while reporting only exit code 2.
+ * /VERYSILENT is the mode proven on this installer; /SUPPRESSMSGBOXES is
+ * deliberately absent (it once turned Inno's questions into an auto-Cancel).
  */
 export async function handOffInstaller(installerPath: string, version: string): Promise<InstallHandoff> {
   const logPath = join(dataDir(), "logs", `update-${version}.log`);
-  log.info("กำลังส่งต่อให้ตัวติดตั้ง", { version });
+  const resultPath = join(updatesDir(), `handoff-${version}.result.json`);
+  const helper = installerHelperPath();
+  if (!existsSync(helper)) throw new Error(`ไม่พบตัวช่วยติดตั้ง: ${helper}`);
+  // The helper writes its result into the updates directory; make sure it is
+  // there, and that no stale result from a previous attempt is read as this
+  // one's.
+  await mkdir(updatesDir(), { recursive: true });
+  await rm(resultPath, { force: true });
+
+  // The helper must run from a node that is NOT the one being replaced, or it
+  // is back to holding runtime\node.exe. So it runs from a copy kept in the
+  // updates directory (administrators/SYSTEM only, like the downloads). A
+  // detached node child reliably outlives the updater that launched it;
+  // PowerShell, launched the same way, dies with the launching console.
+  const runtimeCopy = handoffRuntimePath();
+  try {
+    if (!existsSync(runtimeCopy) || statSync(runtimeCopy).size !== statSync(process.execPath).size) {
+      await copyFile(process.execPath, runtimeCopy);
+    }
+  } catch (error) {
+    throw new Error(`เตรียม node สำหรับตัวช่วยติดตั้งไม่ได้: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  log.info("กำลังส่งต่อให้ตัวช่วยติดตั้ง", { version });
+
   let child;
   try {
-    child = spawn(installerPath, ["/VERYSILENT", "/NORESTART", `/LOG=${logPath}`], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    // A bad executable fails one of two ways: synchronously from spawn() (the
+    child = spawn(
+      runtimeCopy,
+      [
+        helper,
+        // Fixed, named arguments - the helper reads them by name; there is no
+        // command string to inject into.
+        "--updater-pid",
+        String(process.pid),
+        "--updater-image",
+        basename(process.execPath),
+        "--installer",
+        installerPath,
+        "--installer-log",
+        logPath,
+        "--result",
+        resultPath,
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true },
+    );
+    // A bad launch fails one of two ways: synchronously from spawn() (the
     // CreateProcess error on Windows), or asynchronously on the "error" event.
     // Both must reach the caller as one clear failure, not an unhandled throw.
     await new Promise<void>((resolve, reject) => {
@@ -220,18 +266,20 @@ export async function handOffInstaller(installerPath: string, version: string): 
       child!.once("error", reject);
     });
   } catch (error) {
-    throw new Error(`เรียกตัวติดตั้งไม่ได้: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`เรียกตัวช่วยติดตั้งไม่ได้: ${error instanceof Error ? error.message : String(error)}`);
   }
   child.unref();
   const handoff: InstallHandoff = {
     version,
     installerPath,
-    pid: child.pid ?? 0,
+    helperPid: child.pid ?? 0,
+    updaterPid: process.pid,
+    resultPath,
     startedAt: new Date().toISOString(),
     logPath,
   };
   saveInstallHandoff(handoff);
-  log.info("ตัวติดตั้งเริ่มทำงานแล้ว โปรแกรมนี้จะปิดตัวเพื่อให้แทนที่ไฟล์ได้", { version, pid: handoff.pid, logPath });
+  log.info("ตัวช่วยติดตั้งเริ่มทำงานแล้ว โปรแกรมนี้จะปิดตัวเพื่อให้แทนที่ไฟล์ได้", { version, helperPid: handoff.helperPid, logPath });
   return handoff;
 }
 
@@ -289,10 +337,10 @@ export async function runUpdateEngine(input: {
   // task fires every half hour and ignores nothing but itself. Two installers
   // on the same program files is the one thing that must never happen.
   const pending = loadInstallHandoff();
-  if (installerStillRunning(pending)) {
+  if (handoffInProgress(pending)) {
     return {
       state: "INSTALLING",
-      detail: `ตัวติดตั้งรุ่น ${pending!.version} ยังทำงานอยู่ (pid ${pending!.pid})`,
+      detail: `การติดตั้งรุ่น ${pending!.version} ยังทำงานอยู่ (helper pid ${pending!.helperPid})`,
       version: pending!.version,
     };
   }

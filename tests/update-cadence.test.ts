@@ -104,11 +104,12 @@ describe("the scheduled task the installer writes", () => {
     const create = /\/Create \/F \/TN "SDCAgentAutoUpdate"[^\n]*\n[^\n]*\n[^\n]*/.exec(source())?.[0] ?? "";
     expect(create).toContain("/RU SYSTEM /RL HIGHEST");
     expect(create).toContain("auto-update");
-    // The installer itself is what the updater runs, silently, no restart, no
-    // message-box suppression (which turned Inno's questions into Cancel).
-    const updater = readFileSync(resolve(process.cwd(), "agent", "src", "updater.ts"), "utf8");
-    expect(updater).toContain('"/VERYSILENT", "/NORESTART"');
-    expect(updater).not.toContain("SUPPRESSMSGBOXES\"");
+    // The installer is launched by the hand-off helper now, not the updater
+    // directly - silently, no restart, no message-box suppression (which once
+    // turned Inno's questions into Cancel).
+    const helper = readFileSync(resolve(process.cwd(), "agent", "installer", "run-installer.mjs"), "utf8");
+    expect(helper).toContain('"/VERYSILENT", "/NORESTART"');
+    expect(helper).not.toContain("SUPPRESSMSGBOXES");
   });
 
   it("asks the program for the task XML without a shell in between", () => {

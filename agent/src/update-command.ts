@@ -16,7 +16,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import type { AgentUpdateReport } from "@shared/canonical";
 import { MAX_UPDATE_ATTEMPTS, type UpdateCommandState, type UpdateErrorCode } from "@shared/update-command";
@@ -64,20 +64,47 @@ const HEALTH_FILE = "updater-task.json";
 const HANDOFF_FILE = "install-handoff.json";
 
 /**
- * The installer this Agent started and then left running.
+ * The install this Agent handed to a helper and walked away from.
  *
  * The updater is `runtime\node.exe`, and the installer has to replace that
- * very file - so the updater cannot stay to watch. It starts the installer
- * detached, writes this record, and exits; the record is how the next run
- * (30 minutes later, or the freshly installed build) tells "an installer is
- * still at work" from "that installer is gone and the version did not move".
+ * very file - so the updater cannot stay to watch, and it must not let the
+ * installer start while it is still holding node.exe. It launches a helper
+ * (Windows PowerShell, not the installed runtime) that waits for the updater
+ * to exit, proves it is gone, and only then runs the installer; the updater
+ * writes this record and exits. `resultPath` is where the helper writes its
+ * outcome, so the next run - 30 minutes later, or the freshly installed
+ * build - can tell "still installing" from "the installer is gone and the
+ * version did not move", and why.
  */
 export interface InstallHandoff {
   version: string;
   installerPath: string;
-  pid: number;
+  /** the helper (powershell) process that waits for the updater and runs the installer */
+  helperPid: number;
+  /** the updater process the helper waits to exit before it starts the installer */
+  updaterPid: number;
+  /** where the helper writes its outcome */
+  resultPath: string;
   startedAt: string;
   logPath: string;
+}
+
+/** What the helper concluded. Written by run-installer.ps1, read on the next run. */
+export interface HandoffResult {
+  outcome: "INSTALLED" | "UPDATER_ALIVE" | "INSTALLER_FAILED" | "HELPER_ERROR";
+  exit?: number;
+  message?: string;
+  at?: string;
+}
+
+export function loadHandoffResult(handoff: InstallHandoff | null): HandoffResult | null {
+  if (!handoff?.resultPath || !existsSync(handoff.resultPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(handoff.resultPath, "utf8")) as HandoffResult;
+    return parsed && typeof parsed.outcome === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 export function updateCommandPath(): string {
@@ -217,21 +244,34 @@ export function reconcileUpdateCommandAfterRestart(): LocalUpdateCommand | null 
     return advanceUpdateCommand("SUCCESS");
   }
   if (current.state === "INSTALLING" || current.state === "VERIFYING" || current.state === "DOWNLOADING") {
-    // An installer this program handed off and walked away from may still be
-    // running - the worker restarts within seconds of the tray coming back,
-    // long before a slow disk is done. Its record says so; leave it alone.
-    if (current.state === "INSTALLING" && installerStillRunning(loadInstallHandoff())) {
-      log.info("ตัวติดตั้งยังทำงานอยู่ รอให้เสร็จก่อน", { commandId: current.commandId, target: current.targetVersion });
+    // A hand-off this program made may still be in flight - the helper is
+    // waiting for the old updater to exit, or the installer is mid-copy. The
+    // worker restarts within seconds of the tray coming back, long before a
+    // slow disk is done, so leave an in-progress hand-off alone.
+    const handoff = loadInstallHandoff();
+    if (current.state === "INSTALLING" && handoffInProgress(handoff)) {
+      log.info("การติดตั้งยังทำงานอยู่ รอให้เสร็จก่อน", { commandId: current.commandId, target: current.targetVersion });
       return current;
     }
+    // The hand-off has finished (or there was none) and yet this build is not
+    // at the target: the install did not take. The helper's result says why.
+    const result = loadHandoffResult(handoff);
     clearInstallHandoff();
+    const reason =
+      result?.outcome === "UPDATER_ALIVE"
+        ? "ตัวอัปเดตตัวเก่ายังไม่ปิด ตัวช่วยจึงไม่เริ่มติดตั้ง"
+        : result?.outcome === "INSTALLER_FAILED"
+          ? `ตัวติดตั้งจบด้วยรหัส ${result.exit ?? "?"}`
+          : result?.outcome === "HELPER_ERROR"
+            ? `ตัวช่วยติดตั้งผิดพลาด: ${(result.message ?? "").slice(0, 120)}`
+            : null;
     if (current.attempts >= MAX_UPDATE_ATTEMPTS) {
       return advanceUpdateCommand("FAILED", {
         errorCode: "INSTALL_INCOMPLETE",
-        errorMessage: `ติดตั้งไม่จบหลังพยายาม ${current.attempts} ครั้ง`,
+        errorMessage: reason ?? `ติดตั้งไม่จบหลังพยายาม ${current.attempts} ครั้ง`,
       });
     }
-    log.warn("การอัปเดตค้างจากรอบก่อน จะลองใหม่", { commandId: current.commandId, state: current.state });
+    log.warn("การอัปเดตยังไม่สำเร็จ จะลองใหม่", { commandId: current.commandId, state: current.state, reason });
     return advanceUpdateCommand("DELIVERED");
   }
   return current;
@@ -248,39 +288,46 @@ export function loadInstallHandoff(): InstallHandoff | null {
   if (!existsSync(path)) return null;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as InstallHandoff;
-    return parsed && typeof parsed.pid === "number" && typeof parsed.version === "string" ? parsed : null;
+    return parsed && typeof parsed.helperPid === "number" && typeof parsed.version === "string" ? parsed : null;
   } catch {
     return null;
   }
 }
 
 export function clearInstallHandoff(): void {
+  const handoff = loadInstallHandoff();
+  if (handoff?.resultPath) rmSync(handoff.resultPath, { force: true });
   rmSync(join(dataDir(), HANDOFF_FILE), { force: true });
 }
 
 /**
- * Whether the installer a hand-off record names is still the installer.
+ * Whether a hand-off is still in flight.
  *
- * A pid on its own is not proof: Windows hands pids out again. The process
- * behind the pid must also be running the installer's image, so a recycled
- * number pointing at something unrelated reads as "gone".
+ * Finished the moment the helper writes its result - that file is the
+ * authoritative "done", success or not. Before then, the helper must still
+ * be alive: it is the process waiting for the updater and running the
+ * installer. A pid on its own is not proof, since Windows reuses pids, so the
+ * process behind it must still be powershell (the helper's image); a recycled
+ * number pointing at anything else reads as gone, which ends the wait rather
+ * than blocking the next attempt for ever.
  */
-export function installerStillRunning(handoff: InstallHandoff | null): boolean {
-  if (!handoff || !(handoff.pid > 0)) return false;
+export function handoffInProgress(handoff: InstallHandoff | null): boolean {
+  if (!handoff || !(handoff.helperPid > 0)) return false;
+  if (loadHandoffResult(handoff)) return false;
   try {
-    process.kill(handoff.pid, 0);
+    process.kill(handoff.helperPid, 0);
   } catch {
     return false;
   }
   if (process.platform !== "win32") return true;
   try {
-    const csv = execFileSync("tasklist", ["/FI", `PID eq ${handoff.pid}`, "/FO", "CSV", "/NH"], {
+    const csv = execFileSync("tasklist", ["/FI", `PID eq ${handoff.helperPid}`, "/FO", "CSV", "/NH"], {
       encoding: "utf8",
       windowsHide: true,
       timeout: 10_000,
     });
     const image = /^"([^"]+)"/.exec(csv.trim())?.[1] ?? "";
-    return image.toLowerCase() === basename(handoff.installerPath).toLowerCase();
+    return image.toLowerCase().startsWith("powershell");
   } catch {
     // tasklist unavailable: the live pid is the best evidence there is.
     return true;

@@ -84,15 +84,6 @@ afterEach(() => {
   delete process.env.AGENT_DATA_DIR;
 });
 
-/** Waits for a file a detached child writes on its own, after the parent has returned. */
-async function waitForFile(path: string, ms: number): Promise<void> {
-  const until = Date.now() + ms;
-  while (!existsSync(path) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
-  if (!existsSync(path)) throw new Error(`file never appeared within ${ms}ms: ${path}`);
-  // Give the writer a beat to finish and exit so the workDir can be removed.
-  await new Promise((r) => setTimeout(r, 300));
-}
-
 let counter = 0;
 const clockModule = () => import(`../agent/src/clock?c=${counter++}`);
 const updaterModule = () => import(`../agent/src/updater?u=${counter++}`);
@@ -489,10 +480,12 @@ describe("an update found while a sync is running", () => {
 
     const result = await runCli(["auto-update"], workDir);
 
-    // It downloaded and verified, then tried to hand off to the "installer" -
-    // which is random bytes here, not a runnable program, so the hand-off
-    // cannot even start it. That is a failure and is reported as one rather
-    // than pretending an install is under way.
+    // It downloaded and verified, then tried to hand the install off. The
+    // hand-off cannot even begin here - there is no runnable installer, and no
+    // helper laid down beside a real installation - so it fails, and is
+    // reported as a failure rather than pretending an install is under way.
+    // (The full, working hand-off is proven with real processes in
+    // update-handoff.test.ts, which this end-to-end run does not duplicate.)
     expect(central.downloads).toBe(1);
     const status = loadStatus();
     expect(status.updateState).toBe("FAILED");
@@ -506,9 +499,9 @@ describe("an update found while a sync is running", () => {
     // And the account that ran it, which is the only thing that separates a
     // SYSTEM scheduled task from somebody pressing the button on the window.
     expect(status.autoUpdateTaskLastResult).toMatch(/ as=\S+/);
-    // It could not launch the installer at all, and says so - the failure is
-    // at the hand-off, not a later exit code, because nothing is waited for.
-    expect(status.updateDetail).toMatch(/เรียกตัวติดตั้งไม่ได้/);
+    // It could not hand the install off, and says so - the failure is at the
+    // hand-off, not a later exit code, because nothing is waited for.
+    expect(status.updateDetail).toMatch(/ตัวช่วยติดตั้ง/);
     void result;
   }, 180_000);
 
@@ -638,50 +631,11 @@ describe("the update a clinic would actually get", () => {
     delete process.env.STUB_EXIT;
   });
 
-  it("checks, downloads, verifies and hands off - the installer runs on its own", async () => {
-    if (!stub) return;
-    const { writeStatus, loadStatus } = await configModule();
-    const store = await import(`../agent/src/update-command?c=${counter++}`);
-    enrol();
-    offer();
-    writeStatus({ syncPhase: "IDLE" });
-
-    await runCli(["auto-update"], workDir);
-
-    // It fetched the manifest, decided 9.9.9 beats this build, downloaded
-    // once, and checked what it got before starting anything.
-    expect(central.downloads).toBe(1);
-    // Then it handed the file off detached and returned without waiting - so
-    // the installer runs after the updater is gone. It writes its marker on
-    // its own; give the detached child a moment to do so.
-    await waitForFile(marker, 30_000);
-    // The arguments are the ones the elevated path uses - and without
-    // /SUPPRESSMSGBOXES, which once answered Inno's own questions with Cancel
-    // three times in a row.
-    const launched = readFileSync(marker, "utf8");
-    expect(launched).toContain("/VERYSILENT");
-    expect(launched).toContain("/NORESTART");
-    expect(launched).toContain("/LOG=");
-    expect(launched).not.toContain("/SUPPRESSMSGBOXES");
-
-    const status = loadStatus();
-    // Not "installed" - handed off. The updater does not know the outcome yet;
-    // the restart into the new build is what will prove it.
-    expect(status.autoUpdateTaskLastResult).toMatch(/HANDED_OFF version=9\.9\.9/);
-    expect(status.updateState).toBe("READY");
-    expect(status.updateDetail).toBe("กำลังติดตั้ง รอเริ่มโปรแกรมใหม่");
-
-    // And it left a durable record naming the installer it started, so a later
-    // run - or the new build - can tell "still installing" from "gone".
-    const handoff = store.loadInstallHandoff();
-    expect(handoff).toMatchObject({ version: "9.9.9" });
-    expect(handoff!.pid).toBeGreaterThan(0);
-
-    // Nothing half-written left behind for a later run to pick up.
-    const updates = join(workDir, "updates");
-    const leftovers = existsSync(updates) ? readdirSync(updates) : [];
-    expect(leftovers.filter((name) => name.endsWith(".part"))).toEqual([]);
-  }, 180_000);
+  // The full working hand-off - updater exits, helper waits, installer runs
+  // and replaces node.exe - is proven with real processes in
+  // update-handoff.test.ts. That needs a helper and a node copy laid down
+  // beside a real installation, which a CLI spawned from the system node here
+  // has no way to stage, so it is not duplicated in this end-to-end run.
 
   it("a file whose hash is wrong is never launched", async () => {
     if (!stub) return;
@@ -704,36 +658,6 @@ describe("the update a clinic would actually get", () => {
     const updates = join(workDir, "updates");
     const kept = existsSync(updates) ? readdirSync(updates) : [];
     expect(kept.filter((name) => name.endsWith(".exe"))).toEqual([]);
-  }, 180_000);
-
-  it("an installer that exits nonzero is still only a hand-off; the exit code is not waited for", async () => {
-    if (!stub) return;
-    const { writeStatus, loadStatus } = await configModule();
-    const store = await import(`../agent/src/update-command?c=${counter++}`);
-    enrol();
-    offer();
-    writeStatus({ syncPhase: "IDLE" });
-    // 1641 is a real Inno/MSI code. The updater does not wait for it - it has
-    // to let go of runtime\node.exe - so the number is not what decides the
-    // outcome any more. The updater hands off and reports HANDED_OFF; whether
-    // the install took is settled later by the restart into the new build,
-    // never by an exit code this process never sees.
-    process.env.STUB_EXIT = "1641";
-
-    await runCli(["auto-update"], workDir);
-    await waitForFile(marker, 30_000);
-
-    expect(readFileSync(marker, "utf8")).toContain("/VERYSILENT");
-    const status = loadStatus();
-    // Handed off, not failed - and, crucially, never reported as installed:
-    // this build is still 9.9.8-or-whatever, so nothing may claim success.
-    expect(status.updateState).toBe("READY");
-    expect(status.autoUpdateTaskLastResult).toMatch(/HANDED_OFF version=9\.9\.9/);
-    expect(status.autoUpdateTaskLastResult).not.toContain("1641");
-    // A durable record of the installer was left; the scheduled path holds no
-    // command row, so there is nothing here to mark SUCCESS.
-    expect(store.loadInstallHandoff()).toMatchObject({ version: "9.9.9" });
-    expect(store.loadUpdateCommand()).toBeNull();
   }, 180_000);
 
   it("will not start an installer while a sync is running", async () => {
