@@ -329,10 +329,29 @@ begin
     'ล็อกสิทธิ์โฟลเดอร์อัปเดต');
 end;
 
+// เปิดหน้าจอกลับให้ผู้ใช้ที่ล็อกอินอยู่ หลังติดตั้งแบบเงียบ
+//
+// ติดตั้งแบบมีหน้าจอ [Run] ข้างบนเปิดโปรแกรมให้อยู่แล้ว (skipifsilent) แต่ติดตั้งแบบเงียบ
+// ผ่านงาน SYSTEM ไม่มีใครเปิด — และตั้งแต่ v1.1.11 ตัวอัปเดตไม่ได้รอตัวติดตั้งอีก
+// (มันต้องปิดตัวเองเพื่อปล่อย runtime\node.exe ให้แทนที่ได้) จึงเป็นหน้าที่ของตัวติดตั้ง
+// เรียกโปรแกรมของตัวเองด้วย argument ตายตัว ไม่รับค่าจากภายนอก
+procedure RelaunchTrayAfterSilentInstall();
+var
+  app: String;
+begin
+  if not WizardSilent then Exit;
+  app := ExpandConstant('{app}');
+  RunTool(app + '\runtime\node.exe', '"' + app + '\app\agent.js" post-install',
+          'เปิดหน้าจอให้ผู้ใช้ที่ล็อกอินอยู่');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     CreateScheduledTasks();
+    RelaunchTrayAfterSilentInstall();
+  end;
 end;
 
 procedure RemoveScheduledTasks();

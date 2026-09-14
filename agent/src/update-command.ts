@@ -14,8 +14,9 @@
  * version, and closes the command as SUCCESS - which is how "installed"
  * survives the very restart that installing causes.
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import type { AgentUpdateReport } from "@shared/canonical";
 import { MAX_UPDATE_ATTEMPTS, type UpdateCommandState, type UpdateErrorCode } from "@shared/update-command";
@@ -60,6 +61,24 @@ export interface UpdaterTaskHealth {
 
 const FILE = "update-command.json";
 const HEALTH_FILE = "updater-task.json";
+const HANDOFF_FILE = "install-handoff.json";
+
+/**
+ * The installer this Agent started and then left running.
+ *
+ * The updater is `runtime\node.exe`, and the installer has to replace that
+ * very file - so the updater cannot stay to watch. It starts the installer
+ * detached, writes this record, and exits; the record is how the next run
+ * (30 minutes later, or the freshly installed build) tells "an installer is
+ * still at work" from "that installer is gone and the version did not move".
+ */
+export interface InstallHandoff {
+  version: string;
+  installerPath: string;
+  pid: number;
+  startedAt: string;
+  logPath: string;
+}
 
 export function updateCommandPath(): string {
   return join(dataDir(), FILE);
@@ -194,9 +213,18 @@ export function reconcileUpdateCommandAfterRestart(): LocalUpdateCommand | null 
       target: current.targetVersion,
       running: AGENT_VERSION,
     });
+    clearInstallHandoff();
     return advanceUpdateCommand("SUCCESS");
   }
   if (current.state === "INSTALLING" || current.state === "VERIFYING" || current.state === "DOWNLOADING") {
+    // An installer this program handed off and walked away from may still be
+    // running - the worker restarts within seconds of the tray coming back,
+    // long before a slow disk is done. Its record says so; leave it alone.
+    if (current.state === "INSTALLING" && installerStillRunning(loadInstallHandoff())) {
+      log.info("ตัวติดตั้งยังทำงานอยู่ รอให้เสร็จก่อน", { commandId: current.commandId, target: current.targetVersion });
+      return current;
+    }
+    clearInstallHandoff();
     if (current.attempts >= MAX_UPDATE_ATTEMPTS) {
       return advanceUpdateCommand("FAILED", {
         errorCode: "INSTALL_INCOMPLETE",
@@ -207,6 +235,56 @@ export function reconcileUpdateCommandAfterRestart(): LocalUpdateCommand | null 
     return advanceUpdateCommand("DELIVERED");
   }
   return current;
+}
+
+/* ------------------------------------------------------ the hand-off file */
+
+export function saveInstallHandoff(handoff: InstallHandoff): void {
+  writeAtomic(join(dataDir(), HANDOFF_FILE), handoff);
+}
+
+export function loadInstallHandoff(): InstallHandoff | null {
+  const path = join(dataDir(), HANDOFF_FILE);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as InstallHandoff;
+    return parsed && typeof parsed.pid === "number" && typeof parsed.version === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearInstallHandoff(): void {
+  rmSync(join(dataDir(), HANDOFF_FILE), { force: true });
+}
+
+/**
+ * Whether the installer a hand-off record names is still the installer.
+ *
+ * A pid on its own is not proof: Windows hands pids out again. The process
+ * behind the pid must also be running the installer's image, so a recycled
+ * number pointing at something unrelated reads as "gone".
+ */
+export function installerStillRunning(handoff: InstallHandoff | null): boolean {
+  if (!handoff || !(handoff.pid > 0)) return false;
+  try {
+    process.kill(handoff.pid, 0);
+  } catch {
+    return false;
+  }
+  if (process.platform !== "win32") return true;
+  try {
+    const csv = execFileSync("tasklist", ["/FI", `PID eq ${handoff.pid}`, "/FO", "CSV", "/NH"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 10_000,
+    });
+    const image = /^"([^"]+)"/.exec(csv.trim())?.[1] ?? "";
+    return image.toLowerCase() === basename(handoff.installerPath).toLowerCase();
+  } catch {
+    // tasklist unavailable: the live pid is the best evidence there is.
+    return true;
+  }
 }
 
 /* ------------------------------------------------------- task health file */

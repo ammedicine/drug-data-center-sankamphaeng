@@ -961,14 +961,15 @@ async function autoUpdate(): Promise<void> {
       console.log("กำลังซิงก์อยู่ จะติดตั้งรุ่นใหม่รอบถัดไป");
       return;
     case "INSTALLING":
-      // The installer is replacing this program as we speak, so whatever is
-      // written here is what the screen shows until the new build starts and
-      // writes its own. "Downloading" would be a lie for that whole window.
-      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: "ติดตั้งแล้ว รอเริ่มโปรแกรมใหม่" });
-      record(`INSTALLED version=${result.version}${cmdTag}`);
-      console.log(`ติดตั้งรุ่น ${result.version} แล้ว`);
-      // Unattended: nobody is there to reopen the tray the installer closed.
-      if (runningAsSystem()) await relaunchTrayForConsoleUser(appDir);
+      // The installer has been handed the program files and is waiting for
+      // this process to let go of runtime\node.exe - so nothing more happens
+      // here: write the status the screen shows until the new build starts
+      // and writes its own, then return and exit. The tray is reopened by the
+      // installer itself (`post-install`), because there is no updater left
+      // to do it once the install is through.
+      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: "กำลังติดตั้ง รอเริ่มโปรแกรมใหม่" });
+      record(`HANDED_OFF version=${result.version}${cmdTag}`);
+      console.log(`ส่งต่อให้ตัวติดตั้งรุ่น ${result.version} แล้ว`);
       return;
     case "FAILED":
     default: {
@@ -982,6 +983,22 @@ async function autoUpdate(): Promise<void> {
       return;
     }
   }
+}
+
+/**
+ * `agent post-install` - what the installer runs, itself, at the end of an
+ * unattended upgrade: bring the tray back for whoever is signed in.
+ *
+ * Until v1.1.10 the updater did this after waiting for the installer. It no
+ * longer waits (see handOffInstaller), so the step moved to the one process
+ * that is still there when the files are in place. Fixed action, no
+ * arguments from outside, best effort: a failure is logged and the next logon
+ * starts the program anyway.
+ */
+async function postInstall(): Promise<void> {
+  const appDir = resolve(process.execPath, "..", "..");
+  const ok = await relaunchTrayForConsoleUser(appDir);
+  console.log(ok ? "เปิดหน้าจอให้ผู้ใช้ที่ล็อกอินอยู่แล้ว" : "ไม่ได้เปิดหน้าจอ จะเปิดเองเมื่อล็อกอินครั้งถัดไป");
 }
 
 /**
@@ -1030,6 +1047,8 @@ async function main(): Promise<void> {
       return autoUpdate();
     case "update-slot":
       return updateSlot();
+    case "post-install":
+      return postInstall();
     case "update-task-xml":
       return updateTaskXmlCommand();
     default:

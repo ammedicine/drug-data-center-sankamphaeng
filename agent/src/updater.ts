@@ -17,7 +17,7 @@
  * there is nothing for a caller to steer.
  */
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, writeFileSync } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -34,7 +34,12 @@ import { UPDATE_CHECK_INTERVAL_MINUTES } from "./schedule";
 import { SYSTEM_SID, UPDATE_TASK_NAME, updateTaskDefinition, updateTaskXml } from "./task-definition";
 import {
   advanceUpdateCommand,
+  clearInstallHandoff,
+  type InstallHandoff,
+  installerStillRunning,
+  loadInstallHandoff,
   type LocalUpdateCommand,
+  saveInstallHandoff,
   type UpdaterTaskHealth,
 } from "./update-command";
 
@@ -174,32 +179,60 @@ export function syncIsBusy(): boolean {
 }
 
 /**
- * Runs the installer.
+ * Starts the installer and gets out of its way.
+ *
+ * This program is `runtime\node.exe agent.js auto-update`, and among the
+ * files the installer replaces is runtime\node.exe. Every release up to
+ * v1.1.10 started the installer and waited for it - so the updater's own
+ * image stayed locked, Inno's DeleteFile failed with code 5, and the
+ * Abort/Retry/Ignore box it put up was in a SYSTEM session nobody can see.
+ * Fifteen minutes later the timeout killed the installer, after it had
+ * already replaced the other files. That happened on a real machine on
+ * 2026-09-14 (update-1.1.10.log).
+ *
+ * So: the installer is spawned detached, with its own console and no pipes
+ * back to this process, and this process returns at once - the caller
+ * exits, the lock goes with it, and the installer proceeds on its own. The
+ * hand-off is written down first (install-handoff.json), because from here
+ * on nothing in memory survives: the next run, or the newly installed build,
+ * reads that file and the command file to know what happened.
  *
  * /VERYSILENT is the mode that has actually been proven on this installer.
  * /SUPPRESSMSGBOXES is deliberately absent: it turns Inno's pre-flight
  * questions into an automatic Cancel, which is how a silent install of 1.1.5
  * failed three times in a row while reporting only exit code 2.
  */
-export async function installUpdate(installerPath: string, version: string): Promise<void> {
+export async function handOffInstaller(installerPath: string, version: string): Promise<InstallHandoff> {
   const logPath = join(dataDir(), "logs", `update-${version}.log`);
-  log.info("กำลังติดตั้งรุ่นใหม่", { version });
+  log.info("กำลังส่งต่อให้ตัวติดตั้ง", { version });
+  let child;
   try {
-    await run(installerPath, ["/VERYSILENT", "/NORESTART", `/LOG=${logPath}`], {
-      timeout: 15 * 60_000,
+    child = spawn(installerPath, ["/VERYSILENT", "/NORESTART", `/LOG=${logPath}`], {
+      detached: true,
+      stdio: "ignore",
       windowsHide: true,
     });
+    // A bad executable fails one of two ways: synchronously from spawn() (the
+    // CreateProcess error on Windows), or asynchronously on the "error" event.
+    // Both must reach the caller as one clear failure, not an unhandled throw.
+    await new Promise<void>((resolve, reject) => {
+      child!.once("spawn", () => resolve());
+      child!.once("error", reject);
+    });
   } catch (error) {
-    // execFile puts the exit code on the error, not in its message, so an
-    // installer that refused told us only "Command failed". Inno's codes are
-    // the difference between a question that answered itself (2), a file still
-    // in use (5) and a machine that genuinely cannot take this build - and
-    // whoever reads this log will not have the machine in front of them.
-    const code = (error as { code?: number | string }).code ?? "unknown";
-    log.error("ตัวติดตั้งจบด้วยรหัสผิดพลาด", { version, exitCode: code, logPath });
-    throw new Error(`ตัวติดตั้งจบด้วยรหัส ${code}`);
+    throw new Error(`เรียกตัวติดตั้งไม่ได้: ${error instanceof Error ? error.message : String(error)}`);
   }
-  log.info("ติดตั้งรุ่นใหม่แล้ว", { version, logPath, exitCode: 0 });
+  child.unref();
+  const handoff: InstallHandoff = {
+    version,
+    installerPath,
+    pid: child.pid ?? 0,
+    startedAt: new Date().toISOString(),
+    logPath,
+  };
+  saveInstallHandoff(handoff);
+  log.info("ตัวติดตั้งเริ่มทำงานแล้ว โปรแกรมนี้จะปิดตัวเพื่อให้แทนที่ไฟล์ได้", { version, pid: handoff.pid, logPath });
+  return handoff;
 }
 
 /* ====================================================== the update engine */
@@ -243,14 +276,27 @@ export async function runUpdateEngine(input: {
   /** injectable for tests */
   fetchManifestFn?: typeof fetchManifest;
   downloadFn?: typeof downloadVerified;
-  installFn?: typeof installUpdate;
+  installFn?: typeof handOffInstaller;
   busyFn?: typeof syncIsBusy;
 }): Promise<UpdateEngineResult> {
   const getManifest = input.fetchManifestFn ?? fetchManifest;
   const download = input.downloadFn ?? downloadVerified;
-  const install = input.installFn ?? installUpdate;
+  const install = input.installFn ?? handOffInstaller;
   const busy = input.busyFn ?? syncIsBusy;
   const command = input.trigger === "command" ? input.command : null;
+
+  // An installer handed off by an earlier run may still be working - this
+  // task fires every half hour and ignores nothing but itself. Two installers
+  // on the same program files is the one thing that must never happen.
+  const pending = loadInstallHandoff();
+  if (installerStillRunning(pending)) {
+    return {
+      state: "INSTALLING",
+      detail: `ตัวติดตั้งรุ่น ${pending!.version} ยังทำงานอยู่ (pid ${pending!.pid})`,
+      version: pending!.version,
+    };
+  }
+  if (pending) clearInstallHandoff();
 
   if (command) advanceUpdateCommand("CHECKING");
 
@@ -353,19 +399,23 @@ export async function runUpdateEngine(input: {
     return { state: "WAITING_FOR_IDLE", detail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง", version: decision.version };
   }
 
+  // INSTALLING is written before the installer starts, never after: once it
+  // has started, this program may be replaced at any moment.
   if (command) advanceUpdateCommand("INSTALLING");
   try {
     await install(installer, decision.version);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    clearInstallHandoff();
     if (command) advanceUpdateCommand("FAILED", { errorCode: "INSTALLER_FAILED", errorMessage: message });
     return { state: "FAILED", detail: message, errorCode: "INSTALLER_FAILED", version: decision.version };
   }
-  // SUCCESS is not written here on purpose: the installer has just replaced
-  // this program. The new build's first start reads INSTALLING, sees its own
-  // version at the target, and records SUCCESS - the state that survives the
-  // restart is the one the restart proves.
-  return { state: "INSTALLING", detail: `ติดตั้งรุ่น ${decision.version} แล้ว รอเริ่มโปรแกรมใหม่`, version: decision.version, installed: true };
+  // SUCCESS is not written here on purpose: the installer is replacing this
+  // program as we return, and this process must exit for it to finish. The
+  // new build's first start reads INSTALLING, sees its own version at the
+  // target, and records SUCCESS - the state that survives the restart is the
+  // one the restart proves.
+  return { state: "INSTALLING", detail: `ส่งต่อให้ตัวติดตั้งรุ่น ${decision.version} แล้ว`, version: decision.version, installed: true };
 }
 
 /* ================================================= the task, from inside */
