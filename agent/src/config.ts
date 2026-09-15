@@ -38,7 +38,7 @@ dotenv.config();
  * build when they disagree, because a fleet that all reports 1.0.0 tells an
  * operator nothing about which machines still need updating.
  */
-export const AGENT_VERSION = "1.1.15";
+export const AGENT_VERSION = "1.1.16";
 
 /**
  * Which source this build came from, stamped by the installer build script.
