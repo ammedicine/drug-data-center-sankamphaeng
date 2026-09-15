@@ -998,7 +998,7 @@ async function autoUpdate(): Promise<void> {
 async function postInstall(): Promise<void> {
   const appDir = resolve(process.execPath, "..", "..");
   const ok = await relaunchTrayForConsoleUser(appDir);
-  console.log(ok ? "เปิดหน้าจอให้ผู้ใช้ที่ล็อกอินอยู่แล้ว" : "ไม่ได้เปิดหน้าจอ จะเปิดเองเมื่อล็อกอินครั้งถัดไป");
+  console.log(ok ? "เริ่ม Agent ในถาดระบบให้ผู้ใช้ที่ล็อกอินอยู่แล้ว" : "ไม่ได้เริ่ม Agent จะเริ่มเองเมื่อล็อกอินครั้งถัดไป");
 }
 
 /**

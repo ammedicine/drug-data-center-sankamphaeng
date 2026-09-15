@@ -632,14 +632,26 @@ export async function requestUpdateTaskRun(): Promise<boolean> {
  * interactive task starts the program in their session, then removes itself.
  * Best effort: a failure is logged and the next logon still starts it.
  */
-export async function relaunchTrayForConsoleUser(appDir: string): Promise<boolean> {
-  const exe = join(appDir, "SDCAgent.exe");
-  const script = [
+/**
+ * The PowerShell that starts the Agent in the signed-in user's session.
+ *
+ * Built here as a pure function so the action - crucially the "--tray"
+ * argument - can be asserted by a test instead of discovered on a clinic PC.
+ * The executable path is single-quoted with '' escaping (PowerShell literal),
+ * and the only argument is the fixed literal "--tray"; nothing external is
+ * ever composed into it.
+ */
+export function buildTrayRelaunchScript(exe: string): string {
+  const quoted = exe.replace(/'/g, "''");
+  return [
     "$ErrorActionPreference = 'Stop'",
     "$user = (Get-CimInstance Win32_ComputerSystem).UserName",
     "if (-not $user) { Write-Output 'no console user'; exit 2 }",
     "$name = 'SDCAgentRelaunch'",
-    `$action = New-ScheduledTaskAction -Execute '${exe.replace(/'/g, "''")}'`,
+    // --tray: start minimised in the system tray, exactly as the Startup
+    // shortcut does, so an unattended update never pops the main window open
+    // in front of clinic staff.
+    `$action = New-ScheduledTaskAction -Execute '${quoted}' -Argument '--tray'`,
     "$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive",
     "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
     "Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings -Force | Out-Null",
@@ -648,16 +660,21 @@ export async function relaunchTrayForConsoleUser(appDir: string): Promise<boolea
     "Unregister-ScheduledTask -TaskName $name -Confirm:$false",
     "Write-Output \"relaunched for $user\"",
   ].join("; ");
+}
+
+export async function relaunchTrayForConsoleUser(appDir: string): Promise<boolean> {
+  const exe = join(appDir, "SDCAgent.exe");
+  const script = buildTrayRelaunchScript(exe);
   try {
     const { stdout } = await run(
       "powershell",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
       { timeout: 60_000, windowsHide: true, encoding: "utf8" },
     );
-    log.info("เปิดหน้าจอให้ผู้ใช้ที่ล็อกอินอยู่แล้ว", { detail: String(stdout).trim().slice(0, 120) });
+    log.info("เริ่ม Agent ในถาดระบบให้ผู้ใช้ที่ล็อกอินอยู่แล้ว", { detail: String(stdout).trim().slice(0, 120) });
     return true;
   } catch (error) {
-    log.warn("เปิดหน้าจอให้ผู้ใช้ไม่สำเร็จ จะเปิดเองเมื่อล็อกอินครั้งถัดไป", {
+    log.warn("เริ่ม Agent ในถาดระบบไม่สำเร็จ จะเริ่มเองเมื่อล็อกอินครั้งถัดไป", {
       error: error instanceof Error ? error.message.slice(0, 200) : String(error),
     });
     return false;
