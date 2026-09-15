@@ -240,8 +240,14 @@ export function reconcileUpdateCommandAfterRestart(): LocalUpdateCommand | null 
       target: current.targetVersion,
       running: AGENT_VERSION,
     });
+    // Reaching the target IS success, and it must be written down before any
+    // cleanup - the incident on 05957 was cleanup (an rm the user-session
+    // worker had no permission for) throwing here and taking SUCCESS with it,
+    // so the machine sat on the new version while the command said INSTALLING
+    // and the worker crash-looped. Cleanup is best-effort and comes after.
+    const next = advanceUpdateCommand("SUCCESS");
     clearInstallHandoff();
-    return advanceUpdateCommand("SUCCESS");
+    return next;
   }
   if (current.state === "INSTALLING" || current.state === "VERIFYING" || current.state === "DOWNLOADING") {
     // A hand-off this program made may still be in flight - the helper is
@@ -294,10 +300,37 @@ export function loadInstallHandoff(): InstallHandoff | null {
   }
 }
 
+/**
+ * Removes the hand-off artifacts. Best-effort by construction.
+ *
+ * The result file is written by the SYSTEM helper into the administrators-only
+ * updates directory, so the user-session worker may have no permission to
+ * delete it - and a delete that throws must never crash the caller (this is
+ * what took down the worker on 05957 after a good install). So every removal
+ * is guarded, and the durable hand-off record is only forgotten once its
+ * result file is actually gone: if the user worker could not delete a
+ * SYSTEM-owned result, the record is kept so the next privileged run (the
+ * SYSTEM updater, which can delete it) finishes the cleanup. No throw ever
+ * leaves here.
+ */
 export function clearInstallHandoff(): void {
   const handoff = loadInstallHandoff();
-  if (handoff?.resultPath) rmSync(handoff.resultPath, { force: true });
-  rmSync(join(dataDir(), HANDOFF_FILE), { force: true });
+  const resultGone = handoff?.resultPath ? tryRemove(handoff.resultPath) : true;
+  if (resultGone) tryRemove(join(dataDir(), HANDOFF_FILE));
+}
+
+/** Deletes a path if it can; returns whether it is now gone. Never throws. */
+function tryRemove(path: string): boolean {
+  try {
+    rmSync(path, { force: true }); // force ignores "not found", not permission errors
+    return true;
+  } catch (error) {
+    log.warn("ลบไฟล์การส่งต่อการติดตั้งไม่ได้ (จะข้ามไปก่อน)", {
+      path,
+      code: (error as { code?: string }).code ?? null,
+    });
+    return false;
+  }
 }
 
 /**

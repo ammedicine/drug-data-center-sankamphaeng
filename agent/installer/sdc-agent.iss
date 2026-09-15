@@ -327,9 +327,14 @@ begin
   // = ช่องยกระดับสิทธิ์ในเครื่อง
   // /inheritance:r ตัดการสืบทอด แล้วให้เฉพาะ Administrators (S-1-5-32-544)
   // และ SYSTEM (S-1-5-18) — ใช้ SID เพราะชื่อกลุ่มเปลี่ยนตามภาษาของ Windows
+  //
+  // BUILTIN\Users (S-1-5-32-545) ได้ (RX) = อ่าน+ทราเวิร์สเท่านั้น ไม่ให้เขียน/แก้/ลบ
+  // เพื่อให้ worker ที่รันในสิทธิ์ผู้ใช้อ่านไฟล์ผลการส่งต่อ (handoff result ที่ SYSTEM
+  // เขียน) มาบอกสาเหตุได้ ช่องโหว่เดิมคือ "เขียนทับไฟล์หลังตรวจ hash" ซึ่ง RX ไม่เปิดให้
+  // ตัวติดตั้ง/helper/node สำเนา ยังเปลี่ยนแปลงไม่ได้ด้วยสิทธิ์ผู้ใช้
   updates := ExpandConstant('{commonappdata}\SDCAgent\updates');
   RunTool('{sys}\icacls.exe',
-    '"' + updates + '" /inheritance:r /grant *S-1-5-32-544:(OI)(CI)F /grant *S-1-5-18:(OI)(CI)F',
+    '"' + updates + '" /inheritance:r /grant *S-1-5-32-544:(OI)(CI)F /grant *S-1-5-18:(OI)(CI)F /grant *S-1-5-32-545:(OI)(CI)(RX)',
     'ล็อกสิทธิ์โฟลเดอร์อัปเดต');
 end;
 
