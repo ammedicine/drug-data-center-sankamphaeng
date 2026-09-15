@@ -13,7 +13,8 @@ import {
   resumeAgentSyncAction,
   type ActionState,
 } from "../actions";
-import { UPDATE_ERROR_LABELS, UPDATE_STATE_LABELS, type UpdateErrorCode } from "@/lib/shared/update-command";
+import { UPDATE_ERROR_LABELS, type UpdateErrorCode } from "@/lib/shared/update-command";
+import { deriveUpdateStatus } from "@/lib/shared/fleet-update-status";
 
 /**
  * One row per agentId, never per facility.
@@ -73,34 +74,8 @@ export interface FleetRowView {
   };
 }
 
-/**
- * What the update column says, in Thai, without needing a log.
- *
- * The command row is the record; the agent's own report refines it. An
- * offline machine with a REQUESTED row is "waiting for the machine", not
- * "waiting for the agent" - the difference is whether anyone needs to go
- * and switch something on.
- */
-function updateLabel(row: FleetRowView): { text: string; tone: "ok" | "warn" | "danger" | "muted" } {
-  const c = row.command;
-  if (c && !c.terminal) {
-    if (c.status === "REQUESTED" && row.status === "OFFLINE") {
-      return { text: UPDATE_STATE_LABELS.OFFLINE_REQUESTED, tone: "warn" };
-    }
-    const label = UPDATE_STATE_LABELS[c.status as keyof typeof UPDATE_STATE_LABELS] ?? c.status;
-    return { text: `${label} → ${c.targetVersion}`, tone: "warn" };
-  }
-  if (c?.status === "FAILED") {
-    const reason = c.errorCode ? (UPDATE_ERROR_LABELS[c.errorCode as UpdateErrorCode] ?? c.errorCode) : null;
-    return { text: `${UPDATE_STATE_LABELS.FAILED}${reason ? ` · ${reason}` : ""}`, tone: "danger" };
-  }
-  if (!row.supportsRemoteUpdate) {
-    return { text: "รุ่นนี้อัปเดตเองตามรอบ 30 นาที (ยังไม่รับคำสั่งจากศูนย์กลาง)", tone: "muted" };
-  }
-  if (!row.updateAvailable) return { text: UPDATE_STATE_LABELS.ALREADY_UP_TO_DATE, tone: "ok" };
-  if (c?.status === "SUCCESS") return { text: `${UPDATE_STATE_LABELS.SUCCESS} ${c.completedAtLabel ?? ""}`, tone: "ok" };
-  return { text: `มีรุ่น ${row.latestVersion} ให้อัปเดต`, tone: "warn" };
-}
+// The update-column label is derived by deriveUpdateStatus (shared, tested):
+// current software state wins, a superseded failure is history, not "current".
 
 const TONE_CLASS = { ok: "text-emerald-700", warn: "text-amber-700", danger: "text-rose-700", muted: "text-slate-500" } as const;
 
@@ -456,8 +431,13 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
                 <td className="p-2 text-slate-600">{r.lastSeenLabel}</td>
                 <td className="p-2">
                   {(() => {
-                    const label = updateLabel(r);
-                    return <div className={TONE_CLASS[label.tone]}>{label.text}</div>;
+                    const s = deriveUpdateStatus(r);
+                    return (
+                      <>
+                        <div className={TONE_CLASS[s.tone]}>{s.text}</div>
+                        {s.history ? <div className="text-xs text-slate-400">ประวัติ: {s.history}</div> : null}
+                      </>
+                    );
                   })()}
                   <div className="text-xs text-slate-500">
                     {r.latestVersion ? `ล่าสุด ${r.latestVersion}` : "ยังไม่มีรุ่นเผยแพร่"}
