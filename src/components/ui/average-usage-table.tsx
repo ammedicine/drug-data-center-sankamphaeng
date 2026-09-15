@@ -5,7 +5,7 @@ import { useDeferredValue, useMemo, useState } from "react";
 
 import { EmptyState, formatNumber, inputClass } from "@/components/ui/primitives";
 import { drugTypeLabel } from "@/lib/shared/drug-types";
-import type { AverageMonthlyDrugUsageRow } from "@/lib/services/reports";
+import type { ReserveUsageRow } from "@/lib/reports/consumption-rate";
 
 type SortKey = "average" | "total" | "name";
 
@@ -30,7 +30,7 @@ function normalize(value: string): string {
  * instantly with no request round trip. A รพ.สต. has a few hundred distinct
  * drugs, so the whole result set ships once with the page.
  */
-export function AverageUsageTable({ rows }: { rows: AverageMonthlyDrugUsageRow[] }) {
+export function AverageUsageTable({ rows }: { rows: ReserveUsageRow[] }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("average");
   const [page, setPage] = useState(1);
@@ -112,7 +112,7 @@ export function AverageUsageTable({ rows }: { rows: AverageMonthlyDrugUsageRow[]
         />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] border-collapse text-[13.5px]">
+          <table className="w-full min-w-[900px] border-collapse text-[13.5px]">
             <thead className="sticky top-0 z-10 bg-raised">
               <tr className="border-b border-line">
                 {[
@@ -123,6 +123,8 @@ export function AverageUsageTable({ rows }: { rows: AverageMonthlyDrugUsageRow[]
                   ["ปริมาณใช้รวม", "right"],
                   ["จำนวนเดือน", "right"],
                   ["เฉลี่ยต่อเดือน", "right"],
+                  ["สำรอง (เดือน)", "right"],
+                  ["ปริมาณสำรองที่แนะนำ", "right"],
                 ].map(([header, align]) => (
                   <th
                     key={header}
@@ -155,8 +157,10 @@ export function AverageUsageTable({ rows }: { rows: AverageMonthlyDrugUsageRow[]
                   <td className="px-4 py-2.5 text-xs text-muted">{row.unit ?? "-"}</td>
                   <td className="px-4 py-2.5 text-right numeric">{formatNumber(row.totalQuantity)}</td>
                   <td className="px-4 py-2.5 text-right numeric text-muted">{formatNumber(row.monthCount)}</td>
+                  <td className="px-4 py-2.5 text-right numeric">{formatAverage(row.averagePerMonth)}</td>
+                  <td className="px-4 py-2.5 text-right numeric text-muted">{formatAverage(row.reserveMonths)}</td>
                   <td className="px-4 py-2.5 text-right numeric font-semibold text-ink">
-                    {formatAverage(row.averagePerMonth)}
+                    {formatAverage(row.recommendedReserveQuantity)}
                   </td>
                 </tr>
               ))}

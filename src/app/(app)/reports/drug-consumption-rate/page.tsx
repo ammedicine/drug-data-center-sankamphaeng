@@ -1,6 +1,17 @@
+import Link from "next/link";
+import { Download } from "lucide-react";
+
 import { FilterBar, FilterChip, FilterField } from "@/components/ui/filter-bar";
 import { AverageUsageTable } from "@/components/ui/average-usage-table";
-import { Card, ErrorState, PageHeader, StatCard, formatNumber, inputClass } from "@/components/ui/primitives";
+import {
+  Card,
+  ErrorState,
+  PageHeader,
+  StatCard,
+  buttonClass,
+  formatNumber,
+  inputClass,
+} from "@/components/ui/primitives";
 import {
   ForbiddenError,
   requireUser,
@@ -9,7 +20,12 @@ import {
 } from "@/lib/auth/rbac";
 import { listFacilityOptions } from "@/lib/services/facilities";
 import { getAvailableDrugTypes, getAverageMonthlyDrugUsage } from "@/lib/services/reports";
-import { planConsumptionRateReport } from "@/lib/reports/consumption-rate";
+import {
+  MAX_RESERVE_MONTHS,
+  MIN_RESERVE_MONTHS,
+  planConsumptionRateReport,
+  withReserve,
+} from "@/lib/reports/consumption-rate";
 import { PRIMARY_DRUG_TYPES, drugTypeLabel } from "@/lib/shared/canonical";
 
 export const metadata = { title: "อัตราการใช้ยาเฉลี่ย" };
@@ -50,8 +66,13 @@ export default async function DrugConsumptionRatePage({
   const startMonthParam = firstParam(params.startMonth);
   const endMonthParam = firstParam(params.endMonth);
   const requestedFacility = firstParam(params.facility);
+  const reserveMonthsParam = firstParam(params.reserveMonths);
 
-  const view = planConsumptionRateReport({ startMonth: startMonthParam, endMonth: endMonthParam });
+  const view = planConsumptionRateReport({
+    startMonth: startMonthParam,
+    endMonth: endMonthParam,
+    reserveMonths: reserveMonthsParam,
+  });
 
   // Category scope is decided server-side, exactly like the usage report:
   // USER/ADMIN never widen past ยา (01, 10); SUPER_ADMIN may add more.
@@ -100,9 +121,37 @@ export default async function DrugConsumptionRatePage({
         )
       : null;
 
+  const reserveRows = result ? withReserve(result.rows, view.reserveMonths) : [];
+
+  // Export carries the exact report filters (client search is view-only and not
+  // part of the calculated set), so the file matches what was calculated.
+  const exportQuery = new URLSearchParams(
+    Object.entries({
+      startMonth: view.startMonth,
+      endMonth: view.endMonth,
+      types: typeScope.types.join(","),
+      facility: requestedFacility ?? undefined,
+      reserveMonths: String(view.reserveMonths),
+    }).filter(([, v]) => v) as [string, string][],
+  ).toString();
+
   return (
     <>
-      <PageHeader title={TITLE} subtitle={SUBTITLE} />
+      <PageHeader
+        title={TITLE}
+        subtitle={SUBTITLE}
+        actions={
+          result ? (
+            <Link
+              href={`/api/reports/drug-consumption-rate/export?${exportQuery}`}
+              className={buttonClass("secondary", "sm")}
+            >
+              <Download aria-hidden className="size-4" />
+              ส่งออก Excel
+            </Link>
+          ) : undefined
+        }
+      />
 
       <FilterBar
         resetHref="/reports/drug-consumption-rate"
@@ -119,6 +168,17 @@ export default async function DrugConsumptionRatePage({
         </FilterField>
         <FilterField label="เดือนสิ้นสุด">
           <input type="month" name="endMonth" defaultValue={view.endMonth} className={inputClass} />
+        </FilterField>
+        <FilterField label="สำรองคงคลัง (เดือน)" hint="จำนวนเดือนที่ต้องการสำรองจากอัตราการใช้เฉลี่ย">
+          <input
+            type="number"
+            name="reserveMonths"
+            defaultValue={view.reserveMonthsInput}
+            min={MIN_RESERVE_MONTHS}
+            max={MAX_RESERVE_MONTHS}
+            step={0.1}
+            className={inputClass}
+          />
         </FilterField>
         {isSuper ? (
           <FilterField label="สถานบริการ" className="min-w-[220px] flex-1">
@@ -180,8 +240,13 @@ export default async function DrugConsumptionRatePage({
             />
           </div>
 
+          <p className="mt-3 text-xs text-muted">
+            สำรองคงคลัง <span className="font-semibold text-ink">{formatAverage(view.reserveMonths)}</span> เดือน ·
+            ปริมาณสำรองที่แนะนำ = อัตราการใช้เฉลี่ยต่อเดือน × จำนวนเดือนสำรอง
+          </p>
+
           {view.currentMonthNote ? (
-            <p className="mt-3 rounded-[8px] bg-warn-soft px-3 py-2 text-xs text-warn">
+            <p className="mt-2 rounded-[8px] bg-warn-soft px-3 py-2 text-xs text-warn">
               เดือนปัจจุบันยังไม่สิ้นสุด ตัวเลขเดือนนี้เป็นข้อมูลที่มีถึงวันที่นำเข้าล่าสุด
             </p>
           ) : null}
@@ -190,10 +255,10 @@ export default async function DrugConsumptionRatePage({
             title="อัตราการใช้ยาเฉลี่ยต่อเดือน รายรายการ"
             description={`ช่วง ${view.startMonth} ถึง ${view.endMonth} · ${formatNumber(
               view.monthCount ?? 0,
-            )} เดือน · เรียงตามค่าเฉลี่ยมากไปน้อย · พิมพ์ค้นหาแล้วกรองทันที`}
+            )} เดือน · สำรอง ${formatAverage(view.reserveMonths)} เดือน · เรียงตามค่าเฉลี่ยมากไปน้อย · พิมพ์ค้นหาแล้วกรองทันที`}
             className="mt-5"
           >
-            <AverageUsageTable rows={result.rows} />
+            <AverageUsageTable rows={reserveRows} />
           </Card>
         </>
       )}
