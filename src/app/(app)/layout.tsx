@@ -22,6 +22,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       items: [
         { href: "/dashboard", label: "หน้าหลัก", icon: "dashboard" },
         { href: "/reports/drug-usage", label: "รายงานการใช้ยา", icon: "report" },
+        { href: "/reports/drug-consumption-rate", label: "อัตราการใช้ยาเฉลี่ย", icon: "report" },
         { href: "/sync", label: "สถานะการนำเข้าข้อมูล", icon: "sync" },
       ],
     },

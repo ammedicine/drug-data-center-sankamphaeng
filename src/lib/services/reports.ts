@@ -401,6 +401,96 @@ export async function findDrugCodesByName(
   return rows.map((r) => r.drugCode);
 }
 
+/* -------------------------------------------- average monthly drug usage */
+
+/** One per-drug total straight from the aggregate query, before the average. */
+export interface DrugUsageAggregate {
+  drugCode: string;
+  drugName: string;
+  drugType: string | null;
+  unit: string | null;
+  totalQuantity: number;
+}
+
+export interface AverageMonthlyDrugUsageRow extends DrugUsageAggregate {
+  /** the inclusive calendar-month count of the selected window */
+  monthCount: number;
+  /** totalQuantity / monthCount; a month with zero usage still divides */
+  averagePerMonth: number;
+}
+
+export interface AverageUsageSummary {
+  distinctDrugs: number;
+  totalQuantity: number;
+  /** SUM(totalQuantity) / monthCount - never an average of the per-drug averages */
+  averageTotalPerMonth: number;
+}
+
+/**
+ * Divides each drug's window total by the month count. Pure and total: with a
+ * monthCount of zero (which the page never allows) the average is 0, not a
+ * NaN/Infinity that would reach the screen.
+ */
+export function toAverageRows(
+  aggregates: DrugUsageAggregate[],
+  monthCount: number,
+): AverageMonthlyDrugUsageRow[] {
+  return aggregates.map((a) => ({
+    ...a,
+    monthCount,
+    averagePerMonth: monthCount > 0 ? a.totalQuantity / monthCount : 0,
+  }));
+}
+
+/** Summary cards: the totals across the already-aggregated per-drug rows. */
+export function summariseAverageUsage(
+  rows: Array<{ totalQuantity: number }>,
+  monthCount: number,
+): AverageUsageSummary {
+  const totalQuantity = rows.reduce((sum, r) => sum + r.totalQuantity, 0);
+  return {
+    distinctDrugs: rows.length,
+    totalQuantity,
+    averageTotalPerMonth: monthCount > 0 ? totalQuantity / monthCount : 0,
+  };
+}
+
+async function getAverageMonthlyDrugUsageUncached(
+  filters: UsageFilters,
+  monthCount: number,
+): Promise<{ rows: AverageMonthlyDrugUsageRow[]; summary: AverageUsageSummary }> {
+  // Aliased aggregates so ORDER BY can reference them without repeating the
+  // expression (TiDB runs ONLY_FULL_GROUP_BY and compares expressions textually).
+  const drugName = sql<string>`MAX(${drugUsage.drugNameSnapshot})`.as("drug_name");
+  const totalQuantity = sql<number>`SUM(${drugUsage.quantity})`.as("total_quantity");
+
+  const rows = await db
+    .select({
+      drugCode: drugUsage.drugCode,
+      drugName,
+      drugType: drugUsage.drugType,
+      unit: sql<string | null>`MAX(${drugUsage.unit})`,
+      totalQuantity,
+    })
+    .from(drugUsage)
+    .where(whereClause(filters))
+    .groupBy(drugUsage.drugCode, drugUsage.drugType)
+    // Highest consumption first; the average is the total over a fixed month
+    // count, so ordering by the total is ordering by the average. Then name.
+    .orderBy(sql`total_quantity desc`, sql`drug_name asc`);
+
+  const aggregates: DrugUsageAggregate[] = rows.map((r) => ({
+    drugCode: r.drugCode,
+    drugName: r.drugName ?? r.drugCode,
+    drugType: r.drugType,
+    unit: r.unit,
+    totalQuantity: Number(r.totalQuantity ?? 0),
+  }));
+
+  const averaged = toAverageRows(aggregates, monthCount);
+  return { rows: averaged, summary: summariseAverageUsage(averaged, monthCount) };
+}
+
 /* ---------------------------------------------------------------- caching */
 
 /**
@@ -421,4 +511,8 @@ export const getDrugDetail = cachedReport("getDrugDetail", getDrugDetailUncached
 export const getAvailableDrugTypes = cachedReport(
   "getAvailableDrugTypes",
   getAvailableDrugTypesUncached,
+);
+export const getAverageMonthlyDrugUsage = cachedReport(
+  "getAverageMonthlyDrugUsage",
+  getAverageMonthlyDrugUsageUncached,
 );
