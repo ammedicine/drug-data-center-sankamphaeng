@@ -29,6 +29,8 @@ export interface AgentCapabilities {
   remotePause: boolean;
   /** honours a configured earliest dispensing date */
   syncStartDate: boolean;
+  /** persists and acknowledges the district-wide managed extraction floor */
+  remoteSyncStartDate: boolean;
   /** asserts the JHCIS session really is on a UTF-8 family before reading */
   charsetGate: boolean;
   /** one worker per data directory, enforced by a lock */
@@ -47,6 +49,7 @@ export const NO_CAPABILITIES: AgentCapabilities = {
   autoUpdate: false,
   remotePause: false,
   syncStartDate: false,
+  remoteSyncStartDate: false,
   charsetGate: false,
   workerLock: false,
   boundedWorkerLog: false,
@@ -68,6 +71,7 @@ export function parseCapabilities(raw: unknown): AgentCapabilities {
     autoUpdate: flag("autoUpdate"),
     remotePause: flag("remotePause"),
     syncStartDate: flag("syncStartDate"),
+    remoteSyncStartDate: flag("remoteSyncStartDate"),
     charsetGate: flag("charsetGate"),
     workerLock: flag("workerLock"),
     boundedWorkerLog: flag("boundedWorkerLog"),

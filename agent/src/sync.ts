@@ -51,6 +51,10 @@ import {
 import { requestUpdateTaskRun } from "./updater";
 import { log } from "./logger";
 import { OfflineQueue } from "./queue/queue";
+import {
+  applyGlobalSyncStartDatePolicy,
+  globalSyncStartDateHeartbeatReport,
+} from "./global-sync-policy";
 import { resolveNetworkIdentity } from "./network";
 
 export type SyncMode = "INITIAL" | "INCREMENTAL" | "MANUAL_RANGE" | "RETRY";
@@ -1522,6 +1526,7 @@ export class SyncRunner {
       buildId: AGENT_BUILD_ID,
       capabilities: AGENT_CAPABILITIES,
       syncStartDate: syncStartDate(),
+      ...globalSyncStartDateHeartbeatReport(),
       // Reporting only. What the centre accepts is decided by the centre; this
       // just lets an operator see whether the instruction has landed yet.
       effectiveSyncState: effectiveSyncState(),
@@ -1551,6 +1556,7 @@ export class SyncRunner {
     );
     this.adoptCentralWatermark(response.config.lastSyncedVisitDate);
     applyControlInstruction(response.config);
+    applyGlobalSyncStartDatePolicy(response.config, queue);
     // A remote update, if the centre handed one down. Written to disk first -
     // that file is what the SYSTEM task acts on - then the task is asked to
     // run now; if it cannot be asked, its own schedule finds the file within

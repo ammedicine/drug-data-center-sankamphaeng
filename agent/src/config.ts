@@ -38,7 +38,7 @@ dotenv.config();
  * build when they disagree, because a fleet that all reports 1.0.0 tells an
  * operator nothing about which machines still need updating.
  */
-export const AGENT_VERSION = "1.1.16";
+export const AGENT_VERSION = "1.1.17";
 
 /**
  * Which source this build came from, stamped by the installer build script.
@@ -60,6 +60,7 @@ export const AGENT_CAPABILITIES = {
   autoUpdate: true,
   remotePause: true,
   syncStartDate: true,
+  remoteSyncStartDate: true,
   charsetGate: true,
   workerLock: true,
   boundedWorkerLog: true,
@@ -425,6 +426,10 @@ export interface AgentSettings {
    * than leaving it undefined for every caller to guess at.
    */
   syncStartDate: string;
+  /** who currently owns the effective extraction floor */
+  syncStartDateAuthority: "LOCAL" | "CENTRAL";
+  /** desired district policy revision durably applied by this Agent */
+  globalSyncStartDateAppliedRevision?: number;
 }
 
 export const DEFAULT_SETTINGS: AgentSettings = {
@@ -436,6 +441,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   startWithWindows: true,
   minimiseToTray: true,
   syncStartDate: DEFAULT_SYNC_START_DATE,
+  syncStartDateAuthority: "LOCAL",
 };
 
 export function settingsPath(): string {
@@ -455,6 +461,16 @@ export function loadSettings(): AgentSettings {
     if (!isValidSyncStartDate(merged.syncStartDate ?? "")) {
       merged.syncStartDate = DEFAULT_SYNC_START_DATE;
     }
+    if (merged.syncStartDateAuthority !== "CENTRAL") {
+      merged.syncStartDateAuthority = "LOCAL";
+    }
+    if (
+      !Number.isSafeInteger(merged.globalSyncStartDateAppliedRevision) ||
+      (merged.globalSyncStartDateAppliedRevision ?? 0) < 1
+    ) {
+      delete merged.globalSyncStartDateAppliedRevision;
+      if (merged.syncStartDateAuthority === "CENTRAL") merged.syncStartDateAuthority = "LOCAL";
+    }
     return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -468,7 +484,19 @@ export function syncStartDate(): string {
 
 export function saveSettings(settings: Partial<AgentSettings>): AgentSettings {
   const merged = { ...loadSettings(), ...settings };
-  writeFileSync(settingsPath(), JSON.stringify(merged, null, 2), "utf8");
+  const target = settingsPath();
+  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify(merged, null, 2), "utf8");
+    renameSync(temp, target);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // The write may have failed before the temporary file existed.
+    }
+    throw error;
+  }
   return merged;
 }
 

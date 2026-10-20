@@ -158,6 +158,8 @@ export interface HeartbeatRequest {
   capabilities?: Record<string, boolean> | null;
   /** the earliest dispensing date this agent is configured to collect */
   syncStartDate?: string | null;
+  /** highest district-wide start-date policy revision durably applied */
+  appliedGlobalSyncStartDateRevision?: number | null;
   /** what the agent is actually doing about the centre's instruction */
   effectiveSyncState?: EffectiveSyncState | null;
   /** the highest control revision the agent has acted on */
@@ -231,6 +233,15 @@ export interface AgentConfigResponse {
   syncControlState?: SyncControlState;
   controlRevision?: number;
   pauseReason?: string | null;
+
+  /** Optional district-wide managed extraction floor. Older Centrals omit it. */
+  globalSyncStartDatePolicy?: {
+    schemaVersion: 1;
+    desiredDate: string;
+    desiredRevision: number;
+    activeDate: string | null;
+    activeRevision: number;
+  };
 
   /**
    * A remote software update the centre wants this Agent to perform. Absent

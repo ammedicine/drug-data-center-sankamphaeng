@@ -172,6 +172,18 @@ export class OfflineQueue {
     return { kept: keep.length, setAside: drop.length };
   }
 
+  /** Applies a newly raised floor to every pending chunk without reading JHCIS. */
+  quarantinePendingBelowFloor(floor: string): { chunks: number; records: number } {
+    let chunks = 0;
+    let records = 0;
+    for (const chunk of this.list("PENDING")) {
+      const result = this.quarantineBelowFloor(chunk, floor);
+      if (result.setAside) chunks += 1;
+      records += result.setAside;
+    }
+    return { chunks, records };
+  }
+
   /** How many chunks are parked below the floor, for the screen. */
   quarantinedCount(): number {
     const dir = this.quarantineDir();
