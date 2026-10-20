@@ -167,7 +167,7 @@ agent/data/queue/failed/<batchRef>__000001.json    ล้มเหลวถา�
 > แล้วเข้าใจผิดว่า TiDB เป็นคอขวด) ต้องรันซ้ำอย่างน้อย 3 รอบแล้วทิ้งรอบแรก
 > เครื่องมือคือ `agent/measure-central.mts` (ยิงเข้า Central จริง) กับ `agent/bench.mts` (mock Central)
 
-## 8. Global Sync Start Date semantics (approved, not implemented)
+## 8. Global Sync Start Date semantics (forward policy implemented; backfill pending)
 
 Global Sync Start Date เป็น extraction floor เดียวของทั้งอำเภอ ควบคุมโดย `SUPER_ADMIN` ผ่าน
 Central โดยแยก desired state ออกจาก active enforcement และใช้ revision ที่ไม่เกี่ยวกับ pause

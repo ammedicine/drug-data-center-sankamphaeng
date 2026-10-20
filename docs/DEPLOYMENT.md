@@ -76,9 +76,10 @@ git push        # Vercel build อัตโนมัติ
 - [ ] ตรวจ `/reports/drug-usage` ว่ามีข้อมูล
 - [ ] ทดสอบ facility isolation: ผู้ใช้ รพ.สต. A ใส่ `?facility=<B>` ต้องได้ 403
 
-## 5. Global Sync Start Date rollout (approved, not implemented)
+## 5. Global Sync Start Date rollout (code implemented; rollout not performed)
 
-ต้อง deploy แบบ Central-first และรักษา backward compatibility:
+โค้ด Phase C พร้อมสำหรับลำดับ deploy แบบ Central-first ด้านล่าง แต่ยังไม่ได้ apply migration 0012
+ใน production, publish Agent v1.1.17, activate policy หรือเริ่ม rollout:
 
 1. backup Central DB แล้ว apply เฉพาะ additive migration ที่ตรวจแล้ว
 2. deploy Central ที่เข้าใจ policy/heartbeat ใหม่ แต่ยังไม่มี policy row และยังไม่ enforce

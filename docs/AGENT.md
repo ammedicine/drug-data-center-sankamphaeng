@@ -107,9 +107,9 @@ Log ผ่านตัวกรอง redact — คำที่เข้าข�
 (จำนวนจ่าย: `unit` → `qty` → `quantity` → `amount` …) ถ้าหาไม่พบ Agent จะ **หยุดและรายงาน**
 ว่าต้องตรวจคอลัมน์ใด ไม่เดา ไม่ fail เงียบ ผลการตรวจถูกส่งขึ้น Central ให้ผู้ดูแลเห็นในหน้า Agent
 
-## 8. Global Sync Start Date compatibility (approved, not implemented)
+## 8. Global Sync Start Date compatibility (implemented in v1.1.17 code; release pending)
 
-Agent รุ่นที่รองรับในอนาคตจะประกาศ capability `remoteSyncStartDate` รับ desired policy จาก
+Agent v1.1.17 ประกาศ capability `remoteSyncStartDate` รับ desired policy จาก
 heartbeat บันทึก effective `syncStartDate` กับ applied revision แบบ temp+rename แล้วจึงรายงาน
 acknowledgement กลับ Central revision นี้แยกจาก pause `controlRevision`
 
@@ -126,5 +126,5 @@ acknowledgement กลับ Central revision นี้แยกจาก pause 
 queue/quarantine, pause/control state และ updater state เดิม Agent รุ่นเก่าหรือออฟไลน์ต้องคง
 centrally paused จนกว่าอัปเกรด รับ policy และรายงาน applied แล้ว JHCIS ยังเป็น read-only ทุกกรณี
 
-release/tag `v1.1.16` ที่เผยแพร่แล้วห้ามแก้ รุ่นที่วางแผนสำหรับ capability นี้คือ `v1.1.17`
-แต่ phase เอกสารนี้ไม่เปลี่ยน package/installer version และไม่สร้าง release
+release/tag `v1.1.16` ที่เผยแพร่แล้วห้ามแก้ โค้ด capability นี้เตรียมไว้สำหรับ `v1.1.17`
+แต่ยังไม่ publish installer, สร้าง tag หรือสร้าง release

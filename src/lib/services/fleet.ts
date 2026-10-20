@@ -76,6 +76,8 @@ export interface FleetAgentRow {
   ingestAllowed: boolean;
 
   syncStartDate: string | null;
+  globalSyncStartDateAppliedRevision: number | null;
+  globalSyncStartDateAppliedAt: Date | null;
   watermark: string | null;
   pendingBatches: number;
   failedCount: number;
@@ -153,6 +155,8 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       appliedControlRevision: agents.appliedControlRevision,
       controlAppliedAt: agents.controlAppliedAt,
       syncStartDate: agents.syncStartDate,
+      globalSyncStartDateAppliedRevision: agents.globalSyncStartDateAppliedRevision,
+      globalSyncStartDateAppliedAt: agents.globalSyncStartDateAppliedAt,
       watermark: agents.lastSyncedVisitDate,
       pendingBatches: agents.pendingBatches,
       failedCount: agents.failedCount,
@@ -221,6 +225,8 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       }),
       ingestAllowed: ingestAllowed(r.desiredSyncState),
       syncStartDate: r.syncStartDate ? String(r.syncStartDate) : null,
+      globalSyncStartDateAppliedRevision: r.globalSyncStartDateAppliedRevision,
+      globalSyncStartDateAppliedAt: r.globalSyncStartDateAppliedAt,
       watermark: r.watermark ? String(r.watermark) : null,
       pendingBatches: r.pendingBatches,
       failedCount: r.failedCount,

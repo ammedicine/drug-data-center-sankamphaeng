@@ -68,7 +68,7 @@ export class GlobalSyncStartDatePolicyConflictError extends Error {
   }
 }
 
-function parsePolicy(value: unknown): GlobalSyncStartDatePolicy {
+export function parseGlobalSyncStartDatePolicy(value: unknown): GlobalSyncStartDatePolicy {
   const parsed = policySchema.safeParse(value);
   if (!parsed.success) throw new GlobalSyncStartDatePolicyValidationError(parsed.error);
   return parsed.data;
@@ -130,7 +130,7 @@ export function createGlobalSyncStartDatePolicyService(
   return {
     async get(): Promise<GlobalSyncStartDatePolicy | null> {
       const value = await store.read();
-      return value === null ? null : parsePolicy(value);
+      return value === null ? null : parseGlobalSyncStartDatePolicy(value);
     },
 
     async setDesiredDate(input: {
@@ -147,7 +147,7 @@ export function createGlobalSyncStartDatePolicyService(
       const updatedAt = (input.now ?? new Date()).toISOString();
 
       return store.withLock(async (locked) => {
-        const current = locked.value === null ? null : parsePolicy(locked.value);
+        const current = locked.value === null ? null : parseGlobalSyncStartDatePolicy(locked.value);
 
         // A retried request for the already-desired date is idempotent even if
         // its expected revision is now stale.
@@ -163,7 +163,7 @@ export function createGlobalSyncStartDatePolicyService(
           );
         }
 
-        const policy = parsePolicy({
+        const policy = parseGlobalSyncStartDatePolicy({
           schemaVersion: 1,
           desiredDate,
           desiredRevision: actualRevision + 1,

@@ -76,7 +76,7 @@ Web              ── aggregate ในฐานข้อมูล แล้ว
 - **ไม่ใช้ FOREIGN KEY บน TiDB** — รักษา integrity ที่ชั้น service แทน เพราะ FK บน TiDB
   เพิ่งรองรับและมีต้นทุนต่อ bulk upsert หลายล้านแถว (ดู docs/DATABASE.md)
 
-## 5. Global Sync Start Date (Central foundation implemented; rollout pending)
+## 5. Global Sync Start Date (forward policy implemented; rollout pending)
 
 Global Sync Start Date เป็นนโยบายเดียวระดับอำเภอที่ Central เป็นเจ้าของและ `SUPER_ADMIN`
 เท่านั้นที่เปลี่ยนได้ State machine แยกสองสถานะ:
@@ -87,9 +87,10 @@ Global Sync Start Date เป็นนโยบายเดียวระดั
 revision นี้แยกจาก pause `controlRevision` โดยเด็ดขาด การบันทึกวันเดิมไม่สร้าง revision ใหม่
 และ rollback ต้องสร้าง revision ที่สูงขึ้น ไม่ลดเลขเดิม
 
-Phase B เก็บ policy ใน `system_settings` และส่ง desired/active state ผ่าน heartbeat แบบ optional
-พร้อมรับ applied revision ที่ผูกกับ Agent identity ซึ่ง authenticate แล้วเท่านั้น ยังไม่มี Agent ที่
-นำ policy ไปใช้, UI, activation/enforcement, backfill หรือ quarantine telemetry ใน phase นี้
+Central เก็บ policy ใน `system_settings` และส่ง desired/active state ผ่าน heartbeat แบบ optional
+พร้อมรับ applied revision ที่ผูกกับ Agent identity ซึ่ง authenticate แล้วเท่านั้น Agent v1.1.17
+นำ desired policy ไปใช้ และ `/admin/fleet` รองรับ readiness/activation กับ active-floor enforcement
+แล้ว ส่วน backfill, upload receipts และ quarantine telemetry ยังไม่ได้ทำ
 
 ```
 SUPER_ADMIN sets desired policy

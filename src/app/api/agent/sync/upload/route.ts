@@ -7,6 +7,7 @@ import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
 import { syncBatches } from "@/lib/db/schema";
+import { assertCurrentGlobalSyncStartDateRecordsAllowed } from "@/lib/services/global-sync-enforcement";
 import { ingestUsageRecords, upsertDrugMaster, UPLOAD_CHUNK_SIZE } from "@/lib/services/sync";
 
 export const runtime = "nodejs";
@@ -62,6 +63,7 @@ const schema = z.object({
 export const POST = withAgent(schema, async ({ agent, body }) => {
   await assertAgentSyncAllowed(agent.agentId);
   assertPcucodeMatches(agent, body.pcucode);
+  await assertCurrentGlobalSyncStartDateRecordsAllowed(body.records);
 
   const [batch] = await db
     .select({ id: syncBatches.id, status: syncBatches.status })

@@ -141,8 +141,8 @@ Agent identity จาก HMAC credential ที่ authenticate แล้ว ไ
 }
 ```
 
-ถ้าไม่มี policy row จะ omit `globalSyncStartDatePolicy` และไม่ต้อง acknowledge Phase B ยังไม่เปลี่ยน
-Agent, ไม่ activate/enforce floor และยังไม่รับ quarantine telemetry
+ถ้าไม่มี policy row จะ omit `globalSyncStartDatePolicy` และ Agent ทำงานแบบ legacy โดยไม่ต้อง
+acknowledge ระบบยังไม่รับ quarantine telemetry
 
 - `syncStartDate` capability/field เดิมไม่ถูกเปลี่ยนความหมาย
 - ถ้าไม่มี global policy row Central ต้องไม่บังคับให้ Agent acknowledge และ Agent ต้องทำงานแบบ
@@ -151,8 +151,7 @@ Agent, ไม่ activate/enforce floor และยังไม่รับ qua
 - policy revision เป็นคนละค่ากับ pause `controlRevision`
 - identity ของ acknowledgement มาจาก HMAC credential ที่ผ่านการยืนยันแล้วเท่านั้น
 
-ใน phase enforcement ภายหลัง เมื่อมี active floor แล้ว endpoint `sync/start` และ `sync/upload`
-ต้องตรวจ floor ก่อนเปลี่ยน
+เมื่อมี active floor แล้ว endpoint `sync/start` และ `sync/upload` ตรวจ floor ก่อนเปลี่ยน
 batch, counter, reject หรือ usage state ถ้า request/chunk มีข้อมูลต่ำกว่า active floor ให้ปฏิเสธทั้งชุด:
 
 ```http

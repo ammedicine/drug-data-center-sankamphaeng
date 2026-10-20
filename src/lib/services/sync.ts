@@ -13,6 +13,10 @@ import { db } from "@/lib/db";
 import { withWriteConflictRetry } from "@/lib/db/retry";
 import { isIneligibleSourceRow } from "@/lib/shared/ingest-rules";
 import { invalidateUsageReports } from "./report-cache";
+import {
+  assertCurrentGlobalSyncStartDateRangeAllowed,
+  assertCurrentGlobalSyncStartDateRecordsAllowed,
+} from "./global-sync-enforcement";
 import { agents, drugUsage, drugs, syncBatches, syncRejects } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
 import {
@@ -144,6 +148,10 @@ export async function startBatch(input: {
   // Defence in depth. The route checks this too; this is the layer that
   // still holds if a future endpoint reaches the core without asking.
   await assertAgentSyncAllowed(input.agent.agentId);
+  await assertCurrentGlobalSyncStartDateRangeAllowed({
+    rangeFrom: input.rangeFrom,
+    rangeTo: input.rangeTo,
+  });
   const existing = await db
     .select({ id: syncBatches.id, status: syncBatches.status })
     .from(syncBatches)
@@ -255,6 +263,7 @@ export async function ingestUsageRecords(input: {
   records: DrugUsageRecord[];
 }): Promise<SyncUploadResponse> {
   await assertAgentSyncAllowed(input.agent.agentId);
+  await assertCurrentGlobalSyncStartDateRecordsAllowed(input.records);
   const valid: ValidatedRecord[] = [];
   const rejects: Array<{ recordKey: string | null; reason: string }> = [];
 

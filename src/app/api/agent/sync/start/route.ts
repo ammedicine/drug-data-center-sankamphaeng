@@ -5,6 +5,7 @@ import { withAgent } from "@/lib/agent-auth/route";
 import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { writeAudit } from "@/lib/services/audit";
+import { assertCurrentGlobalSyncStartDateRangeAllowed } from "@/lib/services/global-sync-enforcement";
 import { startBatch, UPLOAD_CHUNK_SIZE } from "@/lib/services/sync";
 
 export const runtime = "nodejs";
@@ -32,6 +33,10 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
   // trusting the agent to have stopped asking.
   await assertAgentSyncAllowed(agent.agentId);
   assertPcucodeMatches(agent, body.pcucode);
+  await assertCurrentGlobalSyncStartDateRangeAllowed({
+    rangeFrom: body.rangeFrom,
+    rangeTo: body.rangeTo,
+  });
 
   const { batchId, resumed } = await startBatch({
     agent,

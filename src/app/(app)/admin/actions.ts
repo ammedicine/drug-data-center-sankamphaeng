@@ -12,6 +12,11 @@ import {
   SyncControlAuthorizationError,
 } from "@/lib/services/fleet";
 import { countFacilityUsage, purgeFacilityUsage } from "@/lib/services/sync";
+import { globalSyncStartDateIsoDateSchema } from "@/lib/services/global-sync-policy";
+import {
+  GlobalSyncStartDateManagementError,
+  globalSyncStartDateManagementService,
+} from "@/lib/services/global-sync-policy-management";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
 import {
@@ -953,6 +958,67 @@ export async function resumeAgentSyncAction(
 ): Promise<ActionState> {
   const ids = await resolveSelection(formData);
   return applySyncControl(ids, "RUNNING", null);
+}
+
+/* ------------------------------------------ Global Sync Start Date policy */
+
+export async function saveGlobalSyncStartDateAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่เปลี่ยนนโยบายได้");
+  const desiredDate = String(formData.get("desiredDate") ?? "").trim();
+  if (!globalSyncStartDateIsoDateSchema.safeParse(desiredDate).success) {
+    return fail("วันที่ต้องเป็นวันที่จริงในรูปแบบ YYYY-MM-DD");
+  }
+  const expectedDesiredRevision = Number(formData.get("expectedDesiredRevision") ?? 0);
+  if (!Number.isSafeInteger(expectedDesiredRevision) || expectedDesiredRevision < 0) {
+    return fail("revision ไม่ถูกต้อง กรุณาโหลดหน้าใหม่");
+  }
+
+  try {
+    const policy = await globalSyncStartDateManagementService.saveDesired({
+      actorUserId: user.userId,
+      desiredDate,
+      expectedDesiredRevision,
+      ip: clientIp(await headers()),
+    });
+    revalidatePath("/admin/fleet");
+    return { success: `บันทึกวันที่ที่ต้องการ ${policy.desiredDate} (revision ${policy.desiredRevision}) แล้ว ยังไม่เริ่มบังคับใช้` };
+  } catch (error) {
+    if (error instanceof GlobalSyncStartDateManagementError) return fail(error.message);
+    throw error;
+  }
+}
+
+export async function activateGlobalSyncStartDateAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้นที่เปิดใช้นโยบายได้");
+  const expectedDesiredRevision = Number(formData.get("expectedDesiredRevision") ?? 0);
+  if (!Number.isSafeInteger(expectedDesiredRevision) || expectedDesiredRevision < 1) {
+    return fail("revision ไม่ถูกต้อง กรุณาโหลดหน้าใหม่");
+  }
+  const overridePending = String(formData.get("overridePending") ?? "") === "yes";
+  const overrideReason = String(formData.get("overrideReason") ?? "").trim() || null;
+
+  try {
+    const policy = await globalSyncStartDateManagementService.activateDesired({
+      actorUserId: user.userId,
+      expectedDesiredRevision,
+      overridePending,
+      overrideReason,
+      ip: clientIp(await headers()),
+    });
+    revalidatePath("/admin/fleet");
+    return { success: `เปิดใช้ Global Sync Start Date ${policy.activeDate} (revision ${policy.activeRevision}) แล้ว` };
+  } catch (error) {
+    if (error instanceof GlobalSyncStartDateManagementError) return fail(error.message);
+    throw error;
+  }
 }
 
 /* ------------------------------------------------ remote software update */

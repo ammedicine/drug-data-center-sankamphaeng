@@ -4,12 +4,15 @@ import { Card, PageHeader, StatCard, Section, relativeTime } from "@/components/
 import { requireSuperAdmin } from "@/lib/auth/rbac";
 import { getLatestAgentRelease } from "@/lib/services/agent-release";
 import { listFleet, resetReadiness, summariseFleet } from "@/lib/services/fleet";
+import { globalSyncStartDatePolicyService } from "@/lib/services/global-sync-policy";
+import { globalSyncStartDateReadiness } from "@/lib/services/global-sync-policy-management";
 import { latestUpdateCommands } from "@/lib/services/update-commands";
 import { toThaiDate } from "@/lib/shared/sync-control";
 import { TERMINAL_UPDATE_STATES } from "@/lib/shared/update-command";
 import { isNewerVersion } from "@/lib/shared/version";
 
 import { FleetControls, type FleetRowView } from "./fleet-controls";
+import { GlobalSyncStartDatePanel } from "./global-sync-start-date-panel";
 
 export const metadata = { title: "จัดการ Agent ทั้งหมด" };
 export const dynamic = "force-dynamic";
@@ -32,7 +35,11 @@ export default async function FleetPage() {
   // The command rows are the record; the agents table holds the agent's own
   // last word. Both are shown, because they can legitimately differ for a
   // minute (the centre delivered; the agent has not heartbeated yet).
-  const [commands, latestRelease] = await Promise.all([latestUpdateCommands(), getLatestAgentRelease()]);
+  const [commands, latestRelease, globalPolicy] = await Promise.all([
+    latestUpdateCommands(),
+    getLatestAgentRelease(),
+    globalSyncStartDatePolicyService.get(),
+  ]);
   const latestVersion = latestRelease?.version.replace(/^v/i, "") ?? null;
 
   const view: FleetRowView[] = rows.map((r) => ({
@@ -92,6 +99,19 @@ export default async function FleetPage() {
   }));
 
   const ready = readiness.filter((r) => r.safeToReset).length;
+  const globalReadiness = globalPolicy
+    ? new Map(
+        globalSyncStartDateReadiness(
+          globalPolicy,
+          rows.map((row) => ({
+            agentId: row.agentId,
+            supportsRemoteSyncStartDate: row.capabilities.remoteSyncStartDate,
+            appliedRevision: row.globalSyncStartDateAppliedRevision,
+            syncControlState: row.desiredSyncState,
+          })),
+        ).map((row) => [row.agentId, row.status]),
+      )
+    : null;
 
   return (
     <>
@@ -134,6 +154,26 @@ export default async function FleetPage() {
           icon={TriangleAlert}
         />
       </div>
+
+      <Section
+        title="Global Sync Start Date"
+        description="บันทึกค่าที่ต้องการก่อน แล้วเปิดใช้เมื่อ Agent พร้อม; การเปิดใช้เท่านั้นที่เปลี่ยนการรับข้อมูล"
+      >
+        <GlobalSyncStartDatePanel
+          policy={globalPolicy ? {
+            desiredDate: globalPolicy.desiredDate,
+            desiredRevision: globalPolicy.desiredRevision,
+            activeDate: globalPolicy.activeDate,
+            activeRevision: globalPolicy.activeRevision,
+          } : null}
+          agents={globalPolicy ? rows.map((row) => ({
+            agentId: row.agentId,
+            label: `${row.facilityCode} · ${row.agentName}`,
+            status: globalReadiness?.get(row.agentId) ?? "PENDING",
+            paused: row.desiredSyncState === "PAUSED",
+          })) : []}
+        />
+      </Section>
 
       <Section title="Agent ทุกเครื่อง" description="หนึ่งแถวต่อหนึ่ง Agent - หนึ่งสถานบริการอาจมีมากกว่าหนึ่งเครื่อง">
         <FleetControls rows={view} />
