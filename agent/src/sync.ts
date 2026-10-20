@@ -466,13 +466,16 @@ export class SyncRunner {
 
       const uploadStartedAt = Date.now();
       try {
+        const prepared = this.queue.prepareForUpload(chunk);
         const result = await withRetry(
           () =>
             this.client.upload({
-              batchRef: chunk.batchRef,
-              pcucode: chunk.pcucode,
-              sourceVersion: chunk.sourceVersion,
-              records: chunk.records,
+              batchRef: prepared.batchRef,
+              chunkRef: prepared.chunkRef,
+              payloadSha256: prepared.payloadSha256,
+              pcucode: prepared.pcucode,
+              sourceVersion: prepared.sourceVersion,
+              records: prepared.records,
             }),
           {
             label: `upload ${chunk.batchRef}#${chunk.sequence}`,

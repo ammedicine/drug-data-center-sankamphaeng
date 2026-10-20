@@ -121,6 +121,9 @@ acknowledgement กลับ Central revision นี้แยกจาก pause 
 - เลื่อนย้อนหลังไม่เริ่ม backfill เอง ต้องรอคำสั่ง `MANUAL_RANGE` แบบ explicit และ reconciliation
 - historical backfill ต้องมีทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk`; forward move
   ไม่ต้องรอ `idempotentUploadChunk`
+- `idempotentUploadChunk` บันทึก `chunkRef` และ payload SHA-256 ในไฟล์ pending ก่อน request แรก
+  retry/restart ใช้ identity และ payload เดิม; queue รุ่นเก่าที่ไม่มี field นี้ถูกเติมแบบ temp+rename
+  เมื่อจะส่ง โดยไม่เปลี่ยน `record_key`, watermark หรือพฤติกรรมอ่าน JHCIS
 
 การอัปเกรดต้องรักษา `agentId`, credential, enrollment, `%ProgramData%\SDCAgent`, settings,
 queue/quarantine, pause/control state และ updater state เดิม Agent รุ่นเก่าหรือออฟไลน์ต้องคง

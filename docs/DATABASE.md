@@ -15,6 +15,7 @@ Migration: `npm run db:generate` → ไฟล์ใน `drizzle/` → `npm run 
 | `agent_enrollment_tokens` | token ครั้งเดียว มีวันหมดอายุ (เก็บเป็น hash) | `..._hash_uq` |
 | `agent_request_nonces` | กัน replay | PK nonce |
 | `sync_batches` | ประวัติทุกรอบ sync | `sync_batches_ref_uq (agent_id, batch_ref)` |
+| `sync_upload_receipts` | ผลประมวลผล upload chunk แบบ exactly-once | `sync_upload_receipts_identity_uq (agent_id, batch_id, chunk_ref)` |
 | `sync_rejects` | เฉพาะแถวที่ถูกปฏิเสธ พร้อมเหตุผล | `sync_rejects_batch_idx` |
 | `drugs` | drug master ต่อสถานบริการ | `drugs_facility_code_uq` |
 | `drug_usage` | ข้อมูลการจ่ายยา (ตารางใหญ่) | `drug_usage_record_key_uq` |
@@ -88,6 +89,9 @@ enrollment, watermark, pause state หรือ update state เดิม ไม
 Quarantine summary/report fields ถูกเลื่อนไป phase ภายหลังพร้อม Agent telemetry และต้องผ่าน review
 แยกต่างหาก ไม่ได้ prebuild ไว้ใน migration 0012
 
-Historical backfill มี prerequisite migration แยกสำหรับ upload chunk receipt โดย unique key ระดับ
-authenticated Agent + batch + stable chunk reference เพื่อไม่ให้ retry หลัง timeout เพิ่ม batch counter
-หรือ reject ซ้ำ ตาราง receipt ไม่ใช่ prerequisite ของ forward-date policy และยังไม่ถูกสร้างใน phase นี้
+Migration `0013_sync_upload_receipts.sql` เพิ่มตาราง receipt เท่านั้น โดยเก็บ authenticated Agent,
+batch, stable chunk reference, payload SHA-256, status, accepted/rejected counts, stable JSON result
+และเวลา created/completed ภายใต้ unique key `(agent_id, batch_id, chunk_ref)` การสร้าง/จบ receipt,
+fact upsert, reject และ batch counters อยู่ transaction เดียวกัน จึง retry หลัง timeout ได้โดยไม่เพิ่ม
+counter/reject ซ้ำ ตารางนี้ไม่แก้ `drug_usage` key, watermark หรือ Global Sync Start Date schema
+และไม่ได้เปิด historical backfill

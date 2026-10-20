@@ -51,13 +51,13 @@ SchemaInspector  ── ตรวจ schema จริง + pcucode ──► ต
        │
 UsageExtractor   ── SELECT เฉพาะคอลัมน์ที่ต้องใช้ (visitdrug ⋈ visit ⋈ cdrug)
        │
-OfflineQueue     ── เขียนลงดิสก์ก่อนส่ง (chunk ละ 500 แถว)
+OfflineQueue     ── เขียน payload + stable chunkRef/hash ลงดิสก์ก่อนส่ง (chunk ละ 500 แถว)
        │
 CentralClient    ── POST /sync/start → /sync/upload (n ครั้ง) → /sync/complete
        │              ทุก request ลงลายเซ็น HMAC + nonce + timestamp
-Central API      ── validate ราย record → upsert ตาม record_key → นับ accepted/rejected
+Central API      ── verify hash → receipt transaction → upsert record_key + rejects + counters
        │
-TiDB             ── drug_usage (unique record_key) + sync_batches + sync_rejects
+TiDB             ── drug_usage (unique record_key) + sync_batches + sync_rejects + upload receipts
        │
 Web              ── aggregate ในฐานข้อมูล แล้วแสดงผล
 ```
@@ -90,7 +90,8 @@ revision นี้แยกจาก pause `controlRevision` โดยเด็�
 Central เก็บ policy ใน `system_settings` และส่ง desired/active state ผ่าน heartbeat แบบ optional
 พร้อมรับ applied revision ที่ผูกกับ Agent identity ซึ่ง authenticate แล้วเท่านั้น Agent v1.1.17
 นำ desired policy ไปใช้ และ `/admin/fleet` รองรับ readiness/activation กับ active-floor enforcement
-แล้ว ส่วน backfill, upload receipts และ quarantine telemetry ยังไม่ได้ทำ
+แล้ว และ upload chunk receipts ป้องกัน counter/reject ซ้ำจาก ambiguous retry แล้ว ส่วน backfill
+และ quarantine telemetry ยังไม่ได้ทำ
 
 ```
 SUPER_ADMIN sets desired policy

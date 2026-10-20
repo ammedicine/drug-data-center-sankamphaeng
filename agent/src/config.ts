@@ -61,6 +61,7 @@ export const AGENT_CAPABILITIES = {
   remotePause: true,
   syncStartDate: true,
   remoteSyncStartDate: true,
+  idempotentUploadChunk: true,
   charsetGate: true,
   workerLock: true,
   boundedWorkerLog: true,

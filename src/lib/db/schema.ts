@@ -10,6 +10,7 @@ import { relations } from "drizzle-orm";
 
 import { EFFECTIVE_SYNC_STATES, SYNC_CONTROL_STATES } from "@/lib/shared/sync-control";
 import { UPDATE_COMMAND_STATES } from "@/lib/shared/update-command";
+import type { SyncUploadResponse } from "@/lib/shared/canonical";
 import {
   bigint,
   boolean,
@@ -43,6 +44,7 @@ export const USER_ROLES = ["SUPER_ADMIN", "ADMIN", "FACILITY_ADMIN", "USER"] as 
 export const AGENT_STATUSES = ["ONLINE", "OFFLINE", "SYNCING", "ERROR", "DISABLED"] as const;
 export const BATCH_STATUSES = ["STARTED", "UPLOADING", "COMPLETED", "FAILED", "ABORTED"] as const;
 export const SYNC_MODES = ["INITIAL", "INCREMENTAL", "MANUAL_RANGE", "RETRY"] as const;
+export const UPLOAD_RECEIPT_STATUSES = ["PROCESSING", "COMPLETED"] as const;
 
 /**
  * Remote sync control lives in src/lib/shared/sync-control.ts so the agent,
@@ -425,6 +427,37 @@ export const syncBatches = mysqlTable(
     batchRefUq: uniqueIndex("sync_batches_ref_uq").on(t.agentId, t.batchRef),
     facilityIdx: index("sync_batches_facility_idx").on(t.facilityId, t.startedAt),
     statusIdx: index("sync_batches_status_idx").on(t.status, t.startedAt),
+  }),
+);
+
+/**
+ * Exactly-once bookkeeping for receipt-capable upload chunks. Fact rows keep
+ * their independent record_key dedupe; this table protects rejects/counters
+ * and the stable response when an Agent retries after an ambiguous timeout.
+ */
+export const syncUploadReceipts = mysqlTable(
+  "sync_upload_receipts",
+  {
+    id: id("id").primaryKey(),
+    agentId: id("agent_id").notNull(),
+    batchId: id("batch_id").notNull(),
+    chunkRef: varchar("chunk_ref", { length: 100 }).notNull(),
+    payloadSha256: char("payload_sha256", { length: 64 }).notNull(),
+    status: mysqlEnum("status", UPLOAD_RECEIPT_STATUSES).notNull().default("PROCESSING"),
+    acceptedCount: int("accepted_count").notNull().default(0),
+    rejectedCount: int("rejected_count").notNull().default(0),
+    result: json("result").$type<SyncUploadResponse>(),
+    completedAt: datetime("completed_at"),
+    createdAt,
+    updatedAt,
+  },
+  (t) => ({
+    identityUq: uniqueIndex("sync_upload_receipts_identity_uq").on(
+      t.agentId,
+      t.batchId,
+      t.chunkRef,
+    ),
+    batchIdx: index("sync_upload_receipts_batch_idx").on(t.batchId, t.createdAt),
   }),
 );
 

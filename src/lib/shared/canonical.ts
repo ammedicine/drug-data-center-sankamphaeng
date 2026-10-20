@@ -93,6 +93,53 @@ export function sha256Hex(value: string): string {
 }
 
 /**
+ * Hashes the semantic upload body in a fixed field order on both Agent and
+ * Central. The receipt identity itself is deliberately excluded: reusing a
+ * chunkRef with different content must produce a different digest.
+ */
+export function syncUploadPayloadSha256(input: {
+  batchRef: string;
+  pcucode: string;
+  sourceVersion: string | null;
+  drugs?: DrugMasterRecord[];
+  records: DrugUsageRecord[];
+}): string {
+  const drugs = input.drugs?.map((record) => [
+    record.drugCode,
+    record.drugName,
+    record.genericName,
+    record.drugType,
+    record.drugTypeSub,
+    record.drugFlag,
+    record.unitSell,
+    record.unitSellName ?? null,
+    record.unitUsage,
+    record.unitUsageName ?? null,
+  ]);
+  const records = input.records.map((record) => [
+    record.visitNo,
+    record.visitMissing ?? false,
+    record.drugCode,
+    record.drugName,
+    record.drugType,
+    record.quantity,
+    record.unit,
+    record.unitCode ?? null,
+    record.clinic,
+    record.usageDate,
+  ]);
+  return sha256Hex(
+    JSON.stringify([
+      input.batchRef,
+      input.pcucode,
+      input.sourceVersion,
+      drugs ?? null,
+      records,
+    ]),
+  );
+}
+
+/**
  * Canonical string signed by the agent:
  *   METHOD \n path \n timestamp \n nonce \n sha256(body)
  * Signing the body hash (not the body) keeps the signature stable regardless of
@@ -283,6 +330,8 @@ export interface SyncStartRequest {
 
 export interface SyncUploadRequest {
   batchRef: string;
+  chunkRef?: string;
+  payloadSha256?: string;
   pcucode: string;
   sourceVersion: string | null;
   drugs?: DrugMasterRecord[];

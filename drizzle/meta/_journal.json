@@ -92,6 +92,13 @@
       "when": 1792484038843,
       "tag": "0012_global_sync_start_date",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "5",
+      "when": 1792502350802,
+      "tag": "0013_sync_upload_receipts",
+      "breakpoints": true
     }
   ]
 }

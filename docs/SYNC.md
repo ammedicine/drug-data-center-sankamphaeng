@@ -97,6 +97,12 @@ record_key = sha256(facility_id | pcucode | visit_no | drug_code)
 
 ระดับ batch: `sync/start` ด้วย `batchRef` เดิมจะคืน batch เดิม (`resumed: true`) ไม่สร้างซ้ำ
 
+ระดับ chunk: Agent ที่มี `idempotentUploadChunk` บันทึก `chunkRef` และ semantic payload SHA-256
+ลง queue แบบ temp+rename ก่อน request แรกและใช้ค่าเดิมหลัง retry/restart Central ตรวจ hash เองและใช้
+receipt unique `(agent_id, batch_id, chunk_ref)` ถ้า receipt สำเร็จแล้วจะคืน stable result เดิมโดยไม่
+upsert/นับ/reject ซ้ำ; ref เดิมแต่ payload ต่างกันเป็น protocol conflict ส่วน fact, reject, counter
+และ receipt result commit ใน transaction เดียวกัน Agent รุ่นเก่าที่ไม่มี identity ยังใช้ legacy path เดิม
+
 ## 4. Offline queue
 
 ```
@@ -120,7 +126,7 @@ agent/data/queue/failed/<batchRef>__000001.json    ล้มเหลวถา�
   `RESUME_PENDING_CHUNKS` (6) → หน่วยความจำและดิสก์มีเพดาน ไม่โตตามขนาดช่วงข้อมูล
 - ถ้าตัวส่งส่งอะไรไม่ได้เลย (ศูนย์กลางล่ม) จะ **ไม่รอค้าง** — ตัวอ่านทำต่อจนจบแล้วเก็บลงคิว
   ข้อมูลอยู่บนดิสก์ครบ รอบถัดไปส่งต่อ (ทดสอบด้วย `bench.mts --outage`)
-- durability ไม่เปลี่ยน: ยัง temp+rename, ยัง record_key เดิม, ยัง idempotent
+- durability ไม่เปลี่ยน: ยัง temp+rename, ยัง record_key เดิม และเพิ่ม durable chunk identity ก่อนส่ง
 
 ### 4.2 กระจายเวลาซิงก์ (`agent/src/schedule.ts`)
 
@@ -198,8 +204,9 @@ Central โดยแยก desired state ออกจาก active enforcement �
 
 ### Idempotency สองระดับ
 
-`record_key` ป้องกัน `drug_usage` ซ้ำอยู่แล้ว แต่ยังไม่รับประกันว่า batch counters/rejects จะไม่ถูก
-นับซ้ำเมื่อ response สูญหาย ดังนั้น stable chunk receipt เป็น prerequisite เฉพาะ historical backfill
-ไม่ใช่ prerequisite ของ desired policy, acknowledgement, forward move หรือ active-floor enforcement
+`record_key` ป้องกัน `drug_usage` ซ้ำ ส่วน `sync_upload_receipts` ป้องกันการประมวลผล chunk,
+batch counters และ reject ซ้ำเมื่อ response สูญหาย สองระดับนี้มีหน้าที่ต่างกัน Stable receipt เป็น
+prerequisite เฉพาะ historical backfill ไม่ใช่ prerequisite ของ desired policy, acknowledgement,
+forward move หรือ active-floor enforcement และ Phase D ยังไม่เปิด backfill
 
 Purge เป็น destructive workflow แยกจากนโยบายนี้เสมอ การเปลี่ยนวันห้ามเรียก purge โดยอัตโนมัติ

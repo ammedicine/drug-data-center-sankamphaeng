@@ -17,6 +17,10 @@ import {
   assertCurrentGlobalSyncStartDateRangeAllowed,
   assertCurrentGlobalSyncStartDateRecordsAllowed,
 } from "./global-sync-enforcement";
+import {
+  idempotentUploadChunkProcessor,
+  type UploadChunkDatabaseTransaction,
+} from "./idempotent-upload-chunk";
 import { agents, drugUsage, drugs, syncBatches, syncRejects } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
 import {
@@ -189,8 +193,10 @@ export async function upsertDrugMaster(
   agent: AuthenticatedAgent,
   records: DrugMasterRecord[],
   sourceVersion: string | null,
+  options?: { transaction?: UploadChunkDatabaseTransaction },
 ): Promise<number> {
-  await assertAgentSyncAllowed(agent.agentId);
+  if (!options?.transaction) await assertAgentSyncAllowed(agent.agentId);
+  const writer = options?.transaction ?? db;
   // Same ordering argument as the usage upsert: this table's unique key is
   // (facility_id, drug_code), the facility is fixed for one request, so
   // ascending drug_code is ascending index order. Master uploads land at the
@@ -218,15 +224,8 @@ export async function upsertDrugMaster(
     // Keyed by (facility_id, drug_code) and idempotent, so a lost lock race is
     // safe to run again - and the master upload lands at the same moment as
     // everyone else's usage rows, which is when races happen.
-    await withWriteConflictRetry(
-      {
-        statement: "drugs upsert",
-        agentId: agent.agentId,
-        facilityId: agent.facilityId,
-        rows: part.length,
-      },
-      () =>
-        db
+    const write = () =>
+      writer
           .insert(drugs)
           .values(part)
           .onDuplicateKeyUpdate({
@@ -243,13 +242,24 @@ export async function upsertDrugMaster(
               sourceVersion: sql`VALUES(source_version)`,
               syncedAt: sql`VALUES(synced_at)`,
             },
-          }),
-    );
+          });
+    if (options?.transaction) await write();
+    else {
+      await withWriteConflictRetry(
+        {
+          statement: "drugs upsert",
+          agentId: agent.agentId,
+          facilityId: agent.facilityId,
+          rows: part.length,
+        },
+        write,
+      );
+    }
   }
 
   // drug_flag, names and units all show up in the reports, so a refreshed
   // master invalidates them just as new usage rows do.
-  if (rows.length) invalidateUsageReports();
+  if (rows.length && !options?.transaction) invalidateUsageReports();
 
   return rows.length;
 }
@@ -261,9 +271,12 @@ export async function ingestUsageRecords(input: {
   pcucode: string;
   sourceVersion: string | null;
   records: DrugUsageRecord[];
-}): Promise<SyncUploadResponse> {
-  await assertAgentSyncAllowed(input.agent.agentId);
-  await assertCurrentGlobalSyncStartDateRecordsAllowed(input.records);
+}, options?: { transaction?: UploadChunkDatabaseTransaction }): Promise<SyncUploadResponse> {
+  if (!options?.transaction) {
+    await assertAgentSyncAllowed(input.agent.agentId);
+    await assertCurrentGlobalSyncStartDateRecordsAllowed(input.records);
+  }
+  const writer = options?.transaction ?? db;
   const valid: ValidatedRecord[] = [];
   const rejects: Array<{ recordKey: string | null; reason: string }> = [];
 
@@ -302,15 +315,8 @@ export async function ingestUsageRecords(input: {
   for (const part of chunk(unique, UPSERT_CHUNK)) {
     // Upserting by record_key is idempotent, so running it a second time after
     // a lock race costs nothing and cannot double count.
-    await withWriteConflictRetry(
-      {
-        statement: "drug_usage upsert",
-        agentId: input.agent.agentId,
-        facilityId: input.agent.facilityId,
-        rows: part.length,
-      },
-      () =>
-        db
+    const write = () =>
+      writer
           .insert(drugUsage)
           .values(part)
           .onDuplicateKeyUpdate({
@@ -327,12 +333,23 @@ export async function ingestUsageRecords(input: {
               syncBatchId: sql`VALUES(sync_batch_id)`,
               agentId: sql`VALUES(agent_id)`,
             },
-          }),
-    );
+          });
+    if (options?.transaction) await write();
+    else {
+      await withWriteConflictRetry(
+        {
+          statement: "drug_usage upsert",
+          agentId: input.agent.agentId,
+          facilityId: input.agent.facilityId,
+          rows: part.length,
+        },
+        write,
+      );
+    }
   }
 
   if (rejects.length) {
-    await db.insert(syncRejects).values(
+    await writer.insert(syncRejects).values(
       rejects.slice(0, 200).map((r) => ({
         batchId: input.batchId,
         facilityId: input.agent.facilityId,
@@ -345,15 +362,8 @@ export async function ingestUsageRecords(input: {
   // Counters, so not idempotent on their own - but a statement that lost a
   // lock race was rolled back whole, so it applied nothing and running it
   // again adds each amount exactly once.
-  await withWriteConflictRetry(
-    {
-      statement: "sync_batches counters",
-      agentId: input.agent.agentId,
-      facilityId: input.agent.facilityId,
-      rows: input.records.length,
-    },
-    () =>
-      db
+  const updateCounters = () =>
+    writer
         .update(syncBatches)
         .set({
           status: "UPLOADING",
@@ -361,13 +371,64 @@ export async function ingestUsageRecords(input: {
           recordsAccepted: sql`${syncBatches.recordsAccepted} + ${unique.length}`,
           recordsRejected: sql`${syncBatches.recordsRejected} + ${rejects.length}`,
         })
-        .where(eq(syncBatches.id, input.batchId)),
-  );
+        .where(eq(syncBatches.id, input.batchId));
+  if (options?.transaction) await updateCounters();
+  else {
+    await withWriteConflictRetry(
+      {
+        statement: "sync_batches counters",
+        agentId: input.agent.agentId,
+        facilityId: input.agent.facilityId,
+        rows: input.records.length,
+      },
+      updateCounters,
+    );
+  }
 
   // The reports are cached until new rows land. They just did.
-  if (unique.length) invalidateUsageReports();
+  if (unique.length && !options?.transaction) invalidateUsageReports();
 
   return { accepted: unique.length, rejected: rejects.length, rejects: rejects.slice(0, 50) };
+}
+
+/** Receipt-capable path: facts, rejects, counters and the result commit together. */
+export async function ingestIdempotentUsageChunk(input: {
+  agent: AuthenticatedAgent;
+  batchRef: string;
+  chunkRef: string;
+  payloadSha256: string;
+  pcucode: string;
+  sourceVersion: string | null;
+  drugs?: DrugMasterRecord[];
+  records: DrugUsageRecord[];
+}): Promise<SyncUploadResponse> {
+  const result = await idempotentUploadChunkProcessor.process(
+    {
+      agent: { agentId: input.agent.agentId, facilityId: input.agent.facilityId },
+      batchRef: input.batchRef,
+      chunkRef: input.chunkRef,
+      payloadSha256: input.payloadSha256,
+    },
+    async (transaction, batchId) => {
+      await assertAgentSyncAllowed(input.agent.agentId);
+      await assertCurrentGlobalSyncStartDateRecordsAllowed(input.records);
+      if (input.drugs?.length) {
+        await upsertDrugMaster(input.agent, input.drugs, input.sourceVersion, { transaction });
+      }
+      return ingestUsageRecords(
+        {
+          agent: input.agent,
+          batchId,
+          pcucode: input.pcucode,
+          sourceVersion: input.sourceVersion,
+          records: input.records,
+        },
+        { transaction },
+      );
+    },
+  );
+  if (result.accepted || input.drugs?.length) invalidateUsageReports();
+  return result;
 }
 
 /** Closes the batch and advances the agent watermark on success. */

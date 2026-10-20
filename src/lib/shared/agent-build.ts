@@ -31,6 +31,8 @@ export interface AgentCapabilities {
   syncStartDate: boolean;
   /** persists and acknowledges the district-wide managed extraction floor */
   remoteSyncStartDate: boolean;
+  /** retries one persisted upload chunk without processing it twice */
+  idempotentUploadChunk: boolean;
   /** asserts the JHCIS session really is on a UTF-8 family before reading */
   charsetGate: boolean;
   /** one worker per data directory, enforced by a lock */
@@ -50,6 +52,7 @@ export const NO_CAPABILITIES: AgentCapabilities = {
   remotePause: false,
   syncStartDate: false,
   remoteSyncStartDate: false,
+  idempotentUploadChunk: false,
   charsetGate: false,
   workerLock: false,
   boundedWorkerLog: false,
@@ -72,6 +75,7 @@ export function parseCapabilities(raw: unknown): AgentCapabilities {
     remotePause: flag("remotePause"),
     syncStartDate: flag("syncStartDate"),
     remoteSyncStartDate: flag("remoteSyncStartDate"),
+    idempotentUploadChunk: flag("idempotentUploadChunk"),
     charsetGate: flag("charsetGate"),
     workerLock: flag("workerLock"),
     boundedWorkerLog: flag("boundedWorkerLog"),

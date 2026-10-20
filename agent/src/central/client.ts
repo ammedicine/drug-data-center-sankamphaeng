@@ -13,9 +13,8 @@ import {
   buildSigningString,
   signRequest,
   type AgentConfigResponse,
-  type DrugMasterRecord,
-  type DrugUsageRecord,
   type HeartbeatRequest,
+  type SyncUploadRequest,
   type SyncUploadResponse,
 } from "@shared/canonical";
 
@@ -171,13 +170,7 @@ export class CentralClient {
     return this.request("POST", "/api/agent/sync/start", body);
   }
 
-  upload(body: {
-    batchRef: string;
-    pcucode: string;
-    sourceVersion: string | null;
-    drugs?: DrugMasterRecord[];
-    records: DrugUsageRecord[];
-  }): Promise<SyncUploadResponse> {
+  upload(body: SyncUploadRequest): Promise<SyncUploadResponse> {
     return this.request("POST", "/api/agent/sync/upload", body);
   }
 

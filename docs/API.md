@@ -86,7 +86,8 @@ heartbeat รอบถัดไป (**ปกติภายใน 30 วิน�
 ### POST /api/agent/sync/upload
 
 ```json
-{ "batchRef": "SYNC-20260904-000001", "pcucode": "05957", "sourceVersion": "5.6.45",
+{ "batchRef": "SYNC-20260904-000001", "chunkRef": "SYNC-20260904-000001:000001",
+  "payloadSha256": "<64 lowercase hex>", "pcucode": "05957", "sourceVersion": "5.6.45",
   "drugs": [ { "drugCode": "P76", "drugName": "DICLOXACILLIN", "drugType": "01", ... } ],
   "records": [ { "visitNo": 132449, "drugCode": "P76", "drugName": "...",
                  "drugType": "01", "quantity": 20, "unit": "009",
@@ -95,7 +96,15 @@ heartbeat รอบถัดไป (**ปกติภายใน 30 วิน�
 
 ตอบ `{ accepted, rejected, rejects: [{ recordKey, reason }] }`
 สูงสุด 500 records ต่อครั้ง · แถวที่ผิดถูกปฏิเสธรายแถว ไม่ทำให้ทั้ง batch ล้ม
-ส่งซ้ำได้ปลอดภัย (upsert ด้วย `record_key`)
+Agent ที่รองรับ `idempotentUploadChunk` ส่ง `chunkRef` และ `payloadSha256` เป็นคู่ โดย Central
+คำนวณ hash จาก payload ซ้ำเอง ถ้า receipt เดิมเสร็จแล้วและ hash ตรงกันจะคืนผลเดิมโดยไม่ประมวลผล
+หรือเพิ่ม counter/reject ซ้ำ; ถ้า `chunkRef` เดิมแต่ hash ต่างกันตอบ `409 CHUNK_PAYLOAD_CONFLICT`.
+Concurrent duplicate ถูก serialize แล้วคืน stored result หลัง request แรก commit; ถ้ายังพิสูจน์
+completion ของ receipt สถานะ `PROCESSING` ไม่ได้ ให้ตอบ `503 CHUNK_IN_PROGRESS` เพื่อ retry โดย
+เก็บ queue เดิม และ database failure จะ rollback fact, reject, counter และ receipt พร้อมกัน
+
+Agent รุ่นเก่าที่ไม่ส่งทั้งสอง field ยังใช้ legacy path เดิมได้: `record_key` ป้องกัน fact row ซ้ำ
+แต่ไม่ได้รับประกัน chunk-processing idempotency สำหรับ counter/reject
 
 ### POST /api/agent/sync/complete
 

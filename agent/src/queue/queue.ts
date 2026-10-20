@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import type { DrugUsageRecord } from "@shared/canonical";
+import { syncUploadPayloadSha256, type DrugUsageRecord } from "@shared/canonical";
 import { isBelowSyncFloor } from "@shared/sync-control";
 
 export type ChunkStatus = "PENDING" | "FAILED";
@@ -25,6 +25,8 @@ export interface QueuedChunk {
   pcucode: string;
   sourceVersion: string | null;
   records: DrugUsageRecord[];
+  chunkRef?: string;
+  payloadSha256?: string;
   attempts: number;
   lastError?: string | null;
 }
@@ -80,6 +82,38 @@ export class OfflineQueue {
     writeFileSync(temp, JSON.stringify({ ...chunk, attempts: 0 }), "utf8");
     renameSync(temp, target); // atomic on the same volume
     return target;
+  }
+
+  /**
+   * Gives a durable queue item its protocol identity before its first request.
+   * Existing v1.1.16 files are upgraded in place with the same temp+rename
+   * guarantee as every other queue mutation.
+   */
+  prepareForUpload(chunk: QueuedChunk): QueuedChunk & {
+    chunkRef: string;
+    payloadSha256: string;
+  } {
+    const chunkRef = chunk.chunkRef ?? `${chunk.batchRef}:${String(chunk.sequence).padStart(6, "0")}`;
+    const payloadSha256 = syncUploadPayloadSha256({
+      batchRef: chunk.batchRef,
+      pcucode: chunk.pcucode,
+      sourceVersion: chunk.sourceVersion,
+      records: chunk.records,
+    });
+    if (chunk.payloadSha256 && chunk.payloadSha256 !== payloadSha256) {
+      throw new Error(`Queued chunk payload changed after identity was persisted (${chunkRef})`);
+    }
+    if (chunk.chunkRef === chunkRef && chunk.payloadSha256 === payloadSha256) {
+      return chunk as QueuedChunk & { chunkRef: string; payloadSha256: string };
+    }
+
+    const next = { ...chunk, chunkRef, payloadSha256 };
+    const temp = `${chunk.file}.tmp`;
+    const { file: _file, ...payload } = next;
+    void _file;
+    writeFileSync(temp, JSON.stringify(payload), "utf8");
+    renameSync(temp, chunk.file);
+    return next;
   }
 
   private read(file: string): QueuedChunk | null {

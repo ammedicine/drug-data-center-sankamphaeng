@@ -8,7 +8,13 @@ import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
 import { syncBatches } from "@/lib/db/schema";
 import { assertCurrentGlobalSyncStartDateRecordsAllowed } from "@/lib/services/global-sync-enforcement";
-import { ingestUsageRecords, upsertDrugMaster, UPLOAD_CHUNK_SIZE } from "@/lib/services/sync";
+import { resolveUploadChunkIdentity } from "@/lib/services/idempotent-upload-chunk";
+import {
+  ingestIdempotentUsageChunk,
+  ingestUsageRecords,
+  upsertDrugMaster,
+  UPLOAD_CHUNK_SIZE,
+} from "@/lib/services/sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,6 +55,8 @@ const drugRecord = z.object({
 
 const schema = z.object({
   batchRef: z.string().min(5).max(40),
+  chunkRef: z.string().min(1).max(100).optional(),
+  payloadSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   pcucode: z.string().min(1).max(5),
   sourceVersion: z.string().max(40).nullable(),
   drugs: z.array(drugRecord).max(2000).optional(),
@@ -57,12 +65,29 @@ const schema = z.object({
 
 /**
  * POST /api/agent/sync/upload
- * Ingests one chunk. Idempotent: re-uploading the same chunk updates the same
- * rows instead of duplicating them. Invalid rows are rejected individually.
+ * Ingests one chunk. Receipt-capable Agents get chunk-processing idempotency;
+ * legacy Agents retain record_key fact-row idempotency. Invalid rows are
+ * rejected individually.
  */
 export const POST = withAgent(schema, async ({ agent, body }) => {
-  await assertAgentSyncAllowed(agent.agentId);
   assertPcucodeMatches(agent, body.pcucode);
+  const identity = resolveUploadChunkIdentity(body);
+
+  if (identity) {
+    const result = await ingestIdempotentUsageChunk({
+      agent,
+      batchRef: body.batchRef,
+      chunkRef: identity.chunkRef,
+      payloadSha256: identity.payloadSha256,
+      pcucode: body.pcucode,
+      sourceVersion: body.sourceVersion,
+      drugs: body.drugs,
+      records: body.records,
+    });
+    return NextResponse.json(result);
+  }
+
+  await assertAgentSyncAllowed(agent.agentId);
   await assertCurrentGlobalSyncStartDateRecordsAllowed(body.records);
 
   const [batch] = await db
