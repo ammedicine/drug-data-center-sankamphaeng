@@ -1110,7 +1110,9 @@ SYNC.md
 
 # 36. Global Sync Start Date — Approved Architecture Contract
 
-> สถานะ: อนุมัติสถาปัตยกรรมแล้ว แต่ยังไม่ได้ implement ใน application, Agent หรือ database
+> สถานะ: Phase B implement เฉพาะ Central policy persistence, nullable Agent acknowledgement
+> และ additive heartbeat contract แล้ว; Agent application, UI, activation/enforcement, backfill
+> และ quarantine telemetry ยังไม่ implement
 
 ระบบจะมี **Global Sync Start Date เพียงค่าเดียวสำหรับทั้งอำเภอ** และเฉพาะ `SUPER_ADMIN`
 เท่านั้นที่สร้างหรือเปลี่ยนนโยบายได้ Central เป็นเจ้าของ desired policy โดยแยกสถานะ

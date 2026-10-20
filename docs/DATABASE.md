@@ -69,9 +69,9 @@ TiDB เพิ่งรองรับ FK และมีต้นทุนต�
 - **อย่า aggregate ใน Node** — ใช้ SUM/COUNT/GROUP BY ในฐานข้อมูลเสมอ (`src/lib/services/reports.ts`)
 - **`agent_request_nonces` โตเร็ว** — มี cleanup แบบสุ่ม 2% ต่อ request ตัดที่ 2 เท่าของ skew window
 
-## Global Sync Start Date storage (approved, future migration)
+## Global Sync Start Date storage (Central foundation, migration 0012)
 
-Phase เอกสารนี้ยัง **ไม่สร้าง migration** โครงสร้างที่อนุมัติให้ใช้ของเดิมก่อน ไม่สร้าง subsystem คู่ขนาน:
+Phase B ใช้โครงสร้างเดิมโดยไม่สร้าง subsystem คู่ขนาน:
 
 - เก็บนโยบายเดียวใน `system_settings.setting_key = 'global_sync_start_date_policy'`
 - JSON value มี schema version, desired date/revision, active date/revision, ผู้แก้และเวลา
@@ -80,9 +80,13 @@ Phase เอกสารนี้ยัง **ไม่สร้าง migration*
 - update policy ต้อง lock/compare-and-set ใน transaction การบันทึกวันเดิมไม่เพิ่ม revision
   และ revision ห้ามลดลงแม้เป็น rollback
 
-Migration ใน phase implementation จะเพิ่ม nullable acknowledgement fields ที่ `agents` สำหรับ
-applied global revision/time และ quarantine summary/report time โดยต้องไม่แก้ Agent identity,
-facility binding, credential, enrollment, watermark, pause state หรือ update state เดิม
+Migration `0012_global_sync_start_date.sql` เพิ่มเพียง nullable acknowledgement fields
+`agents.global_sync_start_date_applied_revision` และ `agents.global_sync_start_date_applied_at`
+จึงใช้กับ row เดิมได้โดยไม่ backfill และไม่แก้ Agent identity, facility binding, credential,
+enrollment, watermark, pause state หรือ update state เดิม ไม่มี policy row ถูก seed
+
+Quarantine summary/report fields ถูกเลื่อนไป phase ภายหลังพร้อม Agent telemetry และต้องผ่าน review
+แยกต่างหาก ไม่ได้ prebuild ไว้ใน migration 0012
 
 Historical backfill มี prerequisite migration แยกสำหรับ upload chunk receipt โดย unique key ระดับ
 authenticated Agent + batch + stable chunk reference เพื่อไม่ให้ retry หลัง timeout เพิ่ม batch counter

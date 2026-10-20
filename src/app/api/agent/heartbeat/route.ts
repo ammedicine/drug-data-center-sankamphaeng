@@ -1,7 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { z } from "zod";
 
+import { heartbeatSchema } from "@/lib/agent-auth/heartbeat-schema";
 import { withAgent } from "@/lib/agent-auth/route";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
@@ -12,88 +12,28 @@ import {
   deliverUpdateCommand,
   openCommandsFor,
 } from "@/lib/services/update-commands";
+import {
+  buildGlobalSyncStartDateHeartbeatConfig,
+  globalSyncStartDateAcknowledgementService,
+  globalSyncStartDatePolicyService,
+} from "@/lib/services/global-sync-policy";
 import { parseBuildId, parseCapabilities } from "@/lib/shared/agent-build";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const schema = z.object({
-  agentVersion: z.string().max(40),
-  hostname: z.string().max(120),
-  installationId: z.string().max(64),
-  status: z.enum(["ONLINE", "SYNCING", "ERROR"]),
-  jhcisConnected: z.boolean(),
-  pcucode: z.string().max(5).nullable(),
-  mysqlVersion: z.string().max(40).nullable().optional(),
-  jhcisVersion: z.string().max(40).nullable().optional(),
-  schemaReport: z.record(z.unknown()).nullable().optional(),
-  lastError: z.string().max(2000).nullable().optional(),
-  pendingBatches: z.number().int().min(0).optional(),
-  syncRanAt: z.string().datetime().nullable().optional(),
-
-  /* ------------------------------------------ what this build is and can do */
-  /**
-   * Short source commit. Several v1.1.7 builds all reported the same version
-   * and the centre could not tell them apart - including one that destroyed
-   * Thai text. Optional, because an older agent sends none of this.
-   */
-  buildId: z.string().max(40).nullable().optional(),
-  capabilities: z.record(z.boolean()).nullable().optional(),
-  /** the earliest dispensing date this agent is configured to collect */
-  syncStartDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .nullable()
-    .optional(),
-
-  /* ------------------------------------------- acknowledging control state */
-  /** what the agent is actually doing about the centre's instruction */
-  effectiveSyncState: z.enum(["RUNNING", "PAUSE_REQUESTED", "PAUSED"]).nullable().optional(),
-  /** the highest control revision this agent has acted on */
-  appliedControlRevision: z.number().int().min(0).nullable().optional(),
-
-  network: z
-    .object({
-      macAddress: z.string().max(32).nullable(),
-      ipAddress: z.string().max(45).nullable(),
-      interfaceName: z.string().max(80).nullable(),
-    })
-    .nullable()
-    .optional(),
-
-  /* ------------------------------------------------- software update report */
-  /**
-   * How the agent's updater is getting on - a command it was handed, or its
-   * own scheduled check. Optional: 1.1.7 - 1.1.9 send nothing here. Sent by
-   * newer agents only when it changed, so an idle fleet costs no writes.
-   */
-  update: z
-    .object({
-      commandId: z.string().max(30).nullable().optional(),
-      state: z.string().max(24).nullable().optional(),
-      targetVersion: z.string().max(40).nullable().optional(),
-      errorCode: z.string().max(40).nullable().optional(),
-      errorMessage: z.string().max(400).nullable().optional(),
-      errorAt: z.string().max(40).nullable().optional(),
-      succeededAt: z.string().max(40).nullable().optional(),
-      checkedAt: z.string().max(40).nullable().optional(),
-      task: z.record(z.unknown()).nullable().optional(),
-    })
-    .nullable()
-    .optional(),
-});
 
 /**
  * POST /api/agent/heartbeat
  * Liveness plus the JHCIS compatibility report. Never carries patient data and
  * never carries JHCIS credentials.
  */
-export const POST = withAgent(schema, async ({ agent, body }) => {
+export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
   // A heartbeat from an agent whose JHCISDB reports a different pcucode means a
   // misconfigured or swapped installation - refuse it loudly.
   if (body.pcucode) assertPcucodeMatches(agent, body.pcucode);
 
   const now = new Date();
+  const globalSyncStartDatePolicy = await globalSyncStartDatePolicyService.get();
   // Validated rather than trusted: this string is shown on an operator's
   // screen, and a field the agent controls should never be able to carry
   // markup or anything longer than a commit hash.
@@ -182,6 +122,18 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
     })
     .where(eq(agents.id, agent.agentId));
 
+  if (
+    body.appliedGlobalSyncStartDateRevision !== undefined &&
+    body.appliedGlobalSyncStartDateRevision !== null
+  ) {
+    await globalSyncStartDateAcknowledgementService.record({
+      authenticatedAgentId: agent.agentId,
+      reportedRevision: body.appliedGlobalSyncStartDateRevision,
+      policy: globalSyncStartDatePolicy,
+      appliedAt: now,
+    });
+  }
+
   // The update channel. The agent's report is applied first, so a SUCCESS it
   // sends on the heartbeat after an install closes the command before the
   // same request could hand the command back out again. Delivery is only
@@ -228,6 +180,7 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
       syncControlState: agent.syncControlState,
       controlRevision: agent.controlRevision,
       pauseReason: agent.pauseReason,
+      ...buildGlobalSyncStartDateHeartbeatConfig(globalSyncStartDatePolicy),
       // A remote update, if one is owed and a rollout slot was free. Null is
       // the ordinary answer. Older agents never read this key.
       updateCommand,

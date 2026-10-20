@@ -117,11 +117,32 @@ heartbeat รอบถัดไป (**ปกติภายใน 30 วิน�
 `GET /api/reports/drug-usage/export?from&to&drugType&q&facility` → CSV (UTF-8 + BOM)
 ใช้ session ของผู้ใช้ และผ่าน `resolveFacilityScope()` เหมือนหน้าจอทุกประการ
 
-## 5. Global Sync Start Date protocol (approved, not implemented)
+## 5. Global Sync Start Date protocol (additive Central contract implemented)
 
-Phase ถัดไปจะขยาย heartbeat แบบ additive โดย Agent ที่รองรับส่ง capability
-`remoteSyncStartDate: true`, effective `syncStartDate`, applied global policy revision และ
-quarantine summary ส่วน Central ส่ง desired date/revision และ active date/revision กลับใน config
+`POST /api/agent/heartbeat` รับ field optional เพิ่มเติมโดยไม่เปลี่ยน contract เดิม:
+
+```json
+{"appliedGlobalSyncStartDateRevision": 3}
+```
+
+ค่าต้องเป็น positive integer หรือ `null` และ Central บันทึกเฉพาะ revision ที่ใหม่กว่า โดยผูกกับ
+Agent identity จาก HMAC credential ที่ authenticate แล้ว ไม่รับ Agent/facility identity จาก body
+เมื่อมี policy response `config` จะมี field optional:
+
+```json
+{
+  "globalSyncStartDatePolicy": {
+    "schemaVersion": 1,
+    "desiredDate": "2025-10-01",
+    "desiredRevision": 3,
+    "activeDate": null,
+    "activeRevision": 0
+  }
+}
+```
+
+ถ้าไม่มี policy row จะ omit `globalSyncStartDatePolicy` และไม่ต้อง acknowledge Phase B ยังไม่เปลี่ยน
+Agent, ไม่ activate/enforce floor และยังไม่รับ quarantine telemetry
 
 - `syncStartDate` capability/field เดิมไม่ถูกเปลี่ยนความหมาย
 - ถ้าไม่มี global policy row Central ต้องไม่บังคับให้ Agent acknowledge และ Agent ต้องทำงานแบบ
@@ -130,7 +151,8 @@ quarantine summary ส่วน Central ส่ง desired date/revision แล�
 - policy revision เป็นคนละค่ากับ pause `controlRevision`
 - identity ของ acknowledgement มาจาก HMAC credential ที่ผ่านการยืนยันแล้วเท่านั้น
 
-เมื่อมี active floor แล้ว endpoint `sync/start` และ `sync/upload` ต้องตรวจ floor ก่อนเปลี่ยน
+ใน phase enforcement ภายหลัง เมื่อมี active floor แล้ว endpoint `sync/start` และ `sync/upload`
+ต้องตรวจ floor ก่อนเปลี่ยน
 batch, counter, reject หรือ usage state ถ้า request/chunk มีข้อมูลต่ำกว่า active floor ให้ปฏิเสธทั้งชุด:
 
 ```http

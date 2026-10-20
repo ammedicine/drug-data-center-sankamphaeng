@@ -255,6 +255,10 @@ export const agents = mysqlTable(
     capabilities: json("capabilities"),
     /** earliest dispensing date the agent is configured to collect */
     syncStartDate: date("sync_start_date", { mode: "string" }),
+    /** highest district-wide start-date policy revision durably applied by this Agent */
+    globalSyncStartDateAppliedRevision: int("global_sync_start_date_applied_revision"),
+    /** when the Agent reported first applying that revision */
+    globalSyncStartDateAppliedAt: datetime("global_sync_start_date_applied_at"),
 
     /* ------------------------------------------ software update reporting */
     /**

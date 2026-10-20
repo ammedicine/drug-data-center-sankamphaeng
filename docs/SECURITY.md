@@ -107,7 +107,7 @@ JHCIS password ไม่เคยออกจากเครื่อง Agent �
 - **rate limit เก็บใน memory** ของแต่ละ instance ไม่ใช่ทั้งคลัสเตอร์ (ระบุไว้แล้วใน
   `rate-limit.ts`) ถ้าเปิดสู่อินเทอร์เน็ตจริงจังควรย้ายไป Vercel KV / Upstash
 
-## Global Sync Start Date authority (approved, not implemented)
+## Global Sync Start Date authority (foundation implemented; privileged actions pending)
 
 - เฉพาะ active `SUPER_ADMIN` เท่านั้นที่สร้าง desired policy, activate enforcement, อนุมัติ
   offline override, ขอ historical backfill หรือ rollback ได้ UI ที่ซ่อนปุ่มไม่พอ; server action
