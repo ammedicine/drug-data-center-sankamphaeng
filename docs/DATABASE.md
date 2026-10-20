@@ -68,3 +68,22 @@ TiDB เพิ่งรองรับ FK และมีต้นทุนต�
   แต่ประวัติการจ่ายต้องคงอยู่ (JHCIS_INTEGRATION §15)
 - **อย่า aggregate ใน Node** — ใช้ SUM/COUNT/GROUP BY ในฐานข้อมูลเสมอ (`src/lib/services/reports.ts`)
 - **`agent_request_nonces` โตเร็ว** — มี cleanup แบบสุ่ม 2% ต่อ request ตัดที่ 2 เท่าของ skew window
+
+## Global Sync Start Date storage (approved, future migration)
+
+Phase เอกสารนี้ยัง **ไม่สร้าง migration** โครงสร้างที่อนุมัติให้ใช้ของเดิมก่อน ไม่สร้าง subsystem คู่ขนาน:
+
+- เก็บนโยบายเดียวใน `system_settings.setting_key = 'global_sync_start_date_policy'`
+- JSON value มี schema version, desired date/revision, active date/revision, ผู้แก้และเวลา
+  รวมถึง backfill plan แบบ optional
+- การไม่มี row นี้คือสถานะ legacy ที่ถูกต้อง ไม่ใช่ migration error และไม่ต้อง seed ค่าเริ่มต้น
+- update policy ต้อง lock/compare-and-set ใน transaction การบันทึกวันเดิมไม่เพิ่ม revision
+  และ revision ห้ามลดลงแม้เป็น rollback
+
+Migration ใน phase implementation จะเพิ่ม nullable acknowledgement fields ที่ `agents` สำหรับ
+applied global revision/time และ quarantine summary/report time โดยต้องไม่แก้ Agent identity,
+facility binding, credential, enrollment, watermark, pause state หรือ update state เดิม
+
+Historical backfill มี prerequisite migration แยกสำหรับ upload chunk receipt โดย unique key ระดับ
+authenticated Agent + batch + stable chunk reference เพื่อไม่ให้ retry หลัง timeout เพิ่ม batch counter
+หรือ reject ซ้ำ ตาราง receipt ไม่ใช่ prerequisite ของ forward-date policy และยังไม่ถูกสร้างใน phase นี้

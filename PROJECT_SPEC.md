@@ -1108,6 +1108,52 @@ SYNC.md
 
 ---
 
+# 36. Global Sync Start Date — Approved Architecture Contract
+
+> สถานะ: อนุมัติสถาปัตยกรรมแล้ว แต่ยังไม่ได้ implement ใน application, Agent หรือ database
+
+ระบบจะมี **Global Sync Start Date เพียงค่าเดียวสำหรับทั้งอำเภอ** และเฉพาะ `SUPER_ADMIN`
+เท่านั้นที่สร้างหรือเปลี่ยนนโยบายได้ Central เป็นเจ้าของ desired policy โดยแยกสถานะ
+`desired` ออกจากวันที่และ revision ที่ `active` และกำลังบังคับใช้จริง revision ของนโยบายนี้
+เป็นคนละลำดับกับ pause `controlRevision` และต้องเพิ่มขึ้นอย่างเดียว
+
+## 36.1 Legacy bootstrap และ capability
+
+- ถ้ายังไม่มี global policy row ระบบอยู่ใน legacy operation: Agent ใช้ local/default
+  `syncStartDate` เดิม ซิงก์ตามปกติ และไม่ต้องส่ง remote acknowledgement
+- capability ใหม่คือ `remoteSyncStartDate`; capability `syncStartDate` เดิมยังคงความหมายเดิม
+- forward-date operation ใช้ `remoteSyncStartDate` ได้โดยไม่ต้องรอ `idempotentUploadChunk`
+- historical backfill เปิดได้ต่อเมื่อ Agent รองรับทั้ง `remoteSyncStartDate` และ
+  `idempotentUploadChunk`
+- Agent รุ่นเก่าหรือออฟไลน์ที่ยังไม่รองรับต้องคง desired state เป็น paused จนกว่าจะอัปเกรด
+  รับ policy และรายงานว่า applied แล้ว
+
+## 36.2 การเลื่อนวันและการรักษาข้อมูล
+
+- การเปลี่ยนนโยบายไม่ลบประวัติใน Central โดยอัตโนมัติ และ purge เป็น workflow แยกต่างหาก
+- เลื่อนไปข้างหน้า: เพิ่ม extraction floor, ไม่ reset watermark, เก็บแถวเก่าใน Central และย้าย
+  queue item ที่ต่ำกว่า floor ไป quarantine โดยไม่ลบ
+- เลื่อนย้อนหลัง: ไม่ backfill อัตโนมัติและไม่เลื่อน watermark ย้อนหลัง การกู้ข้อมูลย้อนหลังต้องใช้
+  `MANUAL_RANGE` แบบ explicit ตามด้วย reconciliation
+- Central บังคับเฉพาะ active floor ก่อนแก้ batch/upload state ถ้าข้อมูลต่ำกว่า floor ให้ปฏิเสธ
+  ทั้ง chunk ด้วย HTTP `503`, code `GLOBAL_SYNC_START_DATE_ENFORCED` และ
+  `Retry-After: 45` เพื่อให้ retry ได้โดยไม่สูญหาย
+
+## 36.3 ขอบเขตความปลอดภัยและการปล่อยรุ่น
+
+- JHCISDB ยังเป็น strictly read-only และ facility/Agent identity ต้องมาจาก credential ที่
+  authenticate ฝั่ง server ไม่ใช่ IP, MAC หรือค่า `facility_id` จาก frontend
+- ต้องรักษา Agent ID, credential, enrollment, settings, queue/quarantine, updater state,
+  pause/control state และ audit history เดิม
+- release/tag `v1.1.16` ที่เผยแพร่แล้วเป็น immutable; รุ่น Agent ที่วางแผนถัดไปคือ `v1.1.17`
+  แต่ห้ามสร้าง tag หรือ release ก่อนผ่าน staged rollout และ owner approval
+
+รายละเอียดแยกตาม concern อยู่ใน `docs/ARCHITECTURE.md`, `docs/API.md`,
+`docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`, `docs/SECURITY.md` และ
+`docs/DEPLOYMENT.md` ซึ่งเป็น shared, tool-neutral source of truth
+
+---
+
 # FINAL REQUIREMENT
 
 อย่าเพียงสร้าง UI mockup

@@ -106,3 +106,25 @@ Log ผ่านตัวกรอง redact — คำที่เข้าข�
 `SchemaInspector` ตรวจ schema จริงทุกครั้งก่อนดึงข้อมูล และเลือกคอลัมน์จากรายการผู้สมัคร
 (จำนวนจ่าย: `unit` → `qty` → `quantity` → `amount` …) ถ้าหาไม่พบ Agent จะ **หยุดและรายงาน**
 ว่าต้องตรวจคอลัมน์ใด ไม่เดา ไม่ fail เงียบ ผลการตรวจถูกส่งขึ้น Central ให้ผู้ดูแลเห็นในหน้า Agent
+
+## 8. Global Sync Start Date compatibility (approved, not implemented)
+
+Agent รุ่นที่รองรับในอนาคตจะประกาศ capability `remoteSyncStartDate` รับ desired policy จาก
+heartbeat บันทึก effective `syncStartDate` กับ applied revision แบบ temp+rename แล้วจึงรายงาน
+acknowledgement กลับ Central revision นี้แยกจาก pause `controlRevision`
+
+- ไม่มี policy จาก Central = ใช้ local/default `syncStartDate` เดิมและซิงก์ตามปกติ ไม่ต้อง ack
+- `syncStartDate` เดิมยังเป็นค่าที่ใช้จริงและต้องอ่านได้เมื่อ downgrade; GUI/Tray ไม่ใช่ authority
+  เพียงตัวเดียวเมื่อ managed policy เริ่มแล้ว
+- เลื่อนไปข้างหน้าต้อง quarantine queue item ต่ำกว่า floor โดยไม่ลบ ไม่ reset watermark และไม่ลบ
+  Central history
+- เลื่อนย้อนหลังไม่เริ่ม backfill เอง ต้องรอคำสั่ง `MANUAL_RANGE` แบบ explicit และ reconciliation
+- historical backfill ต้องมีทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk`; forward move
+  ไม่ต้องรอ `idempotentUploadChunk`
+
+การอัปเกรดต้องรักษา `agentId`, credential, enrollment, `%ProgramData%\SDCAgent`, settings,
+queue/quarantine, pause/control state และ updater state เดิม Agent รุ่นเก่าหรือออฟไลน์ต้องคง
+centrally paused จนกว่าอัปเกรด รับ policy และรายงาน applied แล้ว JHCIS ยังเป็น read-only ทุกกรณี
+
+release/tag `v1.1.16` ที่เผยแพร่แล้วห้ามแก้ รุ่นที่วางแผนสำหรับ capability นี้คือ `v1.1.17`
+แต่ phase เอกสารนี้ไม่เปลี่ยน package/installer version และไม่สร้าง release

@@ -75,3 +75,39 @@ Web              ── aggregate ในฐานข้อมูล แล้ว
   จริงเพื่อคำนวณ HMAC การเก็บ hash แล้วใช้ hash เป็นกุญแจเท่ากับไม่ได้ป้องกันอะไรเลย
 - **ไม่ใช้ FOREIGN KEY บน TiDB** — รักษา integrity ที่ชั้น service แทน เพราะ FK บน TiDB
   เพิ่งรองรับและมีต้นทุนต่อ bulk upsert หลายล้านแถว (ดู docs/DATABASE.md)
+
+## 5. Global Sync Start Date (approved, not implemented)
+
+Global Sync Start Date เป็นนโยบายเดียวระดับอำเภอที่ Central เป็นเจ้าของและ `SUPER_ADMIN`
+เท่านั้นที่เปลี่ยนได้ State machine แยกสองสถานะ:
+
+- **desired date/revision** — ค่าที่ Agent ต้องรับและบันทึกอย่าง durable
+- **active date/revision** — ค่าที่ Central ใช้บังคับ ingest หลังผ่าน rollout gate
+
+revision นี้แยกจาก pause `controlRevision` โดยเด็ดขาด การบันทึกวันเดิมไม่สร้าง revision ใหม่
+และ rollback ต้องสร้าง revision ที่สูงขึ้น ไม่ลดเลขเดิม
+
+```
+SUPER_ADMIN sets desired policy
+        │
+        ▼
+Central heartbeat delivery ──► capable Agent persists/applies ──► acknowledgement
+        │                                                        │
+        └──────── fleet readiness + explicit approval ◄──────────┘
+                                  │
+                                  ▼
+                         activate Central floor
+```
+
+ถ้าไม่มี policy row flow นี้ไม่เริ่ม: Agent เดิมใช้ local/default `syncStartDate`, ซิงก์ตามปกติ
+และไม่ต้อง acknowledge การรองรับใช้ capability `remoteSyncStartDate`; `syncStartDate` เดิม
+ยังคงความหมายเดิม
+
+การ activate ไม่จำเป็นต้องรอ Agent ออฟไลน์ทุกเครื่อง แต่ override ทำได้เมื่อ fleet มี desired
+pause, ไม่มี active Central batch, `SUPER_ADMIN` ยืนยันพร้อมเหตุผล และมี audit เท่านั้น
+Agent ที่ยัง pending/unsupported ต้องคง paused จนกว่าจะอัปเกรด รับ policy และรายงาน applied
+
+การเลื่อนวันไม่ลบ Central history และไม่ใช่ purge การเลื่อนไปข้างหน้ารักษา watermark กับแถวเดิม
+ส่วนรายการคิวต่ำกว่า floor ไป quarantine การเลื่อนย้อนหลังเพียงเปิดช่วงที่ยอมรับได้; historical
+recovery ต้องเป็น `MANUAL_RANGE` + reconciliation แบบ explicit และต้องมีทั้ง
+`remoteSyncStartDate` กับ `idempotentUploadChunk`

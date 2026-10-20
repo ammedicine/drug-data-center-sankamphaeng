@@ -106,3 +106,17 @@ JHCIS password ไม่เคยออกจากเครื่อง Agent �
   ปลอมใน JHCIS ได้อยู่แล้ว การปิดสิทธิ์เขียนจะทำให้เจ้าหน้าที่ทั่วไปรัน agent ไม่ได้
 - **rate limit เก็บใน memory** ของแต่ละ instance ไม่ใช่ทั้งคลัสเตอร์ (ระบุไว้แล้วใน
   `rate-limit.ts`) ถ้าเปิดสู่อินเทอร์เน็ตจริงจังควรย้ายไป Vercel KV / Upstash
+
+## Global Sync Start Date authority (approved, not implemented)
+
+- เฉพาะ active `SUPER_ADMIN` เท่านั้นที่สร้าง desired policy, activate enforcement, อนุมัติ
+  offline override, ขอ historical backfill หรือ rollback ได้ UI ที่ซ่อนปุ่มไม่พอ; server action
+  ต้องตรวจสิทธิ์ซ้ำและบันทึก audit พร้อม actor, revision, วันเดิม/ใหม่ และเหตุผล
+- desired policy กับ active enforcement ต้องแยกกัน เพื่อไม่ให้ค่าที่ยัง rollout ไม่ครบถูกบังคับใช้
+- offline/pending override ทำได้เมื่อ desired sync state เป็น paused, ไม่มี active Central batch,
+  `SUPER_ADMIN` ยืนยันพร้อมเหตุผล และมี audit เท่านั้น Agent นั้นยังต้อง paused จนกว่าจะ applied
+- acknowledgement และ quarantine report ต้องผูกกับ Agent identity จาก HMAC credential ฝั่ง server
+  ห้ามเชื่อ `agentId`/`facility_id` จาก frontend และห้าม infer facility จาก IP หรือ MAC
+- การเปลี่ยน policy ไม่อนุญาตให้ลบ Central history, credential, enrollment, control history หรือ
+  audit history; purge ยังเป็น destructive operation แยกที่ต้องได้รับ owner approval
+- JHCIS account ต้องคง read-only และ policy/backfill ห้ามเพิ่ม statement ที่เขียน JHCISDB

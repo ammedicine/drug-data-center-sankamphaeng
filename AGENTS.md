@@ -84,11 +84,15 @@ When source, Agent, or build behavior changes, run `npm run lint`, `npm run type
 and `npm run build`; also run `npm --prefix agent run typecheck` and relevant Agent/GUI checks.
 Review the final diff and confirm it contains no secrets before any commit.
 
-## Planned Global Sync Start Date
+## Global Sync Start Date
 
-Do not implement this without a separate approved task. The intended direction is one global date,
-controlled only by `SUPER_ADMIN` in Central and sent to every Agent for durable application. A date
-change must not delete existing Central history; moving it backward may require targeted,
-idempotent backfill, while moving it forward must not remove stored rows. Keep the existing
-SUPER_ADMIN deletion workflow separate, prevent duplicates, preserve backward compatibility, and
-use the existing pause/resume controls for staged rollout.
+The architecture is approved but is not implemented yet. Treat `PROJECT_SPEC.md` §36 and the
+relevant sections of `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`, `docs/SYNC.md`,
+`docs/AGENT.md`, `docs/SECURITY.md`, and `docs/DEPLOYMENT.md` as the shared source of truth. Do not
+duplicate or redefine that protocol here.
+
+Implementation requires a separately approved phase. Preserve legacy operation when no policy
+exists, keep desired policy separate from active enforcement and pause control, preserve all
+Central history and Agent state, and keep purge separate. Forward operation must remain compatible
+with older Agents; historical backfill additionally requires the approved idempotent chunk gate.
+The published `v1.1.16` release/tag is immutable; `v1.1.17` is planned but does not exist yet.

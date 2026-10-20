@@ -116,3 +116,34 @@ heartbeat รอบถัดไป (**ปกติภายใน 30 วิน�
 
 `GET /api/reports/drug-usage/export?from&to&drugType&q&facility` → CSV (UTF-8 + BOM)
 ใช้ session ของผู้ใช้ และผ่าน `resolveFacilityScope()` เหมือนหน้าจอทุกประการ
+
+## 5. Global Sync Start Date protocol (approved, not implemented)
+
+Phase ถัดไปจะขยาย heartbeat แบบ additive โดย Agent ที่รองรับส่ง capability
+`remoteSyncStartDate: true`, effective `syncStartDate`, applied global policy revision และ
+quarantine summary ส่วน Central ส่ง desired date/revision และ active date/revision กลับใน config
+
+- `syncStartDate` capability/field เดิมไม่ถูกเปลี่ยนความหมาย
+- ถ้าไม่มี global policy row Central ต้องไม่บังคับให้ Agent acknowledge และ Agent ต้องทำงานแบบ
+  legacy ต่อด้วย local/default `syncStartDate`
+- field ใหม่ต้องเป็น optional เพื่อให้ Agent รุ่นเก่าและ Central ที่อยู่ระหว่าง staged rollout ทำงานร่วมกันได้
+- policy revision เป็นคนละค่ากับ pause `controlRevision`
+- identity ของ acknowledgement มาจาก HMAC credential ที่ผ่านการยืนยันแล้วเท่านั้น
+
+เมื่อมี active floor แล้ว endpoint `sync/start` และ `sync/upload` ต้องตรวจ floor ก่อนเปลี่ยน
+batch, counter, reject หรือ usage state ถ้า request/chunk มีข้อมูลต่ำกว่า active floor ให้ปฏิเสธทั้งชุด:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: 45
+Content-Type: application/json
+
+{"error":{"code":"GLOBAL_SYNC_START_DATE_ENFORCED","message":"..."}}
+```
+
+ห้ามตอบ `2xx` พร้อมกรอง record ต่ำกว่า floor เงียบ ๆ และห้ามใช้ `4xx` เพราะ Agent ปัจจุบัน
+ถือ `4xx` ถาวรและอาจย้ายคิวไป failed ส่วน `503` + `Retry-After` รักษา retry compatibility
+
+Historical backfill จะใช้ `MANUAL_RANGE`/reconciliation ที่มีอยู่ ไม่สร้าง push API จาก Central
+และเปิดได้เมื่อ Agent รายงานทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk` เท่านั้น
+forward-date operation ไม่ต้องรอ capability หลัง

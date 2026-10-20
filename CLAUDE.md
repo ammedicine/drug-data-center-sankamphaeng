@@ -2,6 +2,9 @@
 
 > ไฟล์นี้คือ working memory ของ agent ที่พัฒนา repo นี้
 > **อ่านไฟล์นี้ก่อนเริ่มงานทุกครั้ง และอัปเดตทุกครั้งที่จบ phase**
+> Shared, tool-neutral source of truth อยู่ที่ `PROJECT_SPEC.md` และ `docs/*.md` ถ้าข้อความ
+> ในไฟล์นี้ขัดกัน ให้หยุดตรวจ implementation แล้วแก้เอกสาร shared ก่อน ไม่สร้าง architecture
+> ที่ใช้ได้เฉพาะ Claude Code
 
 ## 0. กฎเหล็กของการทำงาน (ตัวเราเอง)
 
@@ -65,7 +68,9 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
   -> `gh release create v1.0.2 <setup.exe>` — ขั้นตอนเต็มอยู่ใน `.NOTES` ของ build.ps1
 
 ### การอัปเกรดทับเวอร์ชันเก่า (ทำในตัวติดตั้งแล้ว)
-1. `taskkill /F /T /IM SDCAgent.exe` ปิดทั้ง tray และ node.exe ที่เป็นลูก
+1. ใช้ owned-process logic ของ installer (`stop-owned-agent.ps1`) ปิดเฉพาะ process ของ Agent
+   โดยต้องข้ามสาย ancestor ของ installer/updater เอง **ห้าม `taskkill` แบบ global ตามชื่อ image**
+   (วิธี global เป็นบทเรียนจากตัวติดตั้งรุ่นเก่าและเลิกใช้แล้ว)
 2. ลบ scheduled task เก่าถ้ามี
 3. รัน uninstaller ของเวอร์ชันเดิมแบบ `/VERYSILENT` แล้วค่อยวางไฟล์ใหม่
 4. **ห้ามแตะ `%ProgramData%\SDCAgent`** (คิวที่ยังส่งไม่สำเร็จ + credential)
@@ -120,7 +125,7 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
   drizzle/            migrations (generated)
 agent/                Local Agent (Node + TS, Windows service)
   src/jhcis/          adapter: connection, schema-inspector, repositories, extractor
-  src/queue/          SQLite offline queue
+  src/queue/          JSON file offline queue (temp+rename; pending/failed/quarantine)
   src/central/        HTTPS client (HMAC signing)
   src/cli.ts          doctor | enroll | sync | run
 ```
@@ -284,7 +289,11 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 - บัญชีที่สมัครเองจะ **inactive จนกว่าผู้ดูแลอนุมัติ** ที่ `/admin/users` (ถ้าเปิดใช้ทันทีเท่ากับไม่มี facility isolation)
 - login ด้วย **user id** หรืออีเมลก็ได้ (บัญชีเก่าที่ seed ไว้ยังใช้อีเมลได้)
 
-## 4. สถานะการทำงาน (อัปเดตทุกครั้ง)
+## 4. เหตุการณ์สำคัญในอดีต (historical snapshot — ไม่ใช่สถานะปัจจุบัน)
+
+รายการด้านล่างบันทึก milestone ช่วงเริ่มโครงการเพื่อรักษาบทเรียนเดิม อย่าใช้เป็น release status,
+deployment status หรือ implementation checklist ปัจจุบัน ให้ตรวจ Git, implementation และ shared docs
+แทน ข้อความ “ยังไม่ได้ทดสอบ” ด้านล่างเป็นสถานะ ณ วันที่บันทึก ไม่ใช่ข้อสรุปของระบบปัจจุบัน
 
 - [x] PHASE 0 — สำรวจ JHCISDB จริง + บันทึก schema (§3)
 - [x] PHASE 1 — scaffold Next.js 15 + Drizzle schema (13 ตาราง) + migration `drizzle/0000_*.sql`
@@ -298,8 +307,8 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 - [x] PHASE 9 — Admin monitoring (/admin/monitoring, /admin/agents, /sync) + Sync Now
 - [x] PHASE 10 — UI/UX (design system + component ตาม §19)
 - [x] PHASE 11 — security checklist + unit test 20 ข้อ (docs/SECURITY.md)
-- [x] PHASE 12 — เชื่อม TiDB Cloud จริงแล้ว (migrate + seed + sync + รายงาน ผ่านครบวง)
-      เหลือ deploy ขึ้น Vercel
+- [x] PHASE 12 — ณ เวลาที่บันทึก เชื่อม TiDB Cloud จริงแล้ว (migrate + seed + sync + รายงาน ผ่านครบวง)
+      และใน snapshot นั้นยังเหลือ deploy ขึ้น Vercel
 - [x] PHASE 13 — สถานะตามจริง + realtime (ดู §8), หน้าจอ agent ใหม่, ท่อส่งแบบ producer/consumer (§9)
 
 ### ผลทดสอบกับของจริง (2026-09-04, รอบเต็ม)
@@ -351,14 +360,14 @@ npm run lint / typecheck / test / build
 cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 ```
 
-## 6. เอกสารในโปรเจค (มีเท่านี้ พอ)
+## 6. เอกสารในโปรเจค
 
 | ไฟล์ | เนื้อหา |
 |---|---|
-| AGENTS.md | กฎสำหรับ AI agent (ห้ามแก้เนื้อหาเดิม) |
-| PROJECT_SPEC.md | requirement หลัก (ห้ามแก้) |
+| AGENTS.md | กฎสั้นสำหรับ Codex และการทำงานร่วมกับ Claude Code; อ้าง shared docs |
+| PROJECT_SPEC.md | requirement และ architecture contract หลัก (shared source of truth) |
 | JHCIS_INTEGRATION.md | requirement JHCIS (ห้ามแก้) |
-| CLAUDE.md | ไฟล์นี้ — working memory + schema จริง + สถานะ |
+| CLAUDE.md | ไฟล์นี้ — working memory + schema จริง + บทเรียน historical |
 | docs/ARCHITECTURE.md | ภาพรวมระบบ + data flow |
 | docs/API.md | Central API + HMAC spec |
 | docs/DATABASE.md | schema กลาง + index |
@@ -366,6 +375,19 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 | docs/SYNC.md | sync pipeline + idempotency |
 | docs/AGENT.md | ติดตั้ง/ใช้งาน Agent |
 | docs/DEPLOYMENT.md | Vercel + TiDB |
+
+### Global Sync Start Date (approved architecture; ยังไม่ implement)
+
+รายละเอียด authoritative อยู่ที่ `PROJECT_SPEC.md` §36 และหัวข้อ Global Sync Start Date ใน
+`docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`,
+`docs/SECURITY.md`, `docs/DEPLOYMENT.md` อย่าคัดลอก protocol มาไว้ที่นี่
+
+- Central/`SUPER_ADMIN` เป็น authority เมื่อ managed policy เริ่มแล้ว; Tray/GUI ยังควบคุมตารางเวลา
+  ในเครื่องแต่ **ไม่ใช่ authority เดียวของ `syncStartDate`**
+- ไม่มี policy row = local/default `syncStartDate` เดิมยัง valid, sync ต่อปกติ, ไม่ต้อง remote ack
+- desired กับ active แยกกัน และ policy revision ไม่ใช่ pause `controlRevision`
+- forward move ไม่ลบ history/ไม่ reset watermark; backward move ไม่ backfill อัตโนมัติ
+- `v1.1.16` ที่เผยแพร่แล้ว immutable; `v1.1.17` เป็นเพียงรุ่นที่วางแผน ยังห้ามสร้างใน phase เอกสาร
 
 ## 7. กติกาเวลาทดสอบในเครื่อง
 

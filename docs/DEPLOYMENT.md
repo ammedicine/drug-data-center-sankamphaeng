@@ -75,3 +75,26 @@ git push        # Vercel build อัตโนมัติ
 - [ ] ตรวจ `/admin/monitoring` ว่า Agent ขึ้น ONLINE และ batch เป็น COMPLETED
 - [ ] ตรวจ `/reports/drug-usage` ว่ามีข้อมูล
 - [ ] ทดสอบ facility isolation: ผู้ใช้ รพ.สต. A ใส่ `?facility=<B>` ต้องได้ 403
+
+## 5. Global Sync Start Date rollout (approved, not implemented)
+
+ต้อง deploy แบบ Central-first และรักษา backward compatibility:
+
+1. backup Central DB แล้ว apply เฉพาะ additive migration ที่ตรวจแล้ว
+2. deploy Central ที่เข้าใจ policy/heartbeat ใหม่ แต่ยังไม่มี policy row และยังไม่ enforce
+3. ยืนยันว่า Agent `v1.1.16` ยัง sync แบบ legacy โดยไม่ต้อง remote acknowledgement
+4. build รุ่นใหม่เป็น `v1.1.17` โดยไม่แก้ tag/release `v1.1.16` ที่เผยแพร่แล้ว
+5. pause และอัปเกรด canary หนึ่งเครื่อง ตรวจว่า identity, credential, enrollment, settings,
+   queue/quarantine และ updater state ไม่เปลี่ยน
+6. สร้าง desired policy รอ canary persist/apply และรายงาน revision ตรงกัน
+7. ก่อน activate ต้อง desired-paused, ไม่มี active Central batch และผ่าน owner review
+8. resume canary หนึ่งเครื่อง ตรวจ scheduled sync + reconciliation ก่อนขยาย rollout
+
+ไม่จำเป็นต้องรอ Agent ออฟไลน์ทุกเครื่อง แต่ override ต้องเป็นคำสั่ง explicit ของ `SUPER_ADMIN`
+พร้อมเหตุผลและ audit เครื่องนั้นต้องคง centrally paused จนกว่าอัปเกรด รับ policy และ applied แล้ว
+
+forward rollout ไม่ต้องรอ `idempotentUploadChunk` ส่วน historical backfill ต้องปิด UI ไว้จน Agent
+มีทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk` และผ่าน receipt/reconciliation gate
+
+Rollback ห้ามลด revision, ลบข้อมูล หรือแก้ release เดิม: pause fleet, สร้าง revision ใหม่ที่คืนวันก่อนหน้า,
+รอ acknowledgement, activate แล้ว resume canary อย่างมีลำดับ Purge ไม่ใช่ขั้นตอน rollback ของ policy

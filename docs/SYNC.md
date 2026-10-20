@@ -166,3 +166,40 @@ agent/data/queue/failed/<batchRef>__000001.json    ล้มเหลวถา�
 > **ระวังตอนวัดใหม่:** request แรกหลังเปิด server ช้ากว่าปกติหลายเท่า (เคยวัดได้ p95 19.7 วินาที
 > แล้วเข้าใจผิดว่า TiDB เป็นคอขวด) ต้องรันซ้ำอย่างน้อย 3 รอบแล้วทิ้งรอบแรก
 > เครื่องมือคือ `agent/measure-central.mts` (ยิงเข้า Central จริง) กับ `agent/bench.mts` (mock Central)
+
+## 8. Global Sync Start Date semantics (approved, not implemented)
+
+Global Sync Start Date เป็น extraction floor เดียวของทั้งอำเภอ ควบคุมโดย `SUPER_ADMIN` ผ่าน
+Central โดยแยก desired state ออกจาก active enforcement และใช้ revision ที่ไม่เกี่ยวกับ pause
+`controlRevision`
+
+### Legacy state
+
+ถ้า Central ยังไม่มี global policy row Agent ใช้ local/default `syncStartDate` เดิม ซิงก์ตามปกติ
+และไม่ต้องส่ง remote acknowledgement Managed lifecycle เริ่มเมื่อ Central สร้าง desired policy เท่านั้น
+
+### เลื่อนไปข้างหน้า
+
+- เพิ่ม extraction floor แต่ไม่ reset watermark และไม่ลบแถวเก่าใน Central
+- Agent ที่ paused และรับ policy แล้วต้องเก็บ pending chunk ที่ต่ำกว่า floor ไว้ใน quarantine
+  ห้ามลบหรือย้ายไป failed เพียงเพราะ policy เปลี่ยน
+- Central บังคับเฉพาะ active floor และปฏิเสธทั้ง chunk ต่ำกว่า floor ด้วย HTTP `503`,
+  `GLOBAL_SYNC_START_DATE_ENFORCED`, `Retry-After: 45`
+- forward operation ต้องมี `remoteSyncStartDate` แต่ไม่ต้องรอ `idempotentUploadChunk`
+
+### เลื่อนย้อนหลังและ historical backfill
+
+- การลด floor ไม่เลื่อน watermark ย้อนหลังและไม่เริ่มอ่าน JHCIS อัตโนมัติ
+- กู้ย้อนหลังด้วย `MANUAL_RANGE` ที่ระบุช่วงชัดเจน ตามด้วย reconciliation
+- เปิด backfill ได้เมื่อ Agent applied policy แล้วและมีทั้ง `remoteSyncStartDate` กับ
+  `idempotentUploadChunk`
+- ห้าม rehydrate quarantine อัตโนมัติ; successful reread อาจ mark ว่า covered ได้แต่ต้องเก็บ
+  quarantine ไว้ตามนโยบาย retention ที่ได้รับอนุมัติ
+
+### Idempotency สองระดับ
+
+`record_key` ป้องกัน `drug_usage` ซ้ำอยู่แล้ว แต่ยังไม่รับประกันว่า batch counters/rejects จะไม่ถูก
+นับซ้ำเมื่อ response สูญหาย ดังนั้น stable chunk receipt เป็น prerequisite เฉพาะ historical backfill
+ไม่ใช่ prerequisite ของ desired policy, acknowledgement, forward move หรือ active-floor enforcement
+
+Purge เป็น destructive workflow แยกจากนโยบายนี้เสมอ การเปลี่ยนวันห้ามเรียก purge โดยอัตโนมัติ
