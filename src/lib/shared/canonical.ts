@@ -223,6 +223,14 @@ export interface HeartbeatRequest {
   schemaReport?: SchemaReport | null;
   lastError?: string | null;
   pendingBatches?: number;
+  /** Phase E telemetry is additive; absence means UNKNOWN, never zero. */
+  queueTelemetry?: {
+    pending: number;
+    failed: number;
+    quarantineTotal: number;
+    quarantineCovered: number;
+    quarantineUnresolved: number;
+  };
   /**
    * Set when a sync run has just finished, whatever it found.
    *
@@ -290,6 +298,9 @@ export interface AgentConfigResponse {
     activeRevision: number;
   };
 
+  /** Exact, one-Agent historical authorization. Older Centrals omit it. */
+  historicalBackfill?: HistoricalBackfillInstruction | null;
+
   /**
    * A remote software update the centre wants this Agent to perform. Absent
    * or null almost always. Pinned to one published release: the Agent
@@ -304,6 +315,18 @@ export interface AgentConfigResponse {
     size: number | null;
     sha256: string;
   } | null;
+}
+
+export interface HistoricalBackfillInstruction {
+  requestId: string;
+  policyRevision: number;
+  from: string;
+  to: string;
+  batchRef?: string | null;
+}
+
+export interface HistoricalBackfillContext extends HistoricalBackfillInstruction {
+  batchRef: string;
 }
 
 /** What the Agent tells the centre about its updater, in the heartbeat. */
@@ -326,6 +349,7 @@ export interface SyncStartRequest {
   rangeTo: string | null;
   pcucode: string;
   recordsRead: number;
+  historicalBackfill?: HistoricalBackfillContext;
 }
 
 export interface SyncUploadRequest {
@@ -351,4 +375,9 @@ export interface SyncCompleteRequest {
   recordsSent: number;
   lastVisitDate: string | null;
   errorMessage?: string | null;
+  historicalBackfill?: HistoricalBackfillContext & {
+    reconciliationExpected: number;
+    reconciliationCentral: number;
+    reconciliationGap: number;
+  };
 }

@@ -5,8 +5,11 @@ import { agents, auditLogs, syncBatches, systemSettings, users } from "@/lib/db/
 import { parseCapabilities } from "@/lib/shared/agent-build";
 
 import {
+  BackfillPlanConflictError,
   GLOBAL_SYNC_START_DATE_POLICY_KEY,
+  deriveBackfillPlanForActivation,
   globalSyncStartDateIsoDateSchema,
+  globalSyncStartDateBackfillPlanSchema,
   parseGlobalSyncStartDatePolicy,
   type GlobalSyncStartDatePolicy,
 } from "./global-sync-policy";
@@ -42,6 +45,8 @@ export class GlobalSyncStartDateManagementError extends Error {
       | "REVISION_CONFLICT"
       | "ACTIVE_BATCH"
       | "FLEET_NOT_READY"
+      | "BACKFILL_PLAN_UNRESOLVED"
+      | "BACKFILL_PLAN_MISSING"
       | "OVERRIDE_REASON_REQUIRED"
       | "OVERRIDE_REQUIRES_PAUSE",
     message: string,
@@ -279,12 +284,33 @@ export function createGlobalSyncStartDateManagementService(
           }
         }
 
+        const activatedAt = input.now ?? new Date();
+        let backfillPlan;
+        try {
+          backfillPlan = deriveBackfillPlanForActivation({
+            previousActiveDate: current.activeDate,
+            newActiveDate: current.desiredDate,
+            policyRevision: current.desiredRevision,
+            actorUserId: locked.actor.id,
+            now: activatedAt,
+            currentPlan: current.backfillPlan ?? null,
+          });
+        } catch (error) {
+          if (error instanceof BackfillPlanConflictError) {
+            throw new GlobalSyncStartDateManagementError(
+              "BACKFILL_PLAN_UNRESOLVED",
+              "ยังมีแผน backfill ที่ยังไม่ปิด กรุณาปิดหรือยกเลิกก่อนเปิดใช้นโยบายใหม่",
+            );
+          }
+          throw error;
+        }
         const next = parseGlobalSyncStartDatePolicy({
           ...current,
           activeDate: current.desiredDate,
           activeRevision: current.desiredRevision,
           updatedBy: locked.actor.id,
-          updatedAt: (input.now ?? new Date()).toISOString(),
+          updatedAt: activatedAt.toISOString(),
+          backfillPlan: backfillPlan ?? undefined,
         });
         await locked.savePolicy(next);
         await locked.writeAudit({
@@ -299,6 +325,66 @@ export function createGlobalSyncStartDateManagementService(
             activeRevision: next.activeRevision,
             reason,
             overriddenAgentIds: outstanding.map((row) => row.agentId),
+          },
+        });
+        return next;
+      });
+    },
+
+    async resolveBackfillPlan(input: {
+      actorUserId: string;
+      expectedPolicyRevision: number;
+      resolution: "COMPLETED" | "CANCELLED" | "SUPERSEDED";
+      reason: string;
+      now?: Date;
+      ip?: string | null;
+    }): Promise<GlobalSyncStartDatePolicy> {
+      return store.withLock(input.actorUserId, async (locked) => {
+        requireSuperAdmin(locked.actor);
+        const current = locked.policy;
+        if (!current || current.activeRevision !== input.expectedPolicyRevision) {
+          throw new GlobalSyncStartDateManagementError(
+            "REVISION_CONFLICT",
+            "นโยบายถูกแก้ไขโดยผู้ใช้อื่น กรุณาโหลดหน้าใหม่",
+          );
+        }
+        if (!current.backfillPlan || current.backfillPlan.status !== "ACTIVE") {
+          throw new GlobalSyncStartDateManagementError(
+            "BACKFILL_PLAN_MISSING",
+            "ไม่มีแผน backfill ที่กำลังเปิดอยู่",
+          );
+        }
+        const reason = input.reason.trim().slice(0, 500);
+        if (!reason) {
+          throw new GlobalSyncStartDateManagementError(
+            "OVERRIDE_REASON_REQUIRED",
+            "ต้องระบุเหตุผลในการปิดแผน backfill",
+          );
+        }
+        const resolvedAt = input.now ?? new Date();
+        const backfillPlan = globalSyncStartDateBackfillPlanSchema.parse({
+          ...current.backfillPlan,
+          status: input.resolution,
+          resolvedAt: resolvedAt.toISOString(),
+          resolvedByUserId: locked.actor.id,
+          resolutionReason: reason,
+        });
+        const next = parseGlobalSyncStartDatePolicy({
+          ...current,
+          backfillPlan,
+          updatedBy: locked.actor.id,
+          updatedAt: resolvedAt.toISOString(),
+        });
+        await locked.savePolicy(next);
+        await locked.writeAudit({
+          action: `GLOBAL_SYNC_BACKFILL_PLAN_${input.resolution}`,
+          ip: input.ip,
+          metadata: {
+            policyRevision: current.activeRevision,
+            from: backfillPlan.from,
+            to: backfillPlan.to,
+            reason,
+            resolution: input.resolution,
           },
         });
         return next;

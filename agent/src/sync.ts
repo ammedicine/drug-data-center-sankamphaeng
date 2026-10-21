@@ -5,7 +5,7 @@
  * Everything is written to the offline queue before it is uploaded, so a
  * network outage or a crash only delays delivery - it never loses data.
  */
-import type { AgentConfigResponse, DrugUsageRecord } from "@shared/canonical";
+import type { AgentConfigResponse, DrugUsageRecord, HistoricalBackfillContext } from "@shared/canonical";
 import { classifyCentralFailure } from "@shared/agent-status";
 import {
   applySyncStartFloor,
@@ -102,6 +102,8 @@ export interface SyncOptions {
    * specific window because they believe what is stored there is wrong.
    */
   skipMatchingMonths?: boolean;
+  /** Explicit Central authorization; ordinary MANUAL_RANGE never has this. */
+  historicalBackfill?: HistoricalBackfillContext;
 }
 
 /** What the after-sync count found. */
@@ -201,7 +203,7 @@ function shiftDays(date: string, days: number): string {
   return value.toISOString().slice(0, 10);
 }
 
-function nextBatchRef(): string {
+export function nextBatchRef(): string {
   const state = loadState();
   const sequence = state.batchSequence + 1;
   saveState({ ...state, batchSequence: sequence });
@@ -375,18 +377,22 @@ export class SyncRunner {
   private async consumeQueue(
     pipeline: { producerDone: boolean; uploaderStalled: boolean },
     delivered: { accepted: number; rejected: number },
+    onlyBatchRef?: string,
   ): Promise<void> {
     const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
-    while (!pipeline.producerDone || this.queue.count("PENDING") > 0) {
-      const depth = this.queue.count("PENDING");
+    const pending = () => onlyBatchRef
+      ? this.queue.list("PENDING").filter((chunk) => chunk.batchRef === onlyBatchRef).length
+      : this.queue.count("PENDING");
+    while (!pipeline.producerDone || pending() > 0) {
+      const depth = pending();
       this.telemetry.peakQueueChunks = Math.max(this.telemetry.peakQueueChunks, depth);
       if (depth === 0) {
         await sleep(UPLOAD_IDLE_MS);
         continue;
       }
 
-      const flushed = await this.flushQueue();
+      const flushed = await this.flushQueue(onlyBatchRef);
       delivered.accepted += flushed.accepted;
       delivered.rejected += flushed.rejected;
 
@@ -428,16 +434,17 @@ export class SyncRunner {
   }
 
   /** Uploads everything still sitting in the queue (called on every run). */
-  async flushQueue(): Promise<{ accepted: number; rejected: number; remaining: number }> {
+  async flushQueue(onlyBatchRef?: string): Promise<{ accepted: number; rejected: number; remaining: number }> {
     let accepted = 0;
     let rejected = 0;
 
     for (const chunk of this.queue.list("PENDING")) {
+      if (onlyBatchRef && chunk.batchRef !== onlyBatchRef) continue;
       // Between chunks, never inside one. A pause that arrives mid-upload lets
       // the current atomic unit finish and stops before the next: the queue
       // stays coherent, nothing is half-delivered, and what is left on disk is
       // exactly what has not been sent yet.
-      if (shouldStopForPause()) {
+      if (!onlyBatchRef && shouldStopForPause()) {
         beginPauseHandover();
         log.info("หยุดส่งข้อมูลตามคำสั่งผู้ดูแลระบบ ชุดที่ยังไม่ส่งยังอยู่ในคิว", {
           pending: this.queue.count("PENDING"),
@@ -536,7 +543,10 @@ export class SyncRunner {
       }
     }
 
-    return { accepted, rejected, remaining: this.queue.count("PENDING") };
+    const remaining = onlyBatchRef
+      ? this.queue.list("PENDING").filter((chunk) => chunk.batchRef === onlyBatchRef).length
+      : this.queue.count("PENDING");
+    return { accepted, rejected, remaining };
   }
 
   /**
@@ -600,7 +610,7 @@ export class SyncRunner {
     // and the operator would have no way to know. Refusing here means no
     // connection is opened, no batch is created, no watermark moves and
     // nothing is enqueued: the request simply did not happen.
-    if (options.mode === "MANUAL_RANGE" && options.from) {
+    if (options.mode === "MANUAL_RANGE" && options.from && !options.historicalBackfill) {
       const refusal = checkManualRange(options.from, syncStartDate());
       if (refusal) {
         log.warn("ปฏิเสธช่วงวันที่ที่ขอ เพราะเริ่มก่อนวันที่เริ่มเก็บข้อมูลของ Agent", {
@@ -621,7 +631,7 @@ export class SyncRunner {
     // Checked before the connection is even opened: a paused agent should not
     // be putting load on a clinic's database server to produce rows that will
     // be refused.
-    if (syncPaused()) {
+    if (syncPaused() && !options.historicalBackfill) {
       log.info("ข้ามการซิงก์เพราะถูกหยุดโดยผู้ดูแลระบบส่วนกลาง");
       completePauseHandover();
       writeStatus({
@@ -772,7 +782,7 @@ export class SyncRunner {
       }
 
       const recordsRead = await extractor.countUsage(pcucode, range.from, range.to);
-      const batchRef = nextBatchRef();
+      const batchRef = options.historicalBackfill?.batchRef ?? nextBatchRef();
 
       writeStatus({
         phase: "starting",
@@ -820,6 +830,7 @@ export class SyncRunner {
               rangeTo: range.to,
               pcucode,
               recordsRead,
+              ...(options.historicalBackfill ? { historicalBackfill: options.historicalBackfill } : {}),
             }),
           { label: "sync start" },
         );
@@ -865,7 +876,7 @@ export class SyncRunner {
       const delivered = { accepted: 0, rejected: 0 };
       const uploader = options.dryRun
         ? Promise.resolve()
-        : this.consumeQueue(pipeline, delivered);
+        : this.consumeQueue(pipeline, delivered, options.historicalBackfill?.batchRef);
 
       for await (const page of extractor.streamUsage(
         pcucode,
@@ -876,7 +887,7 @@ export class SyncRunner {
         // Stop reading JHCIS at the next page boundary. A สถานบริการ that has
         // just been paused should not have its database walked for another
         // twenty minutes producing rows the centre will refuse.
-        if (shouldStopForPause()) {
+        if (!options.historicalBackfill && shouldStopForPause()) {
           beginPauseHandover();
           log.info("หยุดอ่านข้อมูลจาก JHCIS ตามคำสั่งผู้ดูแลระบบ");
           break;
@@ -918,6 +929,7 @@ export class SyncRunner {
       // master is re-sent every sync.
       let masterSent = 0;
       try {
+        if (options.historicalBackfill) throw new Error("HISTORICAL_MASTER_SKIPPED");
         for await (const page of extractor.streamDrugMaster()) {
           await withRetry(
             () =>
@@ -934,7 +946,9 @@ export class SyncRunner {
         }
         log.info("drug master uploaded", { batchRef, drugs: masterSent });
       } catch (error) {
-        log.warn("drug master upload failed - continuing with usage records", {
+        if (error instanceof Error && error.message === "HISTORICAL_MASTER_SKIPPED") {
+          log.info("historical backfill leaves the drug master unchanged", { batchRef });
+        } else log.warn("drug master upload failed - continuing with usage records", {
           batchRef,
           sent: masterSent,
           error: error instanceof Error ? error.message : String(error),
@@ -945,7 +959,7 @@ export class SyncRunner {
       //    the link was down, and leftovers from earlier runs. The totals are
       //    what the uploader already delivered plus whatever this last pass
       //    manages, so accepted and rejected count every row once.
-      const drained = await this.flushQueue();
+      const drained = await this.flushQueue(options.historicalBackfill?.batchRef);
       const flushed = {
         accepted: delivered.accepted + drained.accepted,
         rejected: delivered.rejected + drained.rejected,
@@ -968,6 +982,7 @@ export class SyncRunner {
           to: range.to,
           expected: recordsRead,
           rejected: flushed.rejected,
+          repair: !options.historicalBackfill,
         });
       }
 
@@ -1001,6 +1016,13 @@ export class SyncRunner {
       // dispensing is still a day that was checked and found empty, and using
       // the newest row would stall the watermark on quiet สถานบริการ.
       const verifiedThrough = clampToToday(range === requested ? range.to : requested.to);
+      if (options.historicalBackfill && flushed.remaining > 0) {
+        return {
+          batchRef, mode: options.mode, rangeFrom: range.from, rangeTo: range.to,
+          recordsRead, recordsSent, accepted: flushed.accepted, rejected: flushed.rejected,
+          pendingChunks: flushed.remaining, reconciliation,
+        };
+      }
       await withRetry(
         () =>
           this.client.completeSync({
@@ -1008,7 +1030,7 @@ export class SyncRunner {
             status: complete ? "COMPLETED" : "FAILED",
             recordsRead,
             recordsSent,
-            lastVisitDate: complete ? verifiedThrough : null,
+            lastVisitDate: complete && !options.historicalBackfill ? verifiedThrough : null,
             errorMessage: complete
               ? null
               : flushed.remaining
@@ -1016,11 +1038,19 @@ export class SyncRunner {
                 : `ตรวจสอบหลังซิงก์: JHCIS ${reconciliation?.expected ?? 0} รายการ ` +
                   `แต่ศูนย์กลางมี ${reconciliation?.central ?? 0} รายการ ` +
                   `(ขาด ${reconciliation?.gap ?? 0})`,
+            ...(options.historicalBackfill ? {
+              historicalBackfill: {
+                ...options.historicalBackfill,
+                reconciliationExpected: reconciliation?.expected ?? recordsRead,
+                reconciliationCentral: reconciliation?.central ?? recordsRead,
+                reconciliationGap: reconciliation?.gap ?? 0,
+              },
+            } : {}),
           }),
         { label: "sync complete" },
       );
 
-      if (complete) {
+      if (complete && !options.historicalBackfill) {
         const state = loadState();
         saveState({
           ...state,
@@ -1111,6 +1141,7 @@ export class SyncRunner {
     to: string;
     expected: number;
     rejected: number;
+    repair?: boolean;
   }): Promise<Reconciliation> {
     const countCentral = async (): Promise<number> => {
       const audit = await withRetry(
@@ -1126,7 +1157,7 @@ export class SyncRunner {
     const repairedMonths: string[] = [];
     let repairedRows = 0;
 
-    if (central < input.expected) {
+    if (central < input.expected && input.repair !== false) {
       // Narrow the hole down to the months that actually differ, so a repair
       // moves a few hundred rows rather than the whole window again.
       const [localMonths, remote] = await Promise.all([

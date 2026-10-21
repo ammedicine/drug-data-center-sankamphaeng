@@ -6,7 +6,10 @@
  *  - partial tolerance: one bad row is rejected, the batch still commits
  *  - facility-bound: facilityId always comes from the authenticated agent
  */
-import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
+import {
+  assertAgentSyncAllowed,
+  assertAgentSyncAllowedForBatch,
+} from "@/lib/agent-auth/sync-control";
 import { and, eq, gte, lte, sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/lib/db";
@@ -410,7 +413,7 @@ export async function ingestIdempotentUsageChunk(input: {
       payloadSha256: input.payloadSha256,
     },
     async (transaction, batchId) => {
-      await assertAgentSyncAllowed(input.agent.agentId);
+      await assertAgentSyncAllowedForBatch(input.agent.agentId, input.batchRef);
       await assertCurrentGlobalSyncStartDateRecordsAllowed(input.records);
       if (input.drugs?.length) {
         await upsertDrugMaster(input.agent, input.drugs, input.sourceVersion, { transaction });

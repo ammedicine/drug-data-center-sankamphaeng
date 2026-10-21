@@ -18,6 +18,76 @@ export const globalSyncStartDateIsoDateSchema = z
   .regex(/^\d{4}-\d{2}-\d{2}$/)
   .refine(isCalendarDate, "Date must be a real ISO calendar date");
 
+export const globalSyncStartDateBackfillPlanSchema = z
+  .object({
+    policyRevision: z.number().int().safe().positive(),
+    from: globalSyncStartDateIsoDateSchema,
+    to: globalSyncStartDateIsoDateSchema,
+    status: z.enum(["ACTIVE", "COMPLETED", "CANCELLED", "SUPERSEDED"]),
+    createdAt: z.string().datetime(),
+    createdByUserId: z.string().min(1).max(30),
+    resolvedAt: z.string().datetime().optional(),
+    resolvedByUserId: z.string().min(1).max(30).optional(),
+    resolutionReason: z.string().min(1).max(500).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.from > value.to) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Backfill range is inverted" });
+    }
+    const resolutionFields = [value.resolvedAt, value.resolvedByUserId, value.resolutionReason];
+    if (value.status === "ACTIVE" && resolutionFields.some(Boolean)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Active plan cannot be resolved" });
+    }
+    if (value.status !== "ACTIVE" && resolutionFields.some((field) => !field)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Terminal plan requires resolution",
+      });
+    }
+  });
+
+export type GlobalSyncStartDateBackfillPlan = z.infer<
+  typeof globalSyncStartDateBackfillPlanSchema
+>;
+
+export class BackfillPlanConflictError extends Error {
+  constructor() {
+    super("An unresolved backfill plan blocks this policy activation");
+    this.name = "BackfillPlanConflictError";
+  }
+}
+
+export function dayBeforeIsoDate(value: string): string {
+  const date = new Date(`${globalSyncStartDateIsoDateSchema.parse(value)}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
+}
+
+export function deriveBackfillPlanForActivation(input: {
+  previousActiveDate: string | null;
+  newActiveDate: string;
+  policyRevision: number;
+  actorUserId: string;
+  now: Date;
+  currentPlan: GlobalSyncStartDateBackfillPlan | null;
+}): GlobalSyncStartDateBackfillPlan | null {
+  const newActiveDate = globalSyncStartDateIsoDateSchema.parse(input.newActiveDate);
+  if (input.currentPlan?.status === "ACTIVE") {
+    if (input.previousActiveDate === newActiveDate) return input.currentPlan;
+    throw new BackfillPlanConflictError();
+  }
+  if (!input.previousActiveDate || newActiveDate >= input.previousActiveDate) return null;
+  return globalSyncStartDateBackfillPlanSchema.parse({
+    policyRevision: input.policyRevision,
+    from: newActiveDate,
+    to: dayBeforeIsoDate(input.previousActiveDate),
+    status: "ACTIVE",
+    createdAt: input.now.toISOString(),
+    createdByUserId: z.string().min(1).max(30).parse(input.actorUserId),
+  });
+}
+
 const policySchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -27,7 +97,7 @@ const policySchema = z
     activeRevision: z.number().int().safe().min(0),
     updatedBy: z.string().min(1).max(30),
     updatedAt: z.string().datetime(),
-    backfillPlan: z.record(z.unknown()).optional(),
+    backfillPlan: globalSyncStartDateBackfillPlanSchema.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

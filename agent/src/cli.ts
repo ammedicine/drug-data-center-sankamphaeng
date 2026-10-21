@@ -44,7 +44,8 @@ import {
   updateCheckStartTime,
 } from "./schedule";
 import { OfflineQueue } from "./queue/queue";
-import { SyncRunner, type SyncMode } from "./sync";
+import { nextBatchRef, SyncRunner, type SyncMode } from "./sync";
+import { adoptHistoricalBackfill, type HistoricalBackfillContext } from "./historical-backfill";
 import { CLOCK_CHECK_MIN_INTERVAL_MS, CLOCK_SYNC_COOLDOWN_MS, healClock } from "./clock";
 import {
   readUpdaterTaskHealth,
@@ -506,7 +507,11 @@ async function run(): Promise<void> {
     }
   };
 
-  const runOnce = async (reason: string, window?: { from: string; to: string }) => {
+  const runOnce = async (
+    reason: string,
+    window?: { from: string; to: string },
+    historicalBackfill?: HistoricalBackfillContext,
+  ) => {
     if (stopping || running) return;
     running = true;
     try {
@@ -520,7 +525,7 @@ async function run(): Promise<void> {
       const result = await withSyncLock(`sync (${reason})`, () =>
         runner.run(
           window
-            ? { mode: "MANUAL_RANGE", from: window.from, to: window.to }
+            ? { mode: "MANUAL_RANGE", from: window.from, to: window.to, ...(historicalBackfill ? { historicalBackfill } : {}) }
             : { mode: "INCREMENTAL" },
         ),
       );
@@ -642,6 +647,15 @@ async function run(): Promise<void> {
         // LAN, so the request rides back on the heartbeat response.
         // "ตรวจสอบความครบถ้วน" is a heavier request than a plain sync: it
         // reconciles every month with JHCIS and re-sends only what is missing.
+        if (config?.historicalBackfill) {
+          const context = adoptHistoricalBackfill(config.historicalBackfill, nextBatchRef);
+          await runOnce(
+            `historical backfill ${context.requestId}`,
+            { from: context.from, to: context.to },
+            context,
+          );
+          return;
+        }
         if (config?.verifyRequested) {
           running = true;
           try {

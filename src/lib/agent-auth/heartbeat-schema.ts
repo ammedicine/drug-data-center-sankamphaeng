@@ -14,6 +14,15 @@ export const heartbeatSchema = z.object({
   schemaReport: z.record(z.unknown()).nullable().optional(),
   lastError: z.string().max(2000).nullable().optional(),
   pendingBatches: z.number().int().min(0).optional(),
+  queueTelemetry: z
+    .object({
+      pending: z.number().int().min(0),
+      failed: z.number().int().min(0),
+      quarantineTotal: z.number().int().min(0),
+      quarantineCovered: z.number().int().min(0),
+      quarantineUnresolved: z.number().int().min(0),
+    })
+    .optional(),
   syncRanAt: z.string().datetime().nullable().optional(),
 
   /* ------------------------------------------ what this build is and can do */

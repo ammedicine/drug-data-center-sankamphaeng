@@ -228,4 +228,58 @@ describe("SUPER_ADMIN policy management", () => {
       },
     ]);
   });
+
+  it("creates the approved gap only when a backward revision is activated", async () => {
+    const store = new MemoryManagementStore({
+      ...initial,
+      desiredDate: "2024-10-01",
+      desiredRevision: 3,
+      activeDate: "2025-01-01",
+      activeRevision: 2,
+    }, [agent("ready", { appliedRevision: 3 })]);
+    const result = await createGlobalSyncStartDateManagementService(store).activateDesired({
+      actorUserId: "super-1", expectedDesiredRevision: 3,
+      overridePending: false, overrideReason: null, now,
+    });
+    expect(result.backfillPlan).toMatchObject({
+      policyRevision: 3, from: "2024-10-01", to: "2024-12-31", status: "ACTIVE",
+    });
+  });
+
+  it("blocks another incompatible activation while the plan is active", async () => {
+    const store = new MemoryManagementStore({
+      ...initial,
+      desiredDate: "2024-07-01", desiredRevision: 4,
+      activeDate: "2024-10-01", activeRevision: 3,
+      backfillPlan: {
+        policyRevision: 3, from: "2024-10-01", to: "2024-12-31", status: "ACTIVE",
+        createdAt: "2026-10-19T10:00:00.000Z", createdByUserId: "super-1",
+      },
+    }, [agent("ready", { appliedRevision: 4 })]);
+    await expect(createGlobalSyncStartDateManagementService(store).activateDesired({
+      actorUserId: "super-1", expectedDesiredRevision: 4,
+      overridePending: false, overrideReason: null, now,
+    })).rejects.toMatchObject({ code: "BACKFILL_PLAN_UNRESOLVED" });
+  });
+
+  it("resolves the plan with reason and audit without changing revision", async () => {
+    const store = new MemoryManagementStore({
+      ...initial,
+      activeDate: "2024-10-01", activeRevision: 2,
+      backfillPlan: {
+        policyRevision: 2, from: "2024-10-01", to: "2024-12-31", status: "ACTIVE",
+        createdAt: "2026-10-19T10:00:00.000Z", createdByUserId: "super-1",
+      },
+    });
+    const result = await createGlobalSyncStartDateManagementService(store).resolveBackfillPlan({
+      actorUserId: "super-1", expectedPolicyRevision: 2,
+      resolution: "COMPLETED", reason: "ครบทุก Agent ตามแผน", now,
+    });
+    expect(result.activeRevision).toBe(2);
+    expect(result.backfillPlan).toMatchObject({
+      status: "COMPLETED", resolvedByUserId: "super-1",
+      resolutionReason: "ครบทุก Agent ตามแผน",
+    });
+    expect(store.audits.at(-1)).toMatchObject({ action: "GLOBAL_SYNC_BACKFILL_PLAN_COMPLETED" });
+  });
 });

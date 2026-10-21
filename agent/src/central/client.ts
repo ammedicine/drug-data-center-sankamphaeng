@@ -14,6 +14,7 @@ import {
   signRequest,
   type AgentConfigResponse,
   type HeartbeatRequest,
+  type HistoricalBackfillContext,
   type SyncUploadRequest,
   type SyncUploadResponse,
 } from "@shared/canonical";
@@ -166,6 +167,7 @@ export class CentralClient {
     rangeTo: string | null;
     pcucode: string;
     recordsRead: number;
+    historicalBackfill?: HistoricalBackfillContext;
   }): Promise<{ batchId: string; resumed: boolean; uploadChunkSize: number }> {
     return this.request("POST", "/api/agent/sync/start", body);
   }
@@ -190,6 +192,12 @@ export class CentralClient {
     recordsSent: number;
     lastVisitDate: string | null;
     errorMessage?: string | null;
+    historicalBackfill?: HistoricalBackfillContext & {
+      reconciliationExpected: number;
+      reconciliationCentral: number;
+      reconciliationGap: number;
+      retryable?: boolean;
+    };
   }): Promise<{ ok: boolean }> {
     return this.request("POST", "/api/agent/sync/complete", body);
   }

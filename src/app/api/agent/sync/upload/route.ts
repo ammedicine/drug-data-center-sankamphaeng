@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { apiError, withAgent } from "@/lib/agent-auth/route";
-import { assertAgentSyncAllowed } from "@/lib/agent-auth/sync-control";
+import {
+  assertAgentSyncAllowed,
+  assertAgentSyncAllowedForBatch,
+} from "@/lib/agent-auth/sync-control";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
 import { syncBatches } from "@/lib/db/schema";
@@ -74,6 +77,7 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
   const identity = resolveUploadChunkIdentity(body);
 
   if (identity) {
+    await assertAgentSyncAllowedForBatch(agent.agentId, body.batchRef);
     const result = await ingestIdempotentUsageChunk({
       agent,
       batchRef: body.batchRef,

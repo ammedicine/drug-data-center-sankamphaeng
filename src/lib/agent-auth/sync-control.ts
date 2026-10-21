@@ -11,10 +11,14 @@
  * from an earlier one. It is a single indexed row read, and it is the cheapest
  * part of any request that is about to write thousands of rows.
  */
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { agents } from "@/lib/db/schema";
+import { agents, globalSyncBackfillRequests, syncBatches, systemSettings } from "@/lib/db/schema";
+import {
+  GLOBAL_SYNC_START_DATE_POLICY_KEY,
+  parseGlobalSyncStartDatePolicy,
+} from "@/lib/services/global-sync-policy";
 import {
   SYNC_PAUSED_CODE,
   SYNC_PAUSED_RETRY_AFTER_SECONDS,
@@ -74,4 +78,56 @@ export async function assertAgentSyncAllowed(agentId: string): Promise<void> {
   // honest reading here is the state we found.
   if (!row) return;
   if (!ingestAllowed(row.state)) throw new SyncPausedError(row.reason);
+}
+
+/** The sole pause exception: an exact linked batch under the current active plan. */
+export async function assertAgentSyncAllowedForBatch(
+  agentId: string,
+  batchRef: string,
+): Promise<void> {
+  const [agent] = await db
+    .select({ state: agents.syncControlState, reason: agents.pauseReason })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .limit(1);
+  if (!agent || ingestAllowed(agent.state)) return;
+
+  const [authorization] = await db
+    .select({
+      requestId: globalSyncBackfillRequests.id,
+      policyRevision: globalSyncBackfillRequests.policyRevision,
+      rangeFrom: globalSyncBackfillRequests.rangeFrom,
+      rangeTo: globalSyncBackfillRequests.rangeTo,
+    })
+    .from(syncBatches)
+    .innerJoin(
+      globalSyncBackfillRequests,
+      eq(globalSyncBackfillRequests.linkedBatchId, syncBatches.id),
+    )
+    .where(
+      and(
+        eq(syncBatches.agentId, agentId),
+        eq(syncBatches.batchRef, batchRef),
+        eq(globalSyncBackfillRequests.agentId, agentId),
+        eq(globalSyncBackfillRequests.status, "IN_PROGRESS"),
+      ),
+    )
+    .limit(1);
+  if (authorization) {
+    const [setting] = await db
+      .select({ value: systemSettings.value })
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, GLOBAL_SYNC_START_DATE_POLICY_KEY))
+      .limit(1);
+    const policy = setting ? parseGlobalSyncStartDatePolicy(setting.value) : null;
+    const plan = policy?.backfillPlan;
+    if (
+      policy?.activeRevision === authorization.policyRevision &&
+      plan?.status === "ACTIVE" &&
+      plan.policyRevision === authorization.policyRevision &&
+      authorization.rangeFrom >= plan.from &&
+      authorization.rangeTo <= plan.to
+    ) return;
+  }
+  throw new SyncPausedError(agent.reason);
 }

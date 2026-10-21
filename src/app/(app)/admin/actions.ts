@@ -17,6 +17,10 @@ import {
   GlobalSyncStartDateManagementError,
   globalSyncStartDateManagementService,
 } from "@/lib/services/global-sync-policy-management";
+import {
+  GlobalSyncBackfillError,
+  globalSyncBackfillService,
+} from "@/lib/services/global-sync-backfill";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
 import {
@@ -1017,6 +1021,71 @@ export async function activateGlobalSyncStartDateAction(
     return { success: `เปิดใช้ Global Sync Start Date ${policy.activeDate} (revision ${policy.activeRevision}) แล้ว` };
   } catch (error) {
     if (error instanceof GlobalSyncStartDateManagementError) return fail(error.message);
+    throw error;
+  }
+}
+
+export async function resolveGlobalSyncBackfillPlanAction(
+  _prev: ActionState, formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้น");
+  const resolution = String(formData.get("resolution") ?? "");
+  if (!["COMPLETED", "CANCELLED", "SUPERSEDED"].includes(resolution)) return fail("สถานะปิดแผนไม่ถูกต้อง");
+  try {
+    await globalSyncStartDateManagementService.resolveBackfillPlan({
+      actorUserId: user.userId,
+      expectedPolicyRevision: Number(formData.get("policyRevision") ?? 0),
+      resolution: resolution as "COMPLETED" | "CANCELLED" | "SUPERSEDED",
+      reason: String(formData.get("reason") ?? ""),
+      ip: clientIp(await headers()),
+    });
+    revalidatePath("/admin/fleet");
+    return { success: "ปิดแผน historical backfill แล้ว" };
+  } catch (error) {
+    if (error instanceof GlobalSyncStartDateManagementError) return fail(error.message);
+    throw error;
+  }
+}
+
+export async function requestHistoricalBackfillAction(
+  _prev: ActionState, formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้น");
+  try {
+    await globalSyncBackfillService.request({
+      actorUserId: user.userId,
+      agentId: String(formData.get("agentId") ?? ""),
+      rangeFrom: String(formData.get("from") ?? ""),
+      rangeTo: String(formData.get("to") ?? ""),
+      reason: String(formData.get("reason") ?? ""),
+      ip: clientIp(await headers()),
+    });
+    revalidatePath("/admin/fleet");
+    return { success: "สร้างคำขอ historical backfill แล้ว" };
+  } catch (error) {
+    if (error instanceof GlobalSyncBackfillError) return fail(error.message);
+    throw error;
+  }
+}
+
+export async function cancelHistoricalBackfillAction(
+  _prev: ActionState, formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้น");
+  try {
+    await globalSyncBackfillService.cancel({
+      actorUserId: user.userId,
+      requestId: String(formData.get("requestId") ?? ""),
+      reason: String(formData.get("reason") ?? ""),
+      ip: clientIp(await headers()),
+    });
+    revalidatePath("/admin/fleet");
+    return { success: "ยกเลิก historical backfill แล้ว" };
+  } catch (error) {
+    if (error instanceof GlobalSyncBackfillError) return fail(error.message);
     throw error;
   }
 }

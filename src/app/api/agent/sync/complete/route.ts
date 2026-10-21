@@ -8,6 +8,7 @@ import { db } from "@/lib/db";
 import { syncBatches } from "@/lib/db/schema";
 import { writeAudit } from "@/lib/services/audit";
 import { completeBatch } from "@/lib/services/sync";
+import { globalSyncBackfillService } from "@/lib/services/global-sync-backfill";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +23,17 @@ const schema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .nullable(),
   errorMessage: z.string().max(2000).nullable().optional(),
+  historicalBackfill: z.object({
+    requestId: z.string().min(1).max(30),
+    policyRevision: z.number().int().min(1),
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    batchRef: z.string().min(5).max(40),
+    reconciliationExpected: z.number().int().min(0),
+    reconciliationCentral: z.number().int().min(0),
+    reconciliationGap: z.number().int().min(0),
+    retryable: z.boolean().optional(),
+  }).optional(),
 });
 
 /**
@@ -32,7 +44,7 @@ const schema = z.object({
 export const POST = withAgent(schema, async ({ agent, body }) => {
   // Completing is a mutation too - it moves the watermark, which is the
   // one number that decides what an agent may skip in future.
-  await assertAgentSyncAllowed(agent.agentId);
+  if (!body.historicalBackfill) await assertAgentSyncAllowed(agent.agentId);
   const [batch] = await db
     .select({ id: syncBatches.id, status: syncBatches.status })
     .from(syncBatches)
@@ -41,7 +53,26 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
 
   if (!batch) return apiError(404, "BATCH_NOT_FOUND", "Sync batch was not started");
 
-  await completeBatch({
+  const historical = body.historicalBackfill;
+  if (historical) {
+    if (historical.batchRef !== body.batchRef) throw new Error("Historical batch mismatch");
+    if (body.status === "COMPLETED") {
+      await globalSyncBackfillService.complete({
+        agent, ...historical, recordsRead: body.recordsRead, recordsSent: body.recordsSent,
+      });
+    } else {
+      await globalSyncBackfillService.reportTerminalFailure({
+        agent,
+        requestId: historical.requestId,
+        policyRevision: historical.policyRevision,
+        from: historical.from,
+        to: historical.to,
+        batchRef: historical.batchRef,
+        errorMessage: body.errorMessage ?? "Historical backfill failed",
+        retryable: historical.retryable ?? false,
+      });
+    }
+  } else await completeBatch({
     agent,
     batchId: batch.id,
     status: body.status,
@@ -51,7 +82,7 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
     errorMessage: body.errorMessage ?? null,
   });
 
-  await writeAudit({
+  if (!historical) await writeAudit({
     actorType: "AGENT",
     actorId: agent.agentId,
     actorLabel: agent.agentName,

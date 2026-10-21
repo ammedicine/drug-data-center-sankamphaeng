@@ -45,6 +45,13 @@ export const AGENT_STATUSES = ["ONLINE", "OFFLINE", "SYNCING", "ERROR", "DISABLE
 export const BATCH_STATUSES = ["STARTED", "UPLOADING", "COMPLETED", "FAILED", "ABORTED"] as const;
 export const SYNC_MODES = ["INITIAL", "INCREMENTAL", "MANUAL_RANGE", "RETRY"] as const;
 export const UPLOAD_RECEIPT_STATUSES = ["PROCESSING", "COMPLETED"] as const;
+export const BACKFILL_REQUEST_STATUSES = [
+  "REQUESTED",
+  "IN_PROGRESS",
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+] as const;
 
 /**
  * Remote sync control lives in src/lib/shared/sync-control.ts so the agent,
@@ -190,6 +197,13 @@ export const agents = mysqlTable(
     lastJhcisCheckAt: datetime("last_jhcis_check_at"),
     /** chunks the agent still has queued and undelivered */
     pendingBatches: int("pending_batches").notNull().default(0),
+    /** Phase E queue telemetry; null means an older/unknown Agent report. */
+    queuePendingCount: int("queue_pending_count"),
+    queueFailedCount: int("queue_failed_count"),
+    quarantineTotalCount: int("quarantine_total_count"),
+    quarantineCoveredCount: int("quarantine_covered_count"),
+    quarantineUnresolvedCount: int("quarantine_unresolved_count"),
+    queueTelemetryAt: datetime("queue_telemetry_at"),
     lastSyncAt: datetime("last_sync_at"),
     lastSuccessfulSyncAt: datetime("last_successful_sync_at"),
     lastError: text("last_error"),
@@ -427,6 +441,43 @@ export const syncBatches = mysqlTable(
     batchRefUq: uniqueIndex("sync_batches_ref_uq").on(t.agentId, t.batchRef),
     facilityIdx: index("sync_batches_facility_idx").on(t.facilityId, t.startedAt),
     statusIdx: index("sync_batches_status_idx").on(t.status, t.startedAt),
+  }),
+);
+
+/** One immutable, explicitly authorized historical backfill attempt. */
+export const globalSyncBackfillRequests = mysqlTable(
+  "global_sync_backfill_requests",
+  {
+    id: id("id").primaryKey(),
+    agentId: id("agent_id").notNull(),
+    facilityId: id("facility_id").notNull(),
+    policyRevision: int("policy_revision").notNull(),
+    rangeFrom: date("range_from", { mode: "string" }).notNull(),
+    rangeTo: date("range_to", { mode: "string" }).notNull(),
+    requestedByUserId: id("requested_by_user_id").notNull(),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    status: mysqlEnum("status", BACKFILL_REQUEST_STATUSES).notNull().default("REQUESTED"),
+    linkedBatchId: id("linked_batch_id"),
+    reconciliationExpected: int("reconciliation_expected"),
+    reconciliationCentral: int("reconciliation_central"),
+    reconciliationGap: int("reconciliation_gap"),
+    quarantineCovered: int("quarantine_covered"),
+    quarantineUnresolved: int("quarantine_unresolved"),
+    resultMessage: varchar("result_message", { length: 500 }),
+    errorMessage: text("error_message"),
+    requestedAt: datetime("requested_at").notNull(),
+    startedAt: datetime("started_at"),
+    completedAt: datetime("completed_at"),
+    failedAt: datetime("failed_at"),
+    cancelledAt: datetime("cancelled_at"),
+    createdAt,
+    updatedAt,
+  },
+  (t) => ({
+    facilityIdx: index("global_sync_backfill_facility_idx").on(t.facilityId, t.requestedAt),
+    agentIdx: index("global_sync_backfill_agent_idx").on(t.agentId, t.requestedAt),
+    statusIdx: index("global_sync_backfill_status_idx").on(t.status, t.requestedAt),
+    linkedBatchUq: uniqueIndex("global_sync_backfill_batch_uq").on(t.linkedBatchId),
   }),
 );
 

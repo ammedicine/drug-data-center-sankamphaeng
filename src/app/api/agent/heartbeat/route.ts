@@ -18,6 +18,7 @@ import {
   globalSyncStartDatePolicyService,
 } from "@/lib/services/global-sync-policy";
 import { parseBuildId, parseCapabilities } from "@/lib/shared/agent-build";
+import { globalSyncBackfillService } from "@/lib/services/global-sync-backfill";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,6 +57,14 @@ export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
       jhcisConnected: body.jhcisConnected,
       lastJhcisCheckAt: now,
       pendingBatches: body.pendingBatches ?? 0,
+      ...(body.queueTelemetry ? {
+        queuePendingCount: body.queueTelemetry.pending,
+        queueFailedCount: body.queueTelemetry.failed,
+        quarantineTotalCount: body.queueTelemetry.quarantineTotal,
+        quarantineCoveredCount: body.queueTelemetry.quarantineCovered,
+        quarantineUnresolvedCount: body.queueTelemetry.quarantineUnresolved,
+        queueTelemetryAt: now,
+      } : {}),
       // A run that finished, whatever it found. "Sync now" is satisfied by
       // comparing the request against this, and it used to be stamped only
       // when a batch was opened - so a run that found nothing left the
@@ -134,6 +143,8 @@ export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
     });
   }
 
+  const historicalBackfill = await globalSyncBackfillService.deliverForAgent(agent.agentId);
+
   // The update channel. The agent's report is applied first, so a SUCCESS it
   // sends on the heartbeat after an install closes the command before the
   // same request could hand the command back out again. Delivery is only
@@ -181,6 +192,7 @@ export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
       controlRevision: agent.controlRevision,
       pauseReason: agent.pauseReason,
       ...buildGlobalSyncStartDateHeartbeatConfig(globalSyncStartDatePolicy),
+      historicalBackfill,
       // A remote update, if one is owed and a rollout slot was free. Null is
       // the ordinary answer. Older agents never read this key.
       updateCommand,
