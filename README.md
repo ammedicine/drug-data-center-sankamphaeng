@@ -36,6 +36,7 @@ npx tsx src/cli.ts sync --mode INITIAL
 | [docs/DATABASE.md](docs/DATABASE.md) | ตารางกลาง + index |
 | [docs/SYNC.md](docs/SYNC.md) | pipeline, idempotency, offline queue |
 | [docs/AGENT.md](docs/AGENT.md) | ติดตั้งและใช้งาน Agent |
+| [docs/GLOBAL_SYNC_BACKFILL.md](docs/GLOBAL_SYNC_BACKFILL.md) | contract สำหรับ controlled historical backfill |
 | [docs/SECURITY.md](docs/SECURITY.md) | threat model + security checklist |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Vercel + TiDB Cloud |
 

@@ -374,20 +374,23 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 | docs/SECURITY.md | security checklist + threat model |
 | docs/SYNC.md | sync pipeline + idempotency |
 | docs/AGENT.md | ติดตั้ง/ใช้งาน Agent |
+| docs/GLOBAL_SYNC_BACKFILL.md | controlled historical backfill contract |
 | docs/DEPLOYMENT.md | Vercel + TiDB |
 
-### Global Sync Start Date (approved architecture; ยังไม่ implement)
+### Global Sync Start Date (Phase B–E implemented in source; ยังไม่ deploy/publish)
 
 รายละเอียด authoritative อยู่ที่ `PROJECT_SPEC.md` §36 และหัวข้อ Global Sync Start Date ใน
-`docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`,
-`docs/SECURITY.md`, `docs/DEPLOYMENT.md` อย่าคัดลอก protocol มาไว้ที่นี่
+`docs/GLOBAL_SYNC_BACKFILL.md`, `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`,
+`docs/SYNC.md`, `docs/AGENT.md`, `docs/SECURITY.md`, `docs/DEPLOYMENT.md` อย่าคัดลอก protocol
+มาไว้ที่นี่
 
 - Central/`SUPER_ADMIN` เป็น authority เมื่อ managed policy เริ่มแล้ว; Tray/GUI ยังควบคุมตารางเวลา
   ในเครื่องแต่ **ไม่ใช่ authority เดียวของ `syncStartDate`**
 - ไม่มี policy row = local/default `syncStartDate` เดิมยัง valid, sync ต่อปกติ, ไม่ต้อง remote ack
 - desired กับ active แยกกัน และ policy revision ไม่ใช่ pause `controlRevision`
 - forward move ไม่ลบ history/ไม่ reset watermark; backward move ไม่ backfill อัตโนมัติ
-- `v1.1.16` ที่เผยแพร่แล้ว immutable; `v1.1.17` เป็นเพียงรุ่นที่วางแผน ยังห้ามสร้างใน phase เอกสาร
+- historical backfill ต้องเป็นคำขอ explicit ของ `SUPER_ADMIN` ทีละ Agent และไม่เลื่อน watermark
+- `v1.1.16` ที่เผยแพร่แล้ว immutable; source `v1.1.17` ยังเป็น unpublished release candidate
 
 ## 7. กติกาเวลาทดสอบในเครื่อง
 

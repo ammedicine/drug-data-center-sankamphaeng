@@ -1110,9 +1110,9 @@ SYNC.md
 
 # 36. Global Sync Start Date — Approved Architecture Contract
 
-> สถานะ: Phase B implement เฉพาะ Central policy persistence, nullable Agent acknowledgement
-> และ additive heartbeat contract แล้ว; Agent application, UI, activation/enforcement, backfill
-> และ quarantine telemetry ยังไม่ implement
+> สถานะ: Phase B–E implement ใน source แล้ว ครอบคลุม policy persistence, Agent application,
+> UI, activation/enforcement, idempotent upload, controlled historical backfill และ nullable
+> queue/quarantine telemetry; ยังไม่ได้ deploy, activate production policy หรือ publish Agent v1.1.17
 
 ระบบจะมี **Global Sync Start Date เพียงค่าเดียวสำหรับทั้งอำเภอ** และเฉพาะ `SUPER_ADMIN`
 เท่านั้นที่สร้างหรือเปลี่ยนนโยบายได้ Central เป็นเจ้าของ desired policy โดยแยกสถานะ
@@ -1136,7 +1136,8 @@ SYNC.md
 - เลื่อนไปข้างหน้า: เพิ่ม extraction floor, ไม่ reset watermark, เก็บแถวเก่าใน Central และย้าย
   queue item ที่ต่ำกว่า floor ไป quarantine โดยไม่ลบ
 - เลื่อนย้อนหลัง: ไม่ backfill อัตโนมัติและไม่เลื่อน watermark ย้อนหลัง การกู้ข้อมูลย้อนหลังต้องใช้
-  `MANUAL_RANGE` แบบ explicit ตามด้วย reconciliation
+  durable request ที่ `SUPER_ADMIN` อนุมัติทีละ Agent โดย Agent รัน `MANUAL_RANGE` พร้อม explicit
+  historical intent ที่ผูก exact request/policy/range/batch และตามด้วย reconciliation
 - Central บังคับเฉพาะ active floor ก่อนแก้ batch/upload state ถ้าข้อมูลต่ำกว่า floor ให้ปฏิเสธ
   ทั้ง chunk ด้วย HTTP `503`, code `GLOBAL_SYNC_START_DATE_ENFORCED` และ
   `Retry-After: 45` เพื่อให้ retry ได้โดยไม่สูญหาย
@@ -1150,7 +1151,7 @@ SYNC.md
 - release/tag `v1.1.16` ที่เผยแพร่แล้วเป็น immutable; รุ่น Agent ที่วางแผนถัดไปคือ `v1.1.17`
   แต่ห้ามสร้าง tag หรือ release ก่อนผ่าน staged rollout และ owner approval
 
-รายละเอียดแยกตาม concern อยู่ใน `docs/ARCHITECTURE.md`, `docs/API.md`,
+รายละเอียดแยกตาม concern อยู่ใน `docs/GLOBAL_SYNC_BACKFILL.md`, `docs/ARCHITECTURE.md`, `docs/API.md`,
 `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`, `docs/SECURITY.md` และ
 `docs/DEPLOYMENT.md` ซึ่งเป็น shared, tool-neutral source of truth
 

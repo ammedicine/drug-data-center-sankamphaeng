@@ -78,8 +78,8 @@ git push        # Vercel build อัตโนมัติ
 
 ## 5. Global Sync Start Date rollout (code implemented; rollout not performed)
 
-โค้ด Phase C พร้อมสำหรับลำดับ deploy แบบ Central-first ด้านล่าง แต่ยังไม่ได้ apply migration 0012
-ใน production, publish Agent v1.1.17, activate policy หรือเริ่ม rollout:
+โค้ด Phase B–E พร้อมสำหรับลำดับ deploy แบบ Central-first ด้านล่าง แต่ยังไม่ได้ apply migration
+0012–0014 ใน production, publish Agent v1.1.17, activate policy หรือเริ่ม rollout:
 
 1. backup Central DB แล้ว apply เฉพาะ additive migration ที่ตรวจแล้ว
 2. deploy Central ที่เข้าใจ policy/heartbeat ใหม่ แต่ยังไม่มี policy row และยังไม่ enforce
@@ -104,3 +104,16 @@ runbook contract อยู่ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFI
 
 Rollback ห้ามลด revision, ลบข้อมูล หรือแก้ release เดิม: pause fleet, สร้าง revision ใหม่ที่คืนวันก่อนหน้า,
 รอ acknowledgement, activate แล้ว resume canary อย่างมีลำดับ Purge ไม่ใช่ขั้นตอน rollback ของ policy
+
+### Production canary checklist (ยังไม่ execute)
+
+- [ ] apply Central migrations 0012–0014 ก่อน และ deploy Central ก่อน Agent
+- [ ] pause Agent เป้าหมายทั้งหมด แล้วเลือก canary เพียงหนึ่ง Agent
+- [ ] upgrade canary เป็น v1.1.17 โดยยืนยัน Agent identity, credential, enrollment, facility,
+  settings, watermark, queue/quarantine, updater/pause state และ installer/scheduled-task identity เดิม
+- [ ] ยืนยัน heartbeat, capability `remoteSyncStartDate` และ `idempotentUploadChunk`
+- [ ] ยืนยัน `remoteSyncStartDate` เป็น `APPLIED` ตรง revision และ queue/quarantine telemetry ไม่ใช่
+  healthy zero เมื่อไม่มีข้อมูล
+- [ ] ทดสอบ forward policy ก่อน; historical backfill ทำหลัง explicit owner/SUPER_ADMIN approval เท่านั้น
+- [ ] monitor reconciliation, errors และ TiDB RU จากระบบภายนอก
+- [ ] ผ่าน readiness gate ก่อนดำเนินการกับ Agent ถัดไป; ห้าม auto-resume หรือ fleet-wide backfill

@@ -86,13 +86,14 @@ Review the final diff and confirm it contains no secrets before any commit.
 
 ## Global Sync Start Date
 
-The architecture is approved but is not implemented yet. Treat `PROJECT_SPEC.md` §36 and the
-relevant sections of `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`, `docs/SYNC.md`,
-`docs/AGENT.md`, `docs/SECURITY.md`, and `docs/DEPLOYMENT.md` as the shared source of truth. Do not
-duplicate or redefine that protocol here.
+The Phase B–E architecture is implemented in source but has not been deployed or published. Treat
+`PROJECT_SPEC.md` §36, `docs/GLOBAL_SYNC_BACKFILL.md`, and the relevant sections of
+`docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`,
+`docs/SECURITY.md`, and `docs/DEPLOYMENT.md` as the shared source of truth. Do not duplicate or
+redefine that protocol here.
 
-Implementation requires a separately approved phase. Preserve legacy operation when no policy
-exists, keep desired policy separate from active enforcement and pause control, preserve all
-Central history and Agent state, and keep purge separate. Forward operation must remain compatible
-with older Agents; historical backfill additionally requires the approved idempotent chunk gate.
-The published `v1.1.16` release/tag is immutable; `v1.1.17` is planned but does not exist yet.
+Preserve legacy operation when no policy exists, keep desired policy separate from active
+enforcement and pause control, preserve all Central history and Agent state, and keep purge
+separate. Forward operation must remain compatible with older Agents; historical backfill requires
+an explicit one-Agent request and the approved idempotent chunk gate. The published `v1.1.16`
+release/tag is immutable; `v1.1.17` source is an unpublished release candidate until owner review.

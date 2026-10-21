@@ -23,14 +23,15 @@ C:\Program Files\SDC Agent\
 | Python 3.11-3.13 | build หน้าจอเป็น .exe | https://python.org |
 | Inno Setup 6 | ประกอบเป็นตัวติดตั้ง | https://jrsoftware.org/isdl.php |
 
-> เครื่องนี้ตรวจแล้ว: มี Node.js และ Python 3.14 แต่ **ยังไม่ได้ติดตั้ง Inno Setup**
-> ถ้าติดตั้งแล้ว ISCC.exe จะอยู่ที่ `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`
+> เครื่อง build ปัจจุบันมี Inno Setup 6 ที่ `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`;
+> สคริปต์ยังรองรับตำแหน่งมาตรฐาน `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`
 
 ## ขั้นตอน build
 
 ```powershell
 cd agent
 .\installer\build.ps1              # ทำครบทุกขั้นตอน
+.\installer\build.ps1 -Version 1.1.17  # สร้าง unpublished release candidate แบบระบุ version
 .\installer\build.ps1 -SkipInstaller   # ข้ามขั้นตอน Inno Setup
 ```
 
@@ -40,6 +41,10 @@ cd agent
 2. ดาวน์โหลด Node runtime แบบพกพา (ถ้ายังไม่มีใน `build/runtime`)
 3. PyInstaller build `gui/sdc_agent_gui.py` เป็น `SDCAgent.exe`
 4. ISCC ประกอบทุกอย่างเป็น `installer/output/SDCAgent-Setup-x.y.z.exe`
+
+การอัปเกรดต้องคง AppId ของ installer และเก็บ `%ProgramData%\SDCAgent` ไว้ทั้งหมด ซึ่งรวม
+credential, enrollment, facility/Agent identity, settings, watermark, queue/failed/quarantine,
+historical backfill context, updater และ pause state ห้ามทดสอบทับ production Agent
 
 ## หลังติดตั้งที่ รพ.สต.
 
