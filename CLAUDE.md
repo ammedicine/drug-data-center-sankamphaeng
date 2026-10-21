@@ -125,7 +125,7 @@ agent/installer/sdc-agent.iss สคริปต์ Inno Setup (autostart, Progr
   drizzle/            migrations (generated)
 agent/                Local Agent (Node + TS, Windows service)
   src/jhcis/          adapter: connection, schema-inspector, repositories, extractor
-  src/queue/          JSON file offline queue (temp+rename; pending/failed/quarantine)
+  src/queue/          JSON file offline queue (temp+rename; pending/failed/receipts/quarantine)
   src/central/        HTTPS client (HMAC signing)
   src/cli.ts          doctor | enroll | sync | run
 ```
@@ -218,7 +218,8 @@ cdrug 7,410 / visitdrug 265,787 / visit 130,422 / pcucode เดียว = `059
 - เดือนไหนไม่ตรง -> ซิงก์ใหม่เฉพาะเดือนนั้น แล้ว **ตรวจซ้ำอีกรอบ**
 - เดือนที่ยังไม่ตรงหลังซ่อม = แถวที่ต้นทางไม่ผ่าน validation (เช่น drugcode ว่าง) จะรายงานไว้ ไม่วนซ้ำ
 - สั่งจากหน้าเว็บได้ด้วยปุ่ม "ตรวจสอบความครบถ้วน" (ธง `agents.verify_requested_at` -> heartbeat)
-- ชุดข้อมูลที่ค้างเพราะ batch เดิมถูกปิดไปแล้ว จะถูกย้ายไป batch ใหม่อัตโนมัติ (`recoverOrphanChunks`)
+- normal batch ที่มี recovery manifest/queue evidence จะกลับเข้า batchRef เดิมจน complete; เฉพาะ
+  legacy orphan ที่ไม่มีหลักฐาน recovery ที่ใช้ได้จึงเข้ากลไก `recoverOrphanChunks`
 
 ### การแบ่งหน้าดึงข้อมูล (สำคัญต่อความครบและความเร็ว)
 - คีย์เรียงที่ใช้คือ `(visitdate, visitno, drugcode)` ซึ่ง **unique** เพราะ PK ของ visitdrug คือ
@@ -390,7 +391,8 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 - desired กับ active แยกกัน และ policy revision ไม่ใช่ pause `controlRevision`
 - forward move ไม่ลบ history/ไม่ reset watermark; backward move ไม่ backfill อัตโนมัติ
 - historical backfill ต้องเป็นคำขอ explicit ของ `SUPER_ADMIN` ทีละ Agent และไม่เลื่อน watermark
-- `v1.1.16` ที่เผยแพร่แล้ว immutable; source `v1.1.17` ยังเป็น unpublished release candidate
+- `v1.1.16` ที่เผยแพร่แล้ว immutable; `v1.1.17` เป็น local/unpublished Dev build และรุ่นทดสอบ
+  durable recovery ถัดไปคือ `v1.1.18` โดยยังห้าม tag/release จนกว่า owner จะอนุมัติ
 
 ## 7. กติกาเวลาทดสอบในเครื่อง
 

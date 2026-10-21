@@ -113,7 +113,12 @@ Agent รุ่นเก่าที่ไม่ส่งทั้งสอง f
   "recordsSent": 1234, "lastVisitDate": "2026-09-04", "errorMessage": null }
 ```
 
-`COMPLETED` จะเลื่อน watermark `agents.last_synced_visit_date`
+`COMPLETED` จะเลื่อน watermark `agents.last_synced_visit_date` ภายใน transaction เดียวกับการปิด batch
+คำขอซ้ำจะสำเร็จแบบ idempotent เฉพาะเมื่อ authenticated Agent, facility, `batchRef`, terminal status,
+จำนวน records, completion watermark และ error payload ตรงกับผลเดิมทุกค่า แล้วตอบ
+`{ "ok": true, "replayed": true }` โดยไม่เพิ่ม `syncCount`, ไม่เขียน audit และไม่เลื่อน watermark ซ้ำ
+ถ้า identity หรือ payload ต่างกันตอบ `409 SYNC_COMPLETION_CONFLICT` และไม่แก้สถานะใด ๆ Agent รุ่น
+v1.1.16 ยังใช้ first-completion response `{ "ok": true }` แบบเดิมได้และไม่ต้องรู้จัก field `replayed`
 
 ## 3. รูปแบบ error
 

@@ -1112,7 +1112,8 @@ SYNC.md
 
 > สถานะ: Phase B–E implement ใน source แล้ว ครอบคลุม policy persistence, Agent application,
 > UI, activation/enforcement, idempotent upload, controlled historical backfill และ nullable
-> queue/quarantine telemetry; ยังไม่ได้ deploy, activate production policy หรือ publish Agent v1.1.17
+> queue/quarantine telemetry รวมถึง normal-sync durable recovery/idempotent completion ใน v1.1.18;
+> ยังไม่ได้ deploy, activate production policy หรือ publish Agent รุ่นใหม่
 
 ระบบจะมี **Global Sync Start Date เพียงค่าเดียวสำหรับทั้งอำเภอ** และเฉพาะ `SUPER_ADMIN`
 เท่านั้นที่สร้างหรือเปลี่ยนนโยบายได้ Central เป็นเจ้าของ desired policy โดยแยกสถานะ
@@ -1148,8 +1149,9 @@ SYNC.md
   authenticate ฝั่ง server ไม่ใช่ IP, MAC หรือค่า `facility_id` จาก frontend
 - ต้องรักษา Agent ID, credential, enrollment, settings, queue/quarantine, updater state,
   pause/control state และ audit history เดิม
-- release/tag `v1.1.16` ที่เผยแพร่แล้วเป็น immutable; รุ่น Agent ที่วางแผนถัดไปคือ `v1.1.17`
-  แต่ห้ามสร้าง tag หรือ release ก่อนผ่าน staged rollout และ owner approval
+- release/tag `v1.1.16` ที่เผยแพร่แล้วเป็น immutable; `v1.1.17` เป็น local/unpublished Dev build
+  ที่ไม่มี tag/release รุ่น Agent สำหรับทดสอบ durable recovery ถัดไปคือ `v1.1.18` แต่ห้ามสร้าง tag
+  หรือ release ก่อนผ่าน staged rollout และ owner approval
 
 รายละเอียดแยกตาม concern อยู่ใน `docs/GLOBAL_SYNC_BACKFILL.md`, `docs/ARCHITECTURE.md`, `docs/API.md`,
 `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`, `docs/SECURITY.md` และ

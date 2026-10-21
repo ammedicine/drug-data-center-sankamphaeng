@@ -62,6 +62,12 @@ TiDB             ── drug_usage (unique record_key) + sync_batches + sync_rej
 Web              ── aggregate ในฐานข้อมูล แล้วแสดงผล
 ```
 
+Normal sync มี durable recovery manifest แยกจาก historical-backfill context และบันทึก `batchRef`,
+ช่วงวันที่ และ phase แบบ temp+rename ก่อน `sync/start` request แรก เมื่อ Central รับ chunk แล้ว Agent
+เก็บ acknowledged receipt ขนาดเล็กไว้จนกว่า batch จะ complete, reconciliation ผ่าน และ local watermark
+ถูกเขียนอย่าง durable จึงล้าง manifest/receipt ได้ การ restart ต้องกลับเข้า batch เดิมเท่านั้นและต้อง
+fail closed ถ้า queue, receipt, hash หรือ batch evidence ไม่ตรงกัน
+
 ## 4. เหตุผลของการตัดสินใจสำคัญ
 
 - **Agent อ่านผ่าน `visit.visitdate` ไม่ใช่ `visitdrug.dateupdate`** — จาก DB จริงพบว่า
@@ -93,6 +99,10 @@ Central เก็บ policy ใน `system_settings` และส่ง desired/
 แล้ว และ upload chunk receipts ป้องกัน counter/reject ซ้ำจาก ambiguous retry แล้ว Phase E เพิ่ม
 คำขอ backfill ทีละ Agent, narrow pause authorization, nullable queue/quarantine telemetry และ
 current-request readiness ตาม contract ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
+
+Agent v1.1.18 เพิ่ม normal-sync durable recovery โดยไม่เปลี่ยน historical intent: Central ปิด normal
+batch แบบ transactional/idempotent และ exact duplicate `/sync/complete` ไม่มี counter, audit หรือ
+watermark side effect ซ้ำ ส่วน payload หรือ authenticated Agent/batch identity ที่ต่างกันต้องถูกปฏิเสธ
 
 ```
 SUPER_ADMIN sets desired policy

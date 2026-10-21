@@ -79,12 +79,13 @@ git push        # Vercel build อัตโนมัติ
 ## 5. Global Sync Start Date rollout (code implemented; rollout not performed)
 
 โค้ด Phase B–E พร้อมสำหรับลำดับ deploy แบบ Central-first ด้านล่าง แต่ยังไม่ได้ apply migration
-0012–0014 ใน production, publish Agent v1.1.17, activate policy หรือเริ่ม rollout:
+0012–0014 ใน production, publish Agent รุ่นใหม่, activate policy หรือเริ่ม rollout:
 
 1. backup Central DB แล้ว apply เฉพาะ additive migration ที่ตรวจแล้ว
 2. deploy Central ที่เข้าใจ policy/heartbeat ใหม่ แต่ยังไม่มี policy row และยังไม่ enforce
 3. ยืนยันว่า Agent `v1.1.16` ยัง sync แบบ legacy โดยไม่ต้อง remote acknowledgement
-4. build รุ่นใหม่เป็น `v1.1.17` โดยไม่แก้ tag/release `v1.1.16` ที่เผยแพร่แล้ว
+4. build รุ่นใหม่เป็น `v1.1.18` โดยไม่แก้ tag/release `v1.1.16` ที่เผยแพร่แล้ว (`v1.1.17`
+   เป็น local/unpublished Dev build และไม่มี tag/release จึงห้ามนำเลขเดิมกลับมาใช้กับ recovery build)
 5. pause และอัปเกรด canary หนึ่งเครื่อง ตรวจว่า identity, credential, enrollment, settings,
    queue/quarantine และ updater state ไม่เปลี่ยน
 6. สร้าง desired policy รอ canary persist/apply และรายงาน revision ตรงกัน
@@ -109,8 +110,10 @@ Rollback ห้ามลด revision, ลบข้อมูล หรือแ�
 
 - [ ] apply Central migrations 0012–0014 ก่อน และ deploy Central ก่อน Agent
 - [ ] pause Agent เป้าหมายทั้งหมด แล้วเลือก canary เพียงหนึ่ง Agent
-- [ ] upgrade canary เป็น v1.1.17 โดยยืนยัน Agent identity, credential, enrollment, facility,
+- [ ] upgrade canary เป็น v1.1.18 โดยยืนยัน Agent identity, credential, enrollment, facility,
   settings, watermark, queue/quarantine, updater/pause state และ installer/scheduled-task identity เดิม
+- [ ] จำลอง response loss/restart บน canary แล้วตรวจว่า normal recovery ใช้ batchRef เดิม, ส่ง pending
+  queue ต่อ, complete/reconcile สำเร็จ และเลื่อน watermark เพียงครั้งเดียว
 - [ ] ยืนยัน heartbeat, capability `remoteSyncStartDate` และ `idempotentUploadChunk`
 - [ ] ยืนยัน `remoteSyncStartDate` เป็น `APPLIED` ตรง revision และ queue/quarantine telemetry ไม่ใช่
   healthy zero เมื่อไม่มีข้อมูล

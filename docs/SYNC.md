@@ -22,7 +22,7 @@ Extract → Validate → Normalize → Batch → Upload → Verify → Commit
 | `INITIAL` | ตั้งแต่ `MIN(visitdate)` ถึง `MAX(visitdate)` |
 | `INCREMENTAL` | `watermark - reprocessDays` ถึง `MAX(visitdate)` |
 | `MANUAL_RANGE` | ตามที่ผู้ใช้ระบุ `--from/--to` |
-| `RETRY` | ส่งเฉพาะ chunk ที่ค้างในคิว (`sdc-agent retry`) |
+| `RETRY` | ถ้ามี normal batch ค้าง ให้กู้ batch เดิม ส่ง queue ต่อ แล้ว complete/reconcile/watermark; ถ้าไม่มีจึงใช้ legacy queue flush (`sdc-agent retry`) |
 
 **ทำไมต้อง `reprocessDays` (ค่าเริ่มต้น 7):** JHCIS V5.1 ไม่มี change marker ที่เชื่อถือได้
 (`visitdrug.dateupdate` ล้าหลัง `visit.visitdate` จริงหลายเดือนใน DB ตัวอย่าง)
@@ -97,6 +97,11 @@ record_key = sha256(facility_id | pcucode | visit_no | drug_code)
 
 ระดับ batch: `sync/start` ด้วย `batchRef` เดิมจะคืน batch เดิม (`resumed: true`) ไม่สร้างซ้ำ
 
+ระดับ completion: Agent persist phase `COMPLETING` ก่อนเรียก `sync/complete`; exact duplicate ของ batch
+ที่ complete แล้วคืนผลเดิมโดยไม่มี counter/audit/watermark side effect ซ้ำ ส่วน identity หรือ completion
+payload ที่ต่างกัน fail closed การปิด batch และอัปเดต Agent เป็น transaction เดียว จึงกู้กรณี Central
+commit สำเร็จแต่ response สูญหายได้
+
 ระดับ chunk: Agent ที่มี `idempotentUploadChunk` บันทึก `chunkRef` และ semantic payload SHA-256
 ลง queue แบบ temp+rename ก่อน request แรกและใช้ค่าเดิมหลัง retry/restart Central ตรวจ hash เองและใช้
 receipt unique `(agent_id, batch_id, chunk_ref)` ถ้า receipt สำเร็จแล้วจะคืน stable result เดิมโดยไม่
@@ -108,12 +113,21 @@ upsert/นับ/reject ซ้ำ; ref เดิมแต่ payload ต่า�
 ```
 agent/data/queue/pending/<batchRef>__000001.json   รอส่ง
 agent/data/queue/failed/<batchRef>__000001.json    ล้มเหลวถาวร (4xx)
+agent/data/queue/receipts/<batchRef>__000001.json  หลักฐาน chunk ที่ Central รับแล้ว
+agent/data/queue/normal-sync-recovery.json         identity/phase ของ normal batch ที่ยังไม่ปิด
 ```
 
 - เขียนแบบ temp แล้ว rename → ไฟล์ที่อ่านได้คือไฟล์ที่สมบูรณ์เสมอ
 - เน็ตหลุด → `flushQueue()` หยุดทันที เก็บของไว้ รอบถัดไปส่งต่อจากเดิม
 - 4xx (ยกเว้น 408/429) → ย้ายเข้า `failed/` เพราะส่งกี่ครั้งก็ไม่ผ่าน
 - `sdc-agent retry` ย้าย `failed/` กลับเข้า `pending/` แล้วลองใหม่
+- manifest และ acknowledged receipts เขียนแบบ temp+rename; manifest ต้องมีอยู่ก่อน `sync/start`
+- receipt เก็บ `chunkRef`/payload hash หลัง upload สำเร็จ เพื่อให้ restart กลาง extraction re-read ได้โดย
+  ไม่สร้าง identity ใหม่หรือส่ง counter ซ้ำ และล้างได้หลัง Central completion + reconciliation + durable
+  local watermark เท่านั้น
+- การรับ queue รุ่นเก่าต้องพิสูจน์ batch เดียว, exact range และ expected = accepted + rejected + pending;
+  ถ้าหลักฐานไม่ตรงต้องหยุด ไม่เดา batch/identity ใหม่
+- normal recovery ไม่ใช้ historical pause exception และ historical backfill ไม่ใช้ normal manifest
 
 ### 4.1 ผู้ผลิต/ผู้บริโภค + คิวมีขอบเขต (2026-09-06)
 

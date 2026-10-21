@@ -95,6 +95,8 @@ Service ต้องรันด้วยบัญชีที่อ่าน `a
 agent.config.json          credential + ค่าที่ Central อนุมัติ  ← ห้ามแชร์/commit
 data/state.json            watermark + ลำดับ batch
 data/queue/pending|failed  คิวออฟไลน์
+data/queue/receipts        หลักฐาน chunk ที่ Central รับแล้วระหว่าง batch recovery
+data/queue/normal-sync-recovery.json  normal batch identity/phase ที่ยังไม่ปิด
 data/logs/agent-YYYY-MM-DD.log
 ```
 
@@ -107,7 +109,7 @@ Log ผ่านตัวกรอง redact — คำที่เข้าข�
 (จำนวนจ่าย: `unit` → `qty` → `quantity` → `amount` …) ถ้าหาไม่พบ Agent จะ **หยุดและรายงาน**
 ว่าต้องตรวจคอลัมน์ใด ไม่เดา ไม่ fail เงียบ ผลการตรวจถูกส่งขึ้น Central ให้ผู้ดูแลเห็นในหน้า Agent
 
-## 8. Global Sync Start Date compatibility (implemented in v1.1.17 code; release pending)
+## 8. Global Sync Start Date และ durable recovery
 
 Agent v1.1.17 ประกาศ capability `remoteSyncStartDate` รับ desired policy จาก
 heartbeat บันทึก effective `syncStartDate` กับ applied revision แบบ temp+rename แล้วจึงรายงาน
@@ -134,5 +136,10 @@ acknowledgement กลับ Central revision นี้แยกจาก pause 
 queue/quarantine, pause/control state และ updater state เดิม Agent รุ่นเก่าหรือออฟไลน์ต้องคง
 centrally paused จนกว่าอัปเกรด รับ policy และรายงาน applied แล้ว JHCIS ยังเป็น read-only ทุกกรณี
 
-release/tag `v1.1.16` ที่เผยแพร่แล้วห้ามแก้ โค้ด capability นี้เตรียมไว้สำหรับ `v1.1.17`
-แต่ยังไม่ publish installer, สร้าง tag หรือสร้าง release
+release/tag `v1.1.16` ที่เผยแพร่แล้วห้ามแก้ `v1.1.17` ถูก build และใช้ทดสอบบนเครื่อง Dev แบบ
+local/unpublished แต่ไม่เคยมี tag/release รุ่นทดสอบถัดไปจึงเป็น `v1.1.18`
+
+v1.1.18 เพิ่ม normal-sync recovery manifest ก่อน `sync/start`, durable acknowledged chunk receipts,
+same-batch retry/restart/completion และล้าง recovery state หลัง Central completion, reconciliation และ
+durable watermark เท่านั้น หลักฐาน legacy queue ต้องตรง exact batch/range/count มิฉะนั้นหยุดแบบ fail closed
+กลไกนี้ไม่เปลี่ยน JHCIS query/write behavior, ordinary MANUAL_RANGE หรือ authorized historical backfill

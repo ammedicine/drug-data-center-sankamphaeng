@@ -31,7 +31,7 @@ C:\Program Files\SDC Agent\
 ```powershell
 cd agent
 .\installer\build.ps1              # ทำครบทุกขั้นตอน
-.\installer\build.ps1 -Version 1.1.17  # สร้าง unpublished release candidate แบบระบุ version
+.\installer\build.ps1 -Version 1.1.18  # สร้าง unpublished release candidate แบบระบุ version
 .\installer\build.ps1 -SkipInstaller   # ข้ามขั้นตอน Inno Setup
 ```
 
@@ -44,7 +44,8 @@ cd agent
 
 การอัปเกรดต้องคง AppId ของ installer และเก็บ `%ProgramData%\SDCAgent` ไว้ทั้งหมด ซึ่งรวม
 credential, enrollment, facility/Agent identity, settings, watermark, queue/failed/quarantine,
-historical backfill context, updater และ pause state ห้ามทดสอบทับ production Agent
+normal-sync recovery manifest/receipts, historical backfill context, updater และ pause state
+ห้ามทดสอบทับ production Agent
 
 ## หลังติดตั้งที่ รพ.สต.
 

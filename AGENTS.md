@@ -96,4 +96,5 @@ Preserve legacy operation when no policy exists, keep desired policy separate fr
 enforcement and pause control, preserve all Central history and Agent state, and keep purge
 separate. Forward operation must remain compatible with older Agents; historical backfill requires
 an explicit one-Agent request and the approved idempotent chunk gate. The published `v1.1.16`
-release/tag is immutable; `v1.1.17` source is an unpublished release candidate until owner review.
+release/tag is immutable; `v1.1.17` is a local/unpublished Dev build and the next durable-recovery
+test version is `v1.1.18` until owner review authorizes any release action.
