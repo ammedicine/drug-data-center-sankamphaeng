@@ -24,6 +24,7 @@ import {
   idempotentUploadChunkProcessor,
   type UploadChunkDatabaseTransaction,
 } from "./idempotent-upload-chunk";
+import { assessSyncCompletion } from "./sync-completion";
 import { agents, drugUsage, drugs, syncBatches, syncRejects } from "@/lib/db/schema";
 import { newId } from "@/lib/ids";
 import {
@@ -438,36 +439,76 @@ export async function ingestIdempotentUsageChunk(input: {
 export async function completeBatch(input: {
   agent: AuthenticatedAgent;
   batchId: string;
+  batchRef: string;
   status: "COMPLETED" | "FAILED" | "ABORTED";
   recordsRead: number;
   recordsSent: number;
   lastVisitDate: string | null;
   errorMessage?: string | null;
-}): Promise<void> {
+}): Promise<{ replayed: boolean }> {
   await assertAgentSyncAllowed(input.agent.agentId);
-  const [batch] = await db
-    .select({ rangeFrom: syncBatches.rangeFrom, rangeTo: syncBatches.rangeTo })
-    .from(syncBatches)
-    .where(eq(syncBatches.id, input.batchId))
-    .limit(1);
-  const servedRequest = Boolean(
-    input.agent.syncRequestedFrom &&
-      batch?.rangeFrom === input.agent.syncRequestedFrom &&
-      batch?.rangeTo === input.agent.syncRequestedTo,
-  );
+  const payload = {
+    authenticatedAgentId: input.agent.agentId,
+    authenticatedFacilityId: input.agent.facilityId,
+    batchRef: input.batchRef,
+    status: input.status,
+    recordsRead: input.recordsRead,
+    recordsSent: input.recordsSent,
+    lastVisitDate: input.lastVisitDate,
+    errorMessage: input.errorMessage ?? null,
+  };
+  return db.transaction(async (tx) => {
+    const selectBatch = () =>
+      tx
+        .select({
+          id: syncBatches.id,
+          agentId: syncBatches.agentId,
+          facilityId: syncBatches.facilityId,
+          batchRef: syncBatches.batchRef,
+          status: syncBatches.status,
+          rangeFrom: syncBatches.rangeFrom,
+          rangeTo: syncBatches.rangeTo,
+          completedAt: syncBatches.completedAt,
+          recordsRead: syncBatches.recordsRead,
+          recordsSent: syncBatches.recordsSent,
+          recordsRejected: syncBatches.recordsRejected,
+          errorMessage: syncBatches.errorMessage,
+        })
+        .from(syncBatches)
+        .where(eq(syncBatches.id, input.batchId))
+        .limit(1);
+    const [batch] = await selectBatch();
+    if (!batch) throw new Error("Sync batch was not started");
+    const completion = assessSyncCompletion(batch, payload);
+    if (completion.replay) return { replayed: true };
+    const servedRequest = Boolean(
+      input.agent.syncRequestedFrom &&
+        batch.rangeFrom === input.agent.syncRequestedFrom &&
+        batch.rangeTo === input.agent.syncRequestedTo,
+    );
 
-  await db
-    .update(syncBatches)
-    .set({
-      status: input.status,
-      completedAt: new Date(),
-      recordsRead: input.recordsRead,
-      errorMessage: input.errorMessage?.slice(0, 2000) ?? null,
-    })
-    .where(eq(syncBatches.id, input.batchId));
+    const claimed = await tx
+      .update(syncBatches)
+      .set({
+        status: input.status,
+        completedAt: new Date(),
+        recordsRead: input.recordsRead,
+        errorMessage: input.errorMessage?.slice(0, 2000) ?? null,
+      })
+      .where(and(eq(syncBatches.id, input.batchId), eq(syncBatches.status, batch.status)));
+    const claimedRows = Number(
+      (claimed as unknown as [{ affectedRows?: number } | undefined])?.[0]?.affectedRows ?? 0,
+    );
+    if (claimedRows === 0) {
+      const [latest] = await selectBatch();
+      if (!latest) throw new Error("Sync batch disappeared during completion");
+      const raced = assessSyncCompletion(latest, payload);
+      if (raced.replay) return { replayed: true };
+      throw new Error("Sync batch changed during completion");
+    }
 
   if (input.status === "COMPLETED") {
-    await db
+    await tx
       .update(agents)
       .set({
         status: "ONLINE",
@@ -509,7 +550,7 @@ export async function completeBatch(input: {
       })
       .where(eq(agents.id, input.agent.agentId));
   } else {
-    await db
+    await tx
       .update(agents)
       .set({
         status: "ERROR",
@@ -519,6 +560,8 @@ export async function completeBatch(input: {
       })
       .where(eq(agents.id, input.agent.agentId));
   }
+    return { replayed: false };
+  });
 }
 
 /* ------------------------------------------------------- clearing data */

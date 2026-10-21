@@ -339,6 +339,15 @@ async function retry(): Promise<void> {
   const runner = new SyncRunner();
 
   const moved = queue.requeueFailed();
+  if (queue.count("PENDING") > 0) {
+    const recovered = await withSyncLock("retry (manual)", () => runner.run({ mode: "RETRY" }));
+    console.log(
+      `นำกลับเข้าคิว ${moved} chunk · batch ${recovered.batchRef} · ` +
+        `บันทึกสำเร็จ ${recovered.accepted} · ปฏิเสธ ${recovered.rejected} · ` +
+        `ค้าง ${recovered.pendingChunks}`,
+    );
+    return;
+  }
   const result = await withSyncLock("retry (manual)", () => runner.flushQueue());
   console.log(
     `นำกลับเข้าคิว ${moved} chunk · บันทึกสำเร็จ ${result.accepted} · ปฏิเสธ ${result.rejected} · ค้าง ${result.remaining}`,

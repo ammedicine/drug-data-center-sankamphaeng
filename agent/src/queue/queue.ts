@@ -31,6 +31,15 @@ export interface QueuedChunk {
   lastError?: string | null;
 }
 
+interface AcknowledgedChunkReceipt {
+  batchRef: string;
+  sequence: number;
+  chunkRef: string;
+  payloadSha256: string;
+  records: number;
+  acknowledgedAt: string;
+}
+
 export interface QuarantineSummary {
   total: number;
   covered: number;
@@ -70,6 +79,7 @@ export class OfflineQueue {
     this.root = ensure(resolve(dataDirectory, "queue"));
     ensure(this.pendingDir());
     ensure(this.failedDir());
+    ensure(this.receiptsDir());
   }
 
   private pendingDir(): string {
@@ -78,6 +88,14 @@ export class OfflineQueue {
 
   private failedDir(): string {
     return join(this.root, "failed");
+  }
+
+  private receiptsDir(): string {
+    return join(this.root, "receipts");
+  }
+
+  private receiptPath(batchRef: string, sequence: number): string {
+    return join(this.receiptsDir(), `${batchRef}__${String(sequence).padStart(6, "0")}.json`);
   }
 
   /**
@@ -105,6 +123,38 @@ export class OfflineQueue {
   /** Persists a chunk before it is uploaded, so a crash never loses data. */
   enqueue(chunk: Omit<QueuedChunk, "file" | "attempts">): string {
     const target = this.pathFor("PENDING", chunk.batchRef, chunk.sequence);
+    const receiptFile = this.receiptPath(chunk.batchRef, chunk.sequence);
+    if (existsSync(receiptFile)) {
+      let receipt: AcknowledgedChunkReceipt;
+      try {
+        receipt = JSON.parse(readFileSync(receiptFile, "utf8")) as AcknowledgedChunkReceipt;
+      } catch {
+        throw new Error(`Acknowledged chunk receipt is unreadable (${receiptFile})`);
+      }
+      const incomingHash = syncUploadPayloadSha256(chunk);
+      const expectedChunkRef = `${chunk.batchRef}:${String(chunk.sequence).padStart(6, "0")}`;
+      if (
+        receipt.batchRef !== chunk.batchRef ||
+        receipt.sequence !== chunk.sequence ||
+        receipt.chunkRef !== expectedChunkRef ||
+        receipt.payloadSha256 !== incomingHash
+      ) {
+        throw new Error(
+          `Acknowledged chunk payload changed during recovery (${chunk.batchRef}:${chunk.sequence})`,
+        );
+      }
+      return receiptFile;
+    }
+    if (existsSync(target)) {
+      const existing = this.read(target);
+      if (!existing) throw new Error(`Queued chunk is unreadable (${target})`);
+      const existingHash = syncUploadPayloadSha256(existing);
+      const incomingHash = syncUploadPayloadSha256(chunk);
+      if (existingHash !== incomingHash) {
+        throw new Error(`Queued chunk payload changed during recovery (${chunk.batchRef}:${chunk.sequence})`);
+      }
+      return target;
+    }
     const temp = `${target}.tmp`;
     writeFileSync(temp, JSON.stringify({ ...chunk, attempts: 0 }), "utf8");
     renameSync(temp, target); // atomic on the same volume
@@ -168,9 +218,52 @@ export class OfflineQueue {
     return readdirSync(dir).filter((name) => name.endsWith(".json")).length;
   }
 
-  /** Chunk uploaded successfully - drop it. */
+  /**
+   * Chunk uploaded successfully. Keep a small durable identity receipt until
+   * the whole batch is completed, so re-reading after a mid-extraction crash
+   * cannot mint a second chunk identity for rows Central already accepted.
+   */
   ack(chunk: QueuedChunk): void {
-    rmSync(chunk.file, { force: true });
+    const prepared = this.prepareForUpload(chunk);
+    const target = this.receiptPath(prepared.batchRef, prepared.sequence);
+    if (existsSync(target)) {
+      let existing: AcknowledgedChunkReceipt;
+      try {
+        existing = JSON.parse(readFileSync(target, "utf8")) as AcknowledgedChunkReceipt;
+      } catch {
+        throw new Error(`Acknowledged chunk receipt is unreadable (${target})`);
+      }
+      if (
+        existing.chunkRef !== prepared.chunkRef ||
+        existing.payloadSha256 !== prepared.payloadSha256
+      ) {
+        throw new Error(`Acknowledged chunk receipt conflicts with upload (${prepared.chunkRef})`);
+      }
+      rmSync(prepared.file, { force: true });
+      return;
+    }
+    const temp = `${target}.tmp`;
+    const receipt: AcknowledgedChunkReceipt = {
+      batchRef: prepared.batchRef,
+      sequence: prepared.sequence,
+      chunkRef: prepared.chunkRef,
+      payloadSha256: prepared.payloadSha256,
+      records: prepared.records.length,
+      acknowledgedAt: new Date().toISOString(),
+    };
+    writeFileSync(temp, JSON.stringify(receipt), "utf8");
+    renameSync(temp, target);
+    rmSync(prepared.file, { force: true });
+  }
+
+  /** Remove local receipts only after Central completion and local watermark durability. */
+  clearReceipts(batchRef: string): void {
+    const prefix = `${batchRef}__`;
+    for (const name of readdirSync(this.receiptsDir())) {
+      if (name.startsWith(prefix) && name.endsWith(".json")) {
+        rmSync(join(this.receiptsDir(), name), { force: true });
+      }
+    }
   }
 
   /** Upload failed - keep it pending (retryable) or park it in failed/. */

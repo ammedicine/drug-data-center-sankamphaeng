@@ -72,15 +72,19 @@ export const POST = withAgent(schema, async ({ agent, body }) => {
         retryable: historical.retryable ?? false,
       });
     }
-  } else await completeBatch({
-    agent,
-    batchId: batch.id,
-    status: body.status,
-    recordsRead: body.recordsRead,
-    recordsSent: body.recordsSent,
-    lastVisitDate: body.lastVisitDate,
-    errorMessage: body.errorMessage ?? null,
-  });
+  } else {
+    const completion = await completeBatch({
+      agent,
+      batchId: batch.id,
+      batchRef: body.batchRef,
+      status: body.status,
+      recordsRead: body.recordsRead,
+      recordsSent: body.recordsSent,
+      lastVisitDate: body.lastVisitDate,
+      errorMessage: body.errorMessage ?? null,
+    });
+    if (completion.replayed) return NextResponse.json({ ok: true, replayed: true });
+  }
 
   if (!historical) await writeAudit({
     actorType: "AGENT",

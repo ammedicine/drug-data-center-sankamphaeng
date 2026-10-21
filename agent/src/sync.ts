@@ -61,6 +61,11 @@ import {
   loadHistoricalBackfill,
   recordHistoricalBackfillCoverage,
 } from "./historical-backfill";
+import {
+  NormalSyncRecoveryStore,
+  legacyRecoveryManifest,
+  type NormalSyncRecoveryManifest,
+} from "./recovery";
 
 export type SyncMode = "INITIAL" | "INCREMENTAL" | "MANUAL_RANGE" | "RETRY";
 
@@ -326,6 +331,7 @@ export class SyncRunner {
   private readonly credential = requireCredential();
   private readonly client = new CentralClient(this.credential.centralApiUrl, this.credential);
   private readonly queue = new OfflineQueue(dataDir());
+  private readonly recovery = new NormalSyncRecoveryStore(dataDir());
 
   /**
    * Status fields recording that the Central API just answered us. Only ever
@@ -397,7 +403,7 @@ export class SyncRunner {
         continue;
       }
 
-      const flushed = await this.flushQueue(onlyBatchRef);
+      const flushed = await this.flushQueue(onlyBatchRef, Boolean(onlyBatchRef));
       delivered.accepted += flushed.accepted;
       delivered.rejected += flushed.rejected;
 
@@ -439,7 +445,10 @@ export class SyncRunner {
   }
 
   /** Uploads everything still sitting in the queue (called on every run). */
-  async flushQueue(onlyBatchRef?: string): Promise<{ accepted: number; rejected: number; remaining: number }> {
+  async flushQueue(
+    onlyBatchRef?: string,
+    allowPausedHistorical = false,
+  ): Promise<{ accepted: number; rejected: number; remaining: number }> {
     let accepted = 0;
     let rejected = 0;
 
@@ -449,7 +458,7 @@ export class SyncRunner {
       // the current atomic unit finish and stops before the next: the queue
       // stays coherent, nothing is half-delivered, and what is left on disk is
       // exactly what has not been sent yet.
-      if (!onlyBatchRef && shouldStopForPause()) {
+      if (!allowPausedHistorical && shouldStopForPause()) {
         beginPauseHandover();
         log.info("หยุดส่งข้อมูลตามคำสั่งผู้ดูแลระบบ ชุดที่ยังไม่ส่งยังอยู่ในคิว", {
           pending: this.queue.count("PENDING"),
@@ -477,8 +486,8 @@ export class SyncRunner {
       }
 
       const uploadStartedAt = Date.now();
+      const prepared = this.queue.prepareForUpload(chunk);
       try {
-        const prepared = this.queue.prepareForUpload(chunk);
         const result = await withRetry(
           () =>
             this.client.upload({
@@ -492,6 +501,7 @@ export class SyncRunner {
           {
             label: `upload ${chunk.batchRef}#${chunk.sequence}`,
             onRetry: () => (this.telemetry.retries += 1),
+            stopOnSyncPaused: !allowPausedHistorical,
           },
         );
         accepted += result.accepted;
@@ -525,7 +535,7 @@ export class SyncRunner {
       } catch (error) {
         const permanent = error instanceof CentralApiError && error.permanent;
         const message = error instanceof Error ? error.message : String(error);
-        this.queue.fail(chunk, message, permanent);
+        this.queue.fail(prepared, message, permanent);
         log.error("chunk upload failed", {
           batchRef: chunk.batchRef,
           sequence: chunk.sequence,
@@ -691,6 +701,16 @@ export class SyncRunner {
       }
 
       const extractor = new UsageExtractor(db, mapping);
+      let recovery = options.historicalBackfill ? null : this.recovery.load();
+      if (!recovery && !options.historicalBackfill && this.queue.count("PENDING") > 0) {
+        recovery = legacyRecoveryManifest(
+          loadStatus(),
+          this.queue.list("PENDING"),
+          this.queue.count("FAILED"),
+        );
+        if (recovery) this.recovery.save(recovery);
+      }
+      const resumingExistingBatch = Boolean(recovery);
       // Memoised so a mode that does need the bounds still pays for them once.
       let bounds: { min: string | null; max: string | null } | null = null;
       const loadBounds = async (): Promise<{ min: string | null; max: string | null }> => {
@@ -703,7 +723,9 @@ export class SyncRunner {
         }
         return bounds;
       };
-      const requested = await resolveRange(options.mode, this.credential, loadBounds, options);
+      const requested = recovery
+        ? { from: recovery.rangeFrom, to: recovery.rangeTo }
+        : await resolveRange(options.mode, this.credential, loadBounds, options);
       const sourceVersion = report.jhcisVersion ?? report.mysqlVersion;
 
       // Read only what the centre is missing.
@@ -722,7 +744,7 @@ export class SyncRunner {
       // explicitly - MANUAL_RANGE, a repair, a first full read - is read as
       // asked, because the reason for asking is usually that what is stored
       // for those days is not trusted, and counts alone would not show that.
-      const maySkip = options.skipMatchingMonths ?? options.mode === "INCREMENTAL";
+      const maySkip = !recovery && (options.skipMatchingMonths ?? options.mode === "INCREMENTAL");
       const range = maySkip
         ? await this.narrowToMissing(extractor, pcucode, requested)
         : requested;
@@ -786,8 +808,9 @@ export class SyncRunner {
         };
       }
 
-      const recordsRead = await extractor.countUsage(pcucode, range.from, range.to);
-      const batchRef = options.historicalBackfill?.batchRef ?? nextBatchRef();
+      const recordsRead = recovery?.recordsRead ?? await extractor.countUsage(pcucode, range.from, range.to);
+      const batchRef = recovery?.batchRef ?? options.historicalBackfill?.batchRef ?? nextBatchRef();
+      const recoveryEvidence = loadStatus();
 
       writeStatus({
         phase: "starting",
@@ -826,24 +849,45 @@ export class SyncRunner {
       });
 
       if (!options.dryRun) {
+        if (!options.historicalBackfill && !recovery) {
+          recovery = {
+            schemaVersion: 1,
+            intent: "NORMAL",
+            batchRef,
+            mode: options.mode,
+            rangeFrom: range.from,
+            rangeTo: range.to,
+            pcucode,
+            sourceVersion,
+            recordsRead,
+            recordsSent: 0,
+            verifiedThrough: clampToToday(range === requested ? range.to : requested.to),
+            phase: "UPLOADING",
+            createdAt: new Date().toISOString(),
+          } satisfies NormalSyncRecoveryManifest;
+          // Persist the batch identity before the first Central request. If
+          // sync/start commits but its response is lost, restart must retry
+          // this exact batchRef rather than inventing a second batch.
+          this.recovery.save(recovery);
+        }
         await withRetry(
           () =>
             this.client.startSync({
               batchRef,
-              mode: options.mode,
+              mode: recovery?.mode ?? options.mode,
               rangeFrom: range.from,
               rangeTo: range.to,
               pcucode,
               recordsRead,
               ...(options.historicalBackfill ? { historicalBackfill: options.historicalBackfill } : {}),
             }),
-          { label: "sync start" },
+          { label: "sync start", stopOnSyncPaused: !options.historicalBackfill },
         );
       }
 
       // 1. Extract + queue. Nothing is uploaded before it is durable on disk.
       let sequence = 0;
-      let recordsSent = 0;
+      let recordsSent = recovery?.recordsSent ?? 0;
       let buffer: DrugUsageRecord[] = [];
 
       const flushBuffer = () => {
@@ -876,6 +920,17 @@ export class SyncRunner {
       // read. When the queue reaches MAX_PENDING_CHUNKS the reader waits: a
       // slow link must not turn into a quarter of a million rows held in a
       // process that could be killed at any moment.
+      const pendingRecoveryRows = this.queue
+        .list("PENDING")
+        .filter((chunk) => chunk.batchRef === batchRef)
+        .reduce((sum, chunk) => sum + chunk.records.length, 0);
+      const extractionAlreadyDurable = Boolean(
+        resumingExistingBatch &&
+          recovery &&
+          (recovery.phase === "COMPLETING" ||
+            recoveryEvidence.recordsAccepted + recoveryEvidence.recordsRejected + pendingRecoveryRows ===
+              recovery.recordsRead),
+      );
       extractStartedAt = Date.now();
       const pipeline = { producerDone: false, uploaderStalled: false };
       const delivered = { accepted: 0, rejected: 0 };
@@ -883,12 +938,14 @@ export class SyncRunner {
         ? Promise.resolve()
         : this.consumeQueue(pipeline, delivered, options.historicalBackfill?.batchRef);
 
-      for await (const page of extractor.streamUsage(
-        pcucode,
-        range.from,
-        range.to,
-        EXTRACT_PAGE_SIZE,
-      )) {
+      if (!extractionAlreadyDurable) {
+        recordsSent = 0;
+        for await (const page of extractor.streamUsage(
+          pcucode,
+          range.from,
+          range.to,
+          EXTRACT_PAGE_SIZE,
+        )) {
         // Stop reading JHCIS at the next page boundary. A สถานบริการ that has
         // just been paused should not have its database walked for another
         // twenty minutes producing rows the centre will refuse.
@@ -907,11 +964,16 @@ export class SyncRunner {
             if (!options.dryRun) await this.awaitQueueSpace(pipeline);
           }
         }
+        }
+        flushBuffer();
       }
-      flushBuffer();
       extractEndedAt = Date.now();
       pipeline.producerDone = true;
       await uploader;
+      if (recovery && !options.historicalBackfill) {
+        recovery = { ...recovery, recordsSent, phase: "UPLOADING" };
+        this.recovery.save(recovery);
+      }
 
       if (options.dryRun) {
         log.info("dry run - chunks queued but not uploaded", { batchRef, chunks: sequence });
@@ -945,7 +1007,7 @@ export class SyncRunner {
                 drugs: page,
                 records: [],
               }),
-            { label: "upload drug master" },
+            { label: "upload drug master", stopOnSyncPaused: !options.historicalBackfill },
           );
           masterSent += page.length;
         }
@@ -964,12 +1026,39 @@ export class SyncRunner {
       //    the link was down, and leftovers from earlier runs. The totals are
       //    what the uploader already delivered plus whatever this last pass
       //    manages, so accepted and rejected count every row once.
-      const drained = await this.flushQueue(options.historicalBackfill?.batchRef);
+      const drained = await this.flushQueue(
+        options.historicalBackfill?.batchRef,
+        Boolean(options.historicalBackfill),
+      );
       const flushed = {
         accepted: delivered.accepted + drained.accepted,
         rejected: delivered.rejected + drained.rejected,
         remaining: drained.remaining,
       };
+
+      // A retryable interruption keeps the original batch open. Closing it as
+      // FAILED would make its durable chunks impossible to resume under the
+      // same receipt identities.
+      if (recovery && flushed.remaining > 0) {
+        writeStatus({
+          phase: "error",
+          syncPhase: "ERROR",
+          pendingChunks: flushed.remaining,
+          lastError: syncPaused() ? pausedMessage() : "อัปโหลดยังไม่ครบ",
+        });
+        return {
+          batchRef,
+          mode: recovery.mode,
+          rangeFrom: range.from,
+          rangeTo: range.to,
+          recordsRead,
+          recordsSent: recovery.recordsSent,
+          accepted: flushed.accepted,
+          rejected: flushed.rejected,
+          pendingChunks: flushed.remaining,
+          reconciliation: null,
+        };
+      }
 
       // 4. Count both sides before calling the run a success.
       //
@@ -987,12 +1076,33 @@ export class SyncRunner {
           to: range.to,
           expected: recordsRead,
           rejected: flushed.rejected,
-          repair: !options.historicalBackfill,
+          repair: !options.historicalBackfill && !resumingExistingBatch,
         });
       }
 
       const complete =
         flushed.remaining === 0 && (reconciliation === null || reconciliation.gap === 0);
+
+      if (recovery && !complete) {
+        writeStatus({
+          phase: "error",
+          syncPhase: "ERROR",
+          pendingChunks: flushed.remaining,
+          lastError: `Recovery reconciliation gap ${reconciliation?.gap ?? 0}`,
+        });
+        return {
+          batchRef,
+          mode: recovery.mode,
+          rangeFrom: range.from,
+          rangeTo: range.to,
+          recordsRead,
+          recordsSent: recovery.recordsSent,
+          accepted: flushed.accepted,
+          rejected: flushed.rejected,
+          pendingChunks: flushed.remaining,
+          reconciliation,
+        };
+      }
 
       // How far this run has actually verified.
       //
@@ -1028,6 +1138,10 @@ export class SyncRunner {
           pendingChunks: flushed.remaining, reconciliation,
         };
       }
+      if (recovery && !options.historicalBackfill) {
+        recovery = { ...recovery, phase: "COMPLETING", verifiedThrough };
+        this.recovery.save(recovery);
+      }
       await withRetry(
         () =>
           this.client.completeSync({
@@ -1052,11 +1166,12 @@ export class SyncRunner {
               },
             } : {}),
           }),
-        { label: "sync complete" },
+        { label: "sync complete", stopOnSyncPaused: !options.historicalBackfill },
       );
 
       if (complete && options.historicalBackfill) {
         recordHistoricalBackfillCoverage(options.historicalBackfill, pcucode, this.queue);
+        this.queue.clearReceipts(batchRef);
       }
 
       if (complete && !options.historicalBackfill) {
@@ -1066,6 +1181,10 @@ export class SyncRunner {
           lastSyncedVisitDate: verifiedThrough,
           lastSyncAt: new Date().toISOString(),
         });
+        if (recovery) {
+          this.recovery.clear();
+          this.queue.clearReceipts(batchRef);
+        }
       }
 
       writeStatus({
@@ -1131,6 +1250,7 @@ export class SyncRunner {
       // still not in flight, and leaving this set would make the next
       // pause look like a handover from a run that had already ended.
       markRunInFlight(false);
+      if (syncPaused()) completePauseHandover();
       await db.close();
     }
   }

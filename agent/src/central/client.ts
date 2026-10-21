@@ -212,6 +212,8 @@ export async function withRetry<T>(
     label: string;
     /** counted so a run can report how much of its time went on retries */
     onRetry?: () => void;
+    /** New recovery flows may obey an administrative pause immediately. */
+    stopOnSyncPaused?: boolean;
   } = { label: "request" },
 ): Promise<T> {
   const attempts = options.attempts ?? Number(process.env.AGENT_RETRY_ATTEMPTS ?? 5);
@@ -224,9 +226,13 @@ export async function withRetry<T>(
     } catch (error) {
       lastError = error;
       const permanent = error instanceof CentralApiError && error.permanent;
+      const administrativelyPaused =
+        options.stopOnSyncPaused &&
+        error instanceof CentralApiError &&
+        error.code === "SYNC_PAUSED_BY_ADMIN";
       const networkIssue = error instanceof Error && RETRYABLE_NETWORK.test(error.message);
 
-      if (permanent || (attempt === attempts && !networkIssue)) throw error;
+      if (administrativelyPaused || permanent || (attempt === attempts && !networkIssue)) throw error;
       if (attempt === attempts) throw error;
 
       // The server's own instruction wins over our backoff curve: it knows

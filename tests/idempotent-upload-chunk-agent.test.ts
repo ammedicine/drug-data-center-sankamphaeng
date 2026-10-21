@@ -89,4 +89,97 @@ describe("Agent upload-chunk identity", () => {
       records: legacy.records,
     });
   });
+
+  it("keeps the prepared identity when a retryable upload fails and the process restarts", () => {
+    const queue = new OfflineQueue(home);
+    queue.enqueue({
+      batchRef: "SYNC-20261021-000001",
+      sequence: 6,
+      pcucode: "05957",
+      sourceVersion: "5.6.45",
+      records: [record("RETRY")],
+    });
+
+    const prepared = queue.prepareForUpload(queue.list()[0]);
+    queue.fail(prepared, "temporary network failure", false);
+
+    const restarted = new OfflineQueue(home).list()[0];
+    expect(restarted).toMatchObject({
+      chunkRef: "SYNC-20261021-000001:000006",
+      payloadSha256: prepared.payloadSha256,
+      attempts: 1,
+      lastError: "temporary network failure",
+    });
+    expect(new OfflineQueue(home).prepareForUpload(restarted).payloadSha256).toBe(
+      prepared.payloadSha256,
+    );
+  });
+
+  it("replays the same recovered sequence but fails closed when its payload changed", () => {
+    const queue = new OfflineQueue(home);
+    const original = {
+      batchRef: "SYNC-RECOVERY",
+      sequence: 1,
+      pcucode: "05957",
+      sourceVersion: null,
+      records: [record("SAME")],
+    };
+    const file = queue.enqueue(original);
+    expect(queue.enqueue(original)).toBe(file);
+    expect(queue.list()).toHaveLength(1);
+    expect(() => queue.enqueue({ ...original, records: [record("CHANGED")] })).toThrow(
+      /payload changed during recovery/,
+    );
+  });
+
+  it("keeps an acknowledged chunk receipt until the batch is durably completed", () => {
+    const queue = new OfflineQueue(home);
+    const original = {
+      batchRef: "SYNC-PARTIAL-RECOVERY",
+      sequence: 1,
+      pcucode: "05957",
+      sourceVersion: null,
+      records: [record("ACKED")],
+    };
+    queue.enqueue(original);
+    const prepared = queue.prepareForUpload(queue.list()[0]);
+    queue.ack(prepared);
+
+    expect(new OfflineQueue(home).list()).toHaveLength(0);
+    expect(() => new OfflineQueue(home).enqueue(original)).not.toThrow();
+    expect(new OfflineQueue(home).list()).toHaveLength(0);
+    expect(() =>
+      new OfflineQueue(home).enqueue({ ...original, records: [record("CHANGED")] }),
+    ).toThrow(/Acknowledged chunk payload changed during recovery/);
+
+    queue.clearReceipts(original.batchRef);
+    queue.enqueue(original);
+    expect(queue.list()).toHaveLength(1);
+  });
+
+  it("fails closed when an acknowledged receipt identity was corrupted", () => {
+    const queue = new OfflineQueue(home);
+    const original = {
+      batchRef: "SYNC-RECEIPT-CONFLICT",
+      sequence: 4,
+      pcucode: "05957",
+      sourceVersion: null,
+      records: [record("RECEIPT")],
+    };
+    queue.enqueue(original);
+    queue.ack(queue.prepareForUpload(queue.list()[0]));
+
+    const receiptFile = join(
+      home,
+      "queue",
+      "receipts",
+      "SYNC-RECEIPT-CONFLICT__000004.json",
+    );
+    const receipt = JSON.parse(readFileSync(receiptFile, "utf8"));
+    writeFileSync(receiptFile, JSON.stringify({ ...receipt, chunkRef: "wrong-ref" }), "utf8");
+
+    expect(() => new OfflineQueue(home).enqueue(original)).toThrow(
+      /Acknowledged chunk payload changed during recovery/,
+    );
+  });
 });

@@ -105,6 +105,21 @@ describe("the released client's own classification", () => {
 });
 
 describe("a paused refusal reaching the released retry loop", () => {
+  it("lets the new recovery path stop immediately without changing legacy retry defaults", async () => {
+    const { withRetry, CentralApiError } = await clientModule();
+    let attempts = 0;
+    await expect(
+      withRetry(
+        async () => {
+          attempts += 1;
+          throw new CentralApiError(SYNC_PAUSED_STATUS, SYNC_PAUSED_CODE, "paused", 45);
+        },
+        { label: "new recovery", attempts: 5, stopOnSyncPaused: true },
+      ),
+    ).rejects.toMatchObject({ code: SYNC_PAUSED_CODE });
+    expect(attempts).toBe(1);
+  });
+
   it("gives up after its attempts without a storm, and stays bounded", async () => {
     const { withRetry, CentralClient } = await clientModule();
     // The centre asks for one second rather than forty-five, purely so this
