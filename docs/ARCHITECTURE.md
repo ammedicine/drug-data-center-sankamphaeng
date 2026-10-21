@@ -76,7 +76,7 @@ Web              ── aggregate ในฐานข้อมูล แล้ว
 - **ไม่ใช้ FOREIGN KEY บน TiDB** — รักษา integrity ที่ชั้น service แทน เพราะ FK บน TiDB
   เพิ่งรองรับและมีต้นทุนต่อ bulk upsert หลายล้านแถว (ดู docs/DATABASE.md)
 
-## 5. Global Sync Start Date (forward policy implemented; rollout pending)
+## 5. Global Sync Start Date and controlled historical backfill
 
 Global Sync Start Date เป็นนโยบายเดียวระดับอำเภอที่ Central เป็นเจ้าของและ `SUPER_ADMIN`
 เท่านั้นที่เปลี่ยนได้ State machine แยกสองสถานะ:
@@ -90,8 +90,9 @@ revision นี้แยกจาก pause `controlRevision` โดยเด็�
 Central เก็บ policy ใน `system_settings` และส่ง desired/active state ผ่าน heartbeat แบบ optional
 พร้อมรับ applied revision ที่ผูกกับ Agent identity ซึ่ง authenticate แล้วเท่านั้น Agent v1.1.17
 นำ desired policy ไปใช้ และ `/admin/fleet` รองรับ readiness/activation กับ active-floor enforcement
-แล้ว และ upload chunk receipts ป้องกัน counter/reject ซ้ำจาก ambiguous retry แล้ว ส่วน backfill
-และ quarantine telemetry ยังไม่ได้ทำ
+แล้ว และ upload chunk receipts ป้องกัน counter/reject ซ้ำจาก ambiguous retry แล้ว Phase E เพิ่ม
+คำขอ backfill ทีละ Agent, narrow pause authorization, nullable queue/quarantine telemetry และ
+current-request readiness ตาม contract ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 
 ```
 SUPER_ADMIN sets desired policy
@@ -117,3 +118,6 @@ Agent ที่ยัง pending/unsupported ต้องคง paused จนก
 ส่วนรายการคิวต่ำกว่า floor ไป quarantine การเลื่อนย้อนหลังเพียงเปิดช่วงที่ยอมรับได้; historical
 recovery ต้องเป็น `MANUAL_RANGE` + reconciliation แบบ explicit และต้องมีทั้ง
 `remoteSyncStartDate` กับ `idempotentUploadChunk`
+
+การ activate policy ไม่เริ่ม backfill เอง ทุกครั้งต้องมีคำขอ `SUPER_ADMIN` ที่ผูกกับ Agent,
+policy revision, ช่วงวันที่ และ batch อย่างชัดเจน และ historical intent ไม่เลื่อน watermark

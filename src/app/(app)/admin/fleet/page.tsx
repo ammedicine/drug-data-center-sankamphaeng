@@ -69,6 +69,24 @@ export default async function FleetPage() {
         }
       : null,
     supportsRemotePause: r.capabilities.remotePause,
+    supportsHistoricalBackfill:
+      r.capabilities.remoteSyncStartDate && r.capabilities.idempotentUploadChunk,
+    appliedGlobalPolicyRevision: r.globalSyncStartDateAppliedRevision,
+    queueTelemetry: {
+      pending: r.queuePendingCount,
+      failed: r.queueFailedCount,
+      quarantineTotal: r.quarantineTotalCount,
+      quarantineCovered: r.quarantineCoveredCount,
+      quarantineUnresolved: r.quarantineUnresolvedCount,
+      at: r.queueTelemetryAt?.toISOString() ?? null,
+    },
+    historicalBackfill: r.historicalBackfill,
+    activeBackfillPlan: globalPolicy?.backfillPlan?.status === "ACTIVE" ? {
+      policyRevision: globalPolicy.backfillPlan.policyRevision,
+      from: globalPolicy.backfillPlan.from,
+      to: globalPolicy.backfillPlan.to,
+    } : null,
+    backfillRequestEligible: r.historicalBackfill.requestEligible,
     supportsRemoteUpdate: r.capabilities.remoteUpdate,
     latestVersion,
     updateAvailable: latestVersion ? isNewerVersion(latestVersion, r.version) : false,
@@ -165,6 +183,7 @@ export default async function FleetPage() {
             desiredRevision: globalPolicy.desiredRevision,
             activeDate: globalPolicy.activeDate,
             activeRevision: globalPolicy.activeRevision,
+            backfillPlan: globalPolicy.backfillPlan ?? null,
           } : null}
           agents={globalPolicy ? rows.map((row) => ({
             agentId: row.agentId,

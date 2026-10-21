@@ -231,6 +231,7 @@ export interface HeartbeatRequest {
     quarantineCovered: number;
     quarantineUnresolved: number;
   };
+  historicalBackfillReport?: HistoricalBackfillCoverageReport;
   /**
    * Set when a sync run has just finished, whatever it found.
    *
@@ -300,6 +301,7 @@ export interface AgentConfigResponse {
 
   /** Exact, one-Agent historical authorization. Older Centrals omit it. */
   historicalBackfill?: HistoricalBackfillInstruction | null;
+  historicalBackfillReportAccepted?: boolean;
 
   /**
    * A remote software update the centre wants this Agent to perform. Absent
@@ -327,6 +329,11 @@ export interface HistoricalBackfillInstruction {
 
 export interface HistoricalBackfillContext extends HistoricalBackfillInstruction {
   batchRef: string;
+}
+
+export interface HistoricalBackfillCoverageReport extends HistoricalBackfillContext {
+  covered: number;
+  unresolved: number;
 }
 
 /** What the Agent tells the centre about its updater, in the heartbeat. */

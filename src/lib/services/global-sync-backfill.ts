@@ -214,6 +214,29 @@ export interface HistoricalBackfillIdentity {
   batchRef: string;
 }
 
+export function isMatchingHistoricalBackfillCoverage(
+  row: {
+    agentId: string;
+    status: GlobalSyncBackfillStatus;
+    policyRevision: number;
+    rangeFrom: string;
+    rangeTo: string;
+    linkedBatchId: string | null;
+    linkedBatchRef: string;
+  },
+  input: HistoricalBackfillIdentity & { authenticatedAgentId: string },
+): boolean {
+  return Boolean(
+    row.linkedBatchId &&
+      row.agentId === input.authenticatedAgentId &&
+      row.status === "COMPLETED" &&
+      row.policyRevision === input.policyRevision &&
+      row.rangeFrom === input.from &&
+      row.rangeTo === input.to &&
+      row.linkedBatchRef === input.batchRef,
+  );
+}
+
 export interface RequestHistoricalBackfillInput {
   actorUserId: string;
   agentId: string;
@@ -272,10 +295,11 @@ export interface GlobalSyncBackfillServiceStore {
   ): Promise<void>;
   recordCoverage(
     input: HistoricalBackfillIdentity & {
+      authenticatedAgentId: string;
       covered: number;
       unresolved: number;
     },
-  ): Promise<void>;
+  ): Promise<boolean>;
 }
 
 function assertIdentity(
@@ -835,21 +859,38 @@ const drizzleBackfillStore: GlobalSyncBackfillServiceStore = {
   },
 
   async recordCoverage(input) {
-    await db
-      .update(globalSyncBackfillRequests)
-      .set({
-        quarantineCovered: input.covered,
-        quarantineUnresolved: input.unresolved,
-      })
-      .where(
-        and(
-          eq(globalSyncBackfillRequests.id, input.requestId),
-          eq(globalSyncBackfillRequests.status, "COMPLETED"),
-          eq(globalSyncBackfillRequests.policyRevision, input.policyRevision),
-          eq(globalSyncBackfillRequests.rangeFrom, input.from),
-          eq(globalSyncBackfillRequests.rangeTo, input.to),
-        ),
-      );
+    return db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({
+          agentId: globalSyncBackfillRequests.agentId,
+          status: globalSyncBackfillRequests.status,
+          policyRevision: globalSyncBackfillRequests.policyRevision,
+          rangeFrom: globalSyncBackfillRequests.rangeFrom,
+          rangeTo: globalSyncBackfillRequests.rangeTo,
+          linkedBatchId: globalSyncBackfillRequests.linkedBatchId,
+          linkedBatchRef: syncBatches.batchRef,
+          quarantineCovered: globalSyncBackfillRequests.quarantineCovered,
+          quarantineUnresolved: globalSyncBackfillRequests.quarantineUnresolved,
+        })
+        .from(globalSyncBackfillRequests)
+        .innerJoin(syncBatches, eq(syncBatches.id, globalSyncBackfillRequests.linkedBatchId))
+        .where(eq(globalSyncBackfillRequests.id, input.requestId))
+        .limit(1)
+        .for("update");
+      if (!row || !isMatchingHistoricalBackfillCoverage(row, input)) return false;
+      if (
+        row.quarantineCovered === input.covered &&
+        row.quarantineUnresolved === input.unresolved
+      ) return true;
+      if (row.quarantineCovered !== null || row.quarantineUnresolved !== null) {
+        return false;
+      }
+      await tx
+        .update(globalSyncBackfillRequests)
+        .set({ quarantineCovered: input.covered, quarantineUnresolved: input.unresolved })
+        .where(eq(globalSyncBackfillRequests.id, input.requestId));
+      return true;
+    });
   },
 };
 

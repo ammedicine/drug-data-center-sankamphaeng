@@ -1,5 +1,5 @@
 /**
- * Everything a SUPER_ADMIN needs to see about every Agent, in two queries.
+ * Everything a SUPER_ADMIN needs to see about every Agent, in bounded fleet queries.
  *
  * The question this exists to answer is operational and specific: before the
  * centre's data is reset, is every สถานบริการ actually unable to write to it?
@@ -8,7 +8,8 @@
  * database in another country, and the page would be slow in exactly the
  * situation where somebody is watching it closely.
  *
- * So: one query for the agents, one for the live batches, joined in memory.
+ * Agent, live-batch, policy, and latest-request queries are each bounded and
+ * joined in memory; there is never one database round trip per Agent.
  *
  * The distinction the whole screen turns on is between what the centre has
  * decided and what an Agent has acknowledged. An Agent that is switched off
@@ -20,7 +21,15 @@
 import { desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
-import { agents, auditLogs, facilities, syncBatches, users } from "@/lib/db/schema";
+import {
+  agents,
+  auditLogs,
+  facilities,
+  globalSyncBackfillRequests,
+  syncBatches,
+  systemSettings,
+  users,
+} from "@/lib/db/schema";
 import {
   NO_CAPABILITIES,
   parseCapabilities,
@@ -39,6 +48,15 @@ import type { AgentStatus } from "@/lib/db/schema";
 import type { JhcisLinkState } from "@/lib/shared/agent-status";
 
 import { effectiveStatus, jhcisLinkState, listRunningBatches } from "./monitoring";
+import {
+  GLOBAL_SYNC_START_DATE_POLICY_KEY,
+  parseGlobalSyncStartDatePolicy,
+} from "./global-sync-policy";
+import {
+  evaluateGlobalSyncBackfillReadiness,
+  type BackfillReadinessReason,
+  type BackfillReadinessState,
+} from "./global-sync-backfill-readiness";
 
 export interface FleetAgentRow {
   agentId: string;
@@ -82,6 +100,22 @@ export interface FleetAgentRow {
   pendingBatches: number;
   failedCount: number;
   lastError: string | null;
+  queuePendingCount: number | null;
+  queueFailedCount: number | null;
+  quarantineTotalCount: number | null;
+  quarantineCoveredCount: number | null;
+  quarantineUnresolvedCount: number | null;
+  queueTelemetryAt: Date | null;
+  historicalBackfill: {
+    requestId: string | null;
+    status: string | null;
+    rangeFrom: string | null;
+    rangeTo: string | null;
+    reason: string | null;
+    readiness: BackfillReadinessState;
+    readinessReasons: BackfillReadinessReason[];
+    requestEligible: boolean;
+  };
 
   /** the agent's own report of its updater, as last heard */
   update: {
@@ -161,6 +195,16 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       pendingBatches: agents.pendingBatches,
       failedCount: agents.failedCount,
       lastError: agents.lastError,
+      queuePendingCount: agents.queuePendingCount,
+      queueFailedCount: agents.queueFailedCount,
+      quarantineTotalCount: agents.quarantineTotalCount,
+      quarantineCoveredCount: agents.quarantineCoveredCount,
+      quarantineUnresolvedCount: agents.quarantineUnresolvedCount,
+      queueTelemetryAt: agents.queueTelemetryAt,
+      syncRequestedAt: agents.syncRequestedAt,
+      syncRequestedFrom: agents.syncRequestedFrom,
+      syncRequestedTo: agents.syncRequestedTo,
+      lastSyncAt: agents.lastSyncAt,
       updateState: agents.updateState,
       updateCommandId: agents.updateCommandId,
       updateTargetVersion: agents.updateTargetVersion,
@@ -176,16 +220,95 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
     .leftJoin(users, eq(users.id, agents.pausedByUserId))
     .orderBy(facilities.code, agents.name);
 
-  // One more query, not one per row. listRunningBatches already keeps only the
+  // One bounded query, not one per row. listRunningBatches already keeps only the
   // newest live batch per agent and warns when two are genuinely fresh, so the
   // stale UPLOADING rows a killed worker leaves behind stay in history where
   // they belong instead of being drawn as current work.
   const live = await listRunningBatches(null);
   const byAgent = new Map(live.map((b) => [b.agentId, b]));
+  const rankedRequests = db
+    .select({
+      id: globalSyncBackfillRequests.id,
+      agentId: globalSyncBackfillRequests.agentId,
+      policyRevision: globalSyncBackfillRequests.policyRevision,
+      rangeFrom: globalSyncBackfillRequests.rangeFrom,
+      rangeTo: globalSyncBackfillRequests.rangeTo,
+      reason: globalSyncBackfillRequests.reason,
+      status: globalSyncBackfillRequests.status,
+      reconciliationGap: globalSyncBackfillRequests.reconciliationGap,
+      quarantineCovered: globalSyncBackfillRequests.quarantineCovered,
+      quarantineUnresolved: globalSyncBackfillRequests.quarantineUnresolved,
+      requestedAt: globalSyncBackfillRequests.requestedAt,
+      rank: sql<number>`row_number() over (
+        partition by ${globalSyncBackfillRequests.agentId}
+        order by ${globalSyncBackfillRequests.requestedAt} desc, ${globalSyncBackfillRequests.id} desc
+      )`.as("request_rank"),
+    })
+    .from(globalSyncBackfillRequests)
+    .where(inArray(globalSyncBackfillRequests.agentId, rows.map((row) => row.agentId)))
+    .as("ranked_backfill_requests");
+  const [setting, requestRows] = await Promise.all([
+    db.select({ value: systemSettings.value }).from(systemSettings)
+      .where(eq(systemSettings.settingKey, GLOBAL_SYNC_START_DATE_POLICY_KEY)).limit(1),
+    db.select().from(rankedRequests)
+      .where(eq(rankedRequests.rank, 1))
+      .orderBy(desc(rankedRequests.requestedAt))
+      .limit(Math.max(rows.length, 1)),
+  ]);
+  const policy = setting[0] ? parseGlobalSyncStartDatePolicy(setting[0].value) : null;
+  const now = new Date();
+  const latestRequest = new Map<string, (typeof requestRows)[number]>();
+  const hasFleetOpenRequest = requestRows.some(
+    (request) => request.status === "REQUESTED" || request.status === "IN_PROGRESS",
+  );
+  for (const request of requestRows) {
+    if (!latestRequest.has(request.agentId)) latestRequest.set(request.agentId, request);
+  }
 
   return rows.map((r) => {
     const capabilities = r.capabilities ? parseCapabilities(r.capabilities) : { ...NO_CAPABILITIES };
     const current = byAgent.get(r.agentId) ?? null;
+    const status = effectiveStatus({
+      status: r.status,
+      lastSeenAt: r.lastSeenAt,
+      lastHeartbeatAt: r.lastHeartbeatAt,
+    });
+    const request = latestRequest.get(r.agentId) ?? null;
+    const hasManualRequest = Boolean(
+      r.syncRequestedFrom || r.syncRequestedTo ||
+      (r.syncRequestedAt && (!r.lastSyncAt || r.syncRequestedAt > r.lastSyncAt)),
+    );
+    const backfillReadiness = evaluateGlobalSyncBackfillReadiness({
+      now,
+      policy: policy ? { activeRevision: policy.activeRevision, backfillPlan: policy.backfillPlan ?? null } : null,
+      agent: {
+        capabilities: {
+          remoteSyncStartDate: capabilities.remoteSyncStartDate,
+          idempotentUploadChunk: capabilities.idempotentUploadChunk,
+        },
+        appliedPolicyRevision: r.globalSyncStartDateAppliedRevision,
+        desiredSyncState: r.desiredSyncState,
+        effectiveSyncState: r.effectiveSyncState,
+        online: status !== "OFFLINE" && status !== "DISABLED",
+        queuePendingCount: r.queuePendingCount,
+        queueFailedCount: r.queueFailedCount,
+        quarantineTotalCount: r.quarantineTotalCount,
+        queueTelemetryAt: r.queueTelemetryAt,
+        hasActiveBatch: Boolean(current),
+        hasManualRequest,
+        currentError: r.lastError,
+      },
+      request: request ? {
+        id: request.id,
+        policyRevision: request.policyRevision,
+        rangeFrom: request.rangeFrom,
+        rangeTo: request.rangeTo,
+        status: request.status,
+        reconciliationGap: request.reconciliationGap,
+        quarantineCovered: request.quarantineCovered,
+        quarantineUnresolved: request.quarantineUnresolved,
+      } : null,
+    });
     return {
       agentId: r.agentId,
       agentName: r.agentName,
@@ -197,11 +320,7 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       version: r.version,
       buildId: r.buildId,
       capabilities,
-      status: effectiveStatus({
-        status: r.status,
-        lastSeenAt: r.lastSeenAt,
-        lastHeartbeatAt: r.lastHeartbeatAt,
-      }),
+      status,
       jhcis: jhcisLinkState({
         lastHeartbeatAt: r.lastHeartbeatAt,
         jhcisConnected: r.jhcisConnected,
@@ -231,6 +350,39 @@ export async function listFleet(): Promise<FleetAgentRow[]> {
       pendingBatches: r.pendingBatches,
       failedCount: r.failedCount,
       lastError: r.lastError,
+      queuePendingCount: r.queuePendingCount,
+      queueFailedCount: r.queueFailedCount,
+      quarantineTotalCount: r.quarantineTotalCount,
+      quarantineCoveredCount: r.quarantineCoveredCount,
+      quarantineUnresolvedCount: r.quarantineUnresolvedCount,
+      queueTelemetryAt: r.queueTelemetryAt,
+      historicalBackfill: {
+        requestId: request?.id ?? null,
+        status: request?.status ?? null,
+        rangeFrom: request?.rangeFrom ?? null,
+        rangeTo: request?.rangeTo ?? null,
+        reason: request?.reason ?? null,
+        readiness: backfillReadiness.state,
+        readinessReasons: backfillReadiness.reasons,
+        requestEligible: Boolean(
+          policy?.activeDate &&
+          policy.backfillPlan?.status === "ACTIVE" &&
+          policy.backfillPlan.policyRevision === policy.activeRevision &&
+          capabilities.remoteSyncStartDate &&
+          capabilities.idempotentUploadChunk &&
+          r.globalSyncStartDateAppliedRevision === policy.activeRevision &&
+          r.desiredSyncState === "PAUSED" &&
+          (status === "OFFLINE" || r.effectiveSyncState === "PAUSED") &&
+          r.queuePendingCount === 0 &&
+          r.queueFailedCount === 0 &&
+          r.queueTelemetryAt &&
+          now.getTime() - r.queueTelemetryAt.getTime() <= 5 * 60_000 &&
+          !current &&
+          !hasManualRequest &&
+          !hasFleetOpenRequest &&
+          !r.lastError
+        ),
+      },
       update: {
         state: r.updateState,
         commandId: r.updateCommandId,

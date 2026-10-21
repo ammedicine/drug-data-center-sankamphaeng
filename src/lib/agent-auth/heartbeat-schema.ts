@@ -2,6 +2,31 @@ import { z } from "zod";
 
 import { globalSyncStartDateIsoDateSchema } from "@/lib/services/global-sync-policy";
 
+export interface PhaseEQueueTelemetry {
+  pending: number;
+  failed: number;
+  quarantineTotal: number;
+  quarantineCovered: number;
+  quarantineUnresolved: number;
+}
+
+/** Omitted telemetry must leave the nullable Phase E columns untouched. */
+export function phaseEQueueTelemetryUpdate(
+  telemetry: PhaseEQueueTelemetry | undefined,
+  reportedAt: Date,
+) {
+  return telemetry
+    ? {
+        queuePendingCount: telemetry.pending,
+        queueFailedCount: telemetry.failed,
+        quarantineTotalCount: telemetry.quarantineTotal,
+        quarantineCoveredCount: telemetry.quarantineCovered,
+        quarantineUnresolvedCount: telemetry.quarantineUnresolved,
+        queueTelemetryAt: reportedAt,
+      }
+    : {};
+}
+
 export const heartbeatSchema = z.object({
   agentVersion: z.string().max(40),
   hostname: z.string().max(120),
@@ -23,6 +48,15 @@ export const heartbeatSchema = z.object({
       quarantineUnresolved: z.number().int().min(0),
     })
     .optional(),
+  historicalBackfillReport: z.object({
+    requestId: z.string().min(1).max(30),
+    policyRevision: z.number().int().min(1),
+    from: globalSyncStartDateIsoDateSchema,
+    to: globalSyncStartDateIsoDateSchema,
+    batchRef: z.string().min(5).max(40),
+    covered: z.number().int().min(0),
+    unresolved: z.number().int().min(0),
+  }).optional(),
   syncRanAt: z.string().datetime().nullable().optional(),
 
   /* ------------------------------------------ what this build is and can do */

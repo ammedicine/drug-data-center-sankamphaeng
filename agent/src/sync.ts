@@ -56,6 +56,11 @@ import {
   globalSyncStartDateHeartbeatReport,
 } from "./global-sync-policy";
 import { resolveNetworkIdentity } from "./network";
+import {
+  clearHistoricalBackfill,
+  loadHistoricalBackfill,
+  recordHistoricalBackfillCoverage,
+} from "./historical-backfill";
 
 export type SyncMode = "INITIAL" | "INCREMENTAL" | "MANUAL_RANGE" | "RETRY";
 
@@ -1050,6 +1055,10 @@ export class SyncRunner {
         { label: "sync complete" },
       );
 
+      if (complete && options.historicalBackfill) {
+        recordHistoricalBackfillCoverage(options.historicalBackfill, pcucode, this.queue);
+      }
+
       if (complete && !options.historicalBackfill) {
         const state = loadState();
         saveState({
@@ -1531,6 +1540,8 @@ export class SyncRunner {
     });
 
     const queue = new OfflineQueue(dataDir());
+    const quarantine = queue.quarantineSummary();
+    const persistedBackfill = loadHistoricalBackfill();
     writeStatus({ centralAttemptAt: new Date().toISOString() });
 
     let response;
@@ -1551,6 +1562,16 @@ export class SyncRunner {
       schemaReport: report,
       lastError: lastError ?? null,
       pendingBatches: queue.count("PENDING"),
+      queueTelemetry: {
+        pending: queue.count("PENDING"),
+        failed: queue.count("FAILED"),
+        quarantineTotal: quarantine.total,
+        quarantineCovered: quarantine.covered,
+        quarantineUnresolved: quarantine.unresolved,
+      },
+      ...(persistedBackfill?.coverageReport
+        ? { historicalBackfillReport: persistedBackfill.coverageReport }
+        : {}),
       ...(syncRanAt ? { syncRanAt } : {}),
       network: await resolveNetworkIdentity(this.credential.centralApiUrl),
       // Which build this is and what it can do. Three different v1.1.7 builds
@@ -1583,6 +1604,10 @@ export class SyncRunner {
     }
 
     log.debug("heartbeat acknowledged", { config: response.config });
+    const reportedCoverage = persistedBackfill?.coverageReport;
+    if (reportedCoverage && response.config.historicalBackfillReportAccepted) {
+      clearHistoricalBackfill(reportedCoverage.requestId);
+    }
     writeStatus({ ...this.centralAck(), pendingChunks: queue.count("PENDING") });
     // Acknowledged, so what was sent is now what the centre holds.
     lastUpdateReportSent = reportFingerprint(

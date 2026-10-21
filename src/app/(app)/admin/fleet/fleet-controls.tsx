@@ -8,8 +8,10 @@ import { toThaiDate, type ControlAckState } from "@/lib/shared/sync-control";
 
 import {
   cancelAgentUpdateAction,
+  cancelHistoricalBackfillAction,
   pauseAgentSyncAction,
   requestAgentUpdateAction,
+  requestHistoricalBackfillAction,
   resumeAgentSyncAction,
   type ActionState,
 } from "../actions";
@@ -45,6 +47,27 @@ export interface FleetRowView {
   problem: boolean;
   current: { recordsRead: number; recordsAccepted: number; progress: number } | null;
   supportsRemotePause: boolean;
+  supportsHistoricalBackfill: boolean;
+  appliedGlobalPolicyRevision: number | null;
+  queueTelemetry: {
+    pending: number | null;
+    failed: number | null;
+    quarantineTotal: number | null;
+    quarantineCovered: number | null;
+    quarantineUnresolved: number | null;
+    at: string | null;
+  };
+  historicalBackfill: {
+    requestId: string | null;
+    status: string | null;
+    rangeFrom: string | null;
+    rangeTo: string | null;
+    reason: string | null;
+    readiness: "READY" | "NOT_READY" | "UNKNOWN";
+    readinessReasons: string[];
+  };
+  activeBackfillPlan: { policyRevision: number; from: string; to: string } | null;
+  backfillRequestEligible: boolean;
 
   /* ------------------------------------------------------ software update */
   supportsRemoteUpdate: boolean;
@@ -114,10 +137,10 @@ function ControlPill({ row }: { row: FleetRowView }) {
   return <span className="text-amber-700">⏳ ศูนย์กลางบล็อกแล้ว · รอ Agent รับคำสั่ง</span>;
 }
 
-function Submit({ label, variant = "secondary" }: { label: string; variant?: "primary" | "secondary" | "danger" }) {
+function Submit({ label, variant = "secondary", disabled = false }: { label: string; variant?: "primary" | "secondary" | "danger"; disabled?: boolean }) {
   const { pending } = useFormStatus();
   return (
-    <Button type="submit" size="sm" variant={variant} disabled={pending}>
+    <Button type="submit" size="sm" variant={variant} disabled={pending || disabled}>
       {pending ? "กำลังส่ง..." : label}
     </Button>
   );
@@ -128,6 +151,8 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
   const [resumeState, resume] = useActionState(resumeAgentSyncAction, {} as ActionState);
   const [updateState, requestUpdate] = useActionState(requestAgentUpdateAction, {} as ActionState);
   const [cancelState, cancelUpdate] = useActionState(cancelAgentUpdateAction, {} as ActionState);
+  const [backfillState, requestBackfill] = useActionState(requestHistoricalBackfillAction, {} as ActionState);
+  const [cancelBackfillState, cancelBackfill] = useActionState(cancelHistoricalBackfillAction, {} as ActionState);
   const [confirmUpdate, setConfirmUpdate] = useState<null | "one" | "selected">(null);
   const [updateTarget, setUpdateTarget] = useState<string | null>(null);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["key"]>("all");
@@ -201,6 +226,12 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
         <Notice tone={cancelState.error ? "danger" : "ok"}>
           {cancelState.error ?? cancelState.success}
         </Notice>
+      ) : null}
+      {backfillState.error || backfillState.success ? (
+        <Notice tone={backfillState.error ? "danger" : "ok"}>{backfillState.error ?? backfillState.success}</Notice>
+      ) : null}
+      {cancelBackfillState.error || cancelBackfillState.success ? (
+        <Notice tone={cancelBackfillState.error ? "danger" : "ok"}>{cancelBackfillState.error ?? cancelBackfillState.success}</Notice>
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -352,6 +383,7 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
               <th className="p-2">ศูนย์กลาง</th>
               <th className="p-2">เริ่มเก็บข้อมูล</th>
               <th className="p-2">งานปัจจุบัน</th>
+              <th className="p-2">Historical backfill</th>
               <th className="p-2">เห็นล่าสุด</th>
               <th className="p-2">อัปเดตซอฟต์แวร์</th>
               <th className="p-2">คำสั่ง</th>
@@ -427,6 +459,37 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
                   ) : (
                     <span className="text-slate-400">ว่าง</span>
                   )}
+                </td>
+                <td className="p-2 min-w-72">
+                  <div className={r.historicalBackfill.readiness === "READY" ? "text-emerald-700" : r.historicalBackfill.readiness === "UNKNOWN" ? "text-slate-500" : "text-amber-700"}>
+                    {r.historicalBackfill.readiness}
+                  </div>
+                  {r.historicalBackfill.status ? (
+                    <div className="text-xs text-slate-600">
+                      {r.historicalBackfill.status} · {r.historicalBackfill.rangeFrom}..{r.historicalBackfill.rangeTo}
+                    </div>
+                  ) : null}
+                  <div className="text-xs text-slate-500">
+                    queue {r.queueTelemetry.pending ?? "UNKNOWN"} / failed {r.queueTelemetry.failed ?? "UNKNOWN"} · quarantine {r.queueTelemetry.quarantineTotal ?? "UNKNOWN"}
+                  </div>
+                  {r.historicalBackfill.readinessReasons.length ? (
+                    <div className="text-xs text-slate-500">{r.historicalBackfill.readinessReasons.join(", ")}</div>
+                  ) : null}
+                  {r.historicalBackfill.requestId && ["REQUESTED", "IN_PROGRESS"].includes(r.historicalBackfill.status ?? "") ? (
+                    <form action={cancelBackfill} className="mt-2 flex gap-1">
+                      <input type="hidden" name="requestId" value={r.historicalBackfill.requestId} />
+                      <input name="reason" required placeholder="เหตุผลยกเลิก" className={`${inputClass} w-36 text-xs`} />
+                      <Submit label="ยกเลิก" variant="danger" />
+                    </form>
+                  ) : r.activeBackfillPlan ? (
+                    <form action={requestBackfill} className="mt-2 grid grid-cols-2 gap-1">
+                      <input type="hidden" name="agentId" value={r.agentId} />
+                      <input type="date" name="from" required min={r.activeBackfillPlan.from} max={r.activeBackfillPlan.to} defaultValue={r.activeBackfillPlan.from} className={`${inputClass} text-xs`} />
+                      <input type="date" name="to" required min={r.activeBackfillPlan.from} max={r.activeBackfillPlan.to} defaultValue={r.activeBackfillPlan.to} className={`${inputClass} text-xs`} />
+                      <input name="reason" required placeholder="เหตุผล" className={`${inputClass} col-span-2 text-xs`} />
+                      <div className="col-span-2"><Submit label="ขอ backfill เครื่องนี้" disabled={!r.backfillRequestEligible} /></div>
+                    </form>
+                  ) : null}
                 </td>
                 <td className="p-2 text-slate-600">{r.lastSeenLabel}</td>
                 <td className="p-2">
@@ -526,7 +589,7 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
             ))}
             {!visible.length ? (
               <tr>
-                <td colSpan={13} className="p-6 text-center text-slate-500">
+                <td colSpan={14} className="p-6 text-center text-slate-500">
                   ไม่พบ Agent ตามเงื่อนไขที่เลือก
                 </td>
               </tr>

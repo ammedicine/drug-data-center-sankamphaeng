@@ -7,7 +7,9 @@ import {
   clearHistoricalBackfill,
   historicalBackfillPath,
   loadHistoricalBackfill,
+  recordHistoricalBackfillCoverage,
 } from "../agent/src/historical-backfill";
+import type { OfflineQueue } from "../agent/src/queue/queue";
 
 const instruction = {
   requestId: "backfill-request-1",
@@ -58,5 +60,34 @@ describe("persisted historical backfill intent", () => {
     clearHistoricalBackfill(instruction.requestId);
     clearHistoricalBackfill(instruction.requestId);
     expect(loadHistoricalBackfill()).toBeNull();
+  });
+
+  it("persists post-completion coverage for retry until Central acknowledges it", () => {
+    const context = adoptHistoricalBackfill(instruction, () => "SYNC-20261021-1");
+    let calls = 0;
+    const queue = {
+      markQuarantineCovered: () => {
+        calls += 1;
+        return { covered: 2, unresolvedRelevant: 1 };
+      },
+    } as unknown as OfflineQueue;
+
+    const first = recordHistoricalBackfillCoverage(
+      context,
+      "05957",
+      queue,
+      "2026-10-21T00:00:00.000Z",
+    );
+    const repeated = recordHistoricalBackfillCoverage(
+      context,
+      "05957",
+      queue,
+      "2026-10-21T01:00:00.000Z",
+    );
+
+    expect(first).toEqual({ ...context, covered: 2, unresolved: 1 });
+    expect(repeated).toEqual(first);
+    expect(loadHistoricalBackfill()?.coverageReport).toEqual(first);
+    expect(calls).toBe(1);
   });
 });

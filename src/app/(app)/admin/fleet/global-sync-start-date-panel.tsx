@@ -10,6 +10,7 @@ import { toThaiDate } from "@/lib/shared/sync-control";
 import {
   activateGlobalSyncStartDateAction,
   saveGlobalSyncStartDateAction,
+  resolveGlobalSyncBackfillPlanAction,
   type ActionState,
 } from "../actions";
 
@@ -18,6 +19,12 @@ export interface GlobalSyncStartDatePanelPolicy {
   desiredRevision: number;
   activeDate: string | null;
   activeRevision: number;
+  backfillPlan: {
+    policyRevision: number;
+    from: string;
+    to: string;
+    status: "ACTIVE" | "COMPLETED" | "CANCELLED" | "SUPERSEDED";
+  } | null;
 }
 
 export interface GlobalSyncStartDatePanelAgent {
@@ -54,6 +61,10 @@ export function GlobalSyncStartDatePanel({
     activateGlobalSyncStartDateAction,
     {} as ActionState,
   );
+  const [resolveState, resolvePlan] = useActionState(
+    resolveGlobalSyncBackfillPlanAction,
+    {} as ActionState,
+  );
   const outstanding = agents.filter((agent) => agent.status !== "APPLIED");
 
   return (
@@ -67,6 +78,11 @@ export function GlobalSyncStartDatePanel({
         {activateState.error || activateState.success ? (
           <Notice tone={activateState.error ? "danger" : "ok"}>
             {activateState.error ?? activateState.success}
+          </Notice>
+        ) : null}
+        {resolveState.error || resolveState.success ? (
+          <Notice tone={resolveState.error ? "danger" : "ok"}>
+            {resolveState.error ?? resolveState.success}
           </Notice>
         ) : null}
 
@@ -128,6 +144,29 @@ export function GlobalSyncStartDatePanel({
             ) : null}
             <Submit label={`เปิดใช้ revision ${policy.desiredRevision}`} variant="danger" />
           </form>
+        ) : null}
+
+        {policy?.backfillPlan ? (
+          <div className="rounded-lg border border-slate-200 p-3 text-sm">
+            <div className="font-medium">
+              Backfill plan {policy.backfillPlan.status} · {toThaiDate(policy.backfillPlan.from)}–{toThaiDate(policy.backfillPlan.to)} · revision {policy.backfillPlan.policyRevision}
+            </div>
+            {policy.backfillPlan.status === "ACTIVE" ? (
+              <form action={resolvePlan} className="mt-2 flex flex-wrap items-end gap-2">
+                <input type="hidden" name="policyRevision" value={policy.activeRevision} />
+                <label className="text-xs">
+                  ปิดแผนเป็น
+                  <select name="resolution" className={`${inputClass} ml-1`}>
+                    <option value="COMPLETED">COMPLETED</option>
+                    <option value="CANCELLED">CANCELLED</option>
+                    <option value="SUPERSEDED">SUPERSEDED</option>
+                  </select>
+                </label>
+                <input name="reason" required placeholder="เหตุผล" className={`${inputClass} w-64`} />
+                <Submit label="ยืนยันปิดแผน" variant="danger" />
+              </form>
+            ) : null}
+          </div>
         ) : null}
 
         {policy ? <div className="overflow-x-auto">

@@ -97,5 +97,10 @@ git push        # Vercel build อัตโนมัติ
 forward rollout ไม่ต้องรอ `idempotentUploadChunk` ส่วน historical backfill ต้องปิด UI ไว้จน Agent
 มีทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk` และผ่าน receipt/reconciliation gate
 
+ก่อนเปิดใช้ Phase E ให้ apply additive migration `0014_global_sync_backfill`, deploy Central ก่อน,
+จากนั้นอัปเกรด canary Agent และยืนยันว่า nullable telemetry รายงานจริง (`NULL` ไม่ใช่ healthy zero)
+การ backfill ต้องเริ่มจากคำขอ `SUPER_ADMIN` ทีละ Agent เท่านั้น ไม่มี auto backfill/auto resume;
+runbook contract อยู่ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
+
 Rollback ห้ามลด revision, ลบข้อมูล หรือแก้ release เดิม: pause fleet, สร้าง revision ใหม่ที่คืนวันก่อนหน้า,
 รอ acknowledgement, activate แล้ว resume canary อย่างมีลำดับ Purge ไม่ใช่ขั้นตอน rollback ของ policy

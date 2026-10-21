@@ -86,8 +86,10 @@ Migration `0012_global_sync_start_date.sql` เพิ่มเพียง nulla
 จึงใช้กับ row เดิมได้โดยไม่ backfill และไม่แก้ Agent identity, facility binding, credential,
 enrollment, watermark, pause state หรือ update state เดิม ไม่มี policy row ถูก seed
 
-Quarantine summary/report fields ถูกเลื่อนไป phase ภายหลังพร้อม Agent telemetry และต้องผ่าน review
-แยกต่างหาก ไม่ได้ prebuild ไว้ใน migration 0012
+Migration `0014_global_sync_backfill.sql` เพิ่มเฉพาะตาราง lifecycle ของ historical request และ
+nullable queue/quarantine telemetry บน `agents` ค่า `NULL` หมายถึง `UNKNOWN` โครงสร้างนี้ไม่แก้
+ความหมายของ `pending_batches`, `failed_count` หรือ `sync_requested_*`; ดู contract และ transition
+ทั้งหมดใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 
 Migration `0013_sync_upload_receipts.sql` เพิ่มตาราง receipt เท่านั้น โดยเก็บ authenticated Agent,
 batch, stable chunk reference, payload SHA-256, status, accepted/rejected counts, stable JSON result

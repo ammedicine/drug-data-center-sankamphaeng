@@ -151,7 +151,9 @@ Agent identity จาก HMAC credential ที่ authenticate แล้ว ไ
 ```
 
 ถ้าไม่มี policy row จะ omit `globalSyncStartDatePolicy` และ Agent ทำงานแบบ legacy โดยไม่ต้อง
-acknowledge ระบบยังไม่รับ quarantine telemetry
+acknowledge Agent รุ่น Phase E อาจส่ง `queueTelemetry` และ `historicalBackfillReport` แบบ optional;
+การ omit ต้องคง nullable telemetry เป็น `NULL` ไม่ตีความเป็นศูนย์ รายละเอียด exact request binding
+อยู่ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 
 - `syncStartDate` capability/field เดิมไม่ถูกเปลี่ยนความหมาย
 - ถ้าไม่มี global policy row Central ต้องไม่บังคับให้ Agent acknowledge และ Agent ต้องทำงานแบบ
@@ -176,4 +178,5 @@ Content-Type: application/json
 
 Historical backfill จะใช้ `MANUAL_RANGE`/reconciliation ที่มีอยู่ ไม่สร้าง push API จาก Central
 และเปิดได้เมื่อ Agent รายงานทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk` เท่านั้น
+คำสั่งส่งกลับผ่าน heartbeat เดิมและ pause exception ใช้ได้เฉพาะ request/batch ที่ตรงกันเท่านั้น
 forward-date operation ไม่ต้องรอ capability หลัง

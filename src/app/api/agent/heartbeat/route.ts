@@ -1,7 +1,10 @@
 import { eq, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
-import { heartbeatSchema } from "@/lib/agent-auth/heartbeat-schema";
+import {
+  heartbeatSchema,
+  phaseEQueueTelemetryUpdate,
+} from "@/lib/agent-auth/heartbeat-schema";
 import { withAgent } from "@/lib/agent-auth/route";
 import { assertPcucodeMatches } from "@/lib/agent-auth/verify";
 import { db } from "@/lib/db";
@@ -57,14 +60,7 @@ export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
       jhcisConnected: body.jhcisConnected,
       lastJhcisCheckAt: now,
       pendingBatches: body.pendingBatches ?? 0,
-      ...(body.queueTelemetry ? {
-        queuePendingCount: body.queueTelemetry.pending,
-        queueFailedCount: body.queueTelemetry.failed,
-        quarantineTotalCount: body.queueTelemetry.quarantineTotal,
-        quarantineCoveredCount: body.queueTelemetry.quarantineCovered,
-        quarantineUnresolvedCount: body.queueTelemetry.quarantineUnresolved,
-        queueTelemetryAt: now,
-      } : {}),
+      ...phaseEQueueTelemetryUpdate(body.queueTelemetry, now),
       // A run that finished, whatever it found. "Sync now" is satisfied by
       // comparing the request against this, and it used to be stamped only
       // when a batch was opened - so a run that found nothing left the
@@ -143,6 +139,12 @@ export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
     });
   }
 
+  const historicalBackfillReportAccepted = body.historicalBackfillReport
+    ? await globalSyncBackfillService.recordCoverage({
+        ...body.historicalBackfillReport,
+        authenticatedAgentId: agent.agentId,
+      })
+    : false;
   const historicalBackfill = await globalSyncBackfillService.deliverForAgent(agent.agentId);
 
   // The update channel. The agent's report is applied first, so a SUCCESS it
@@ -193,6 +195,7 @@ export const POST = withAgent(heartbeatSchema, async ({ agent, body }) => {
       pauseReason: agent.pauseReason,
       ...buildGlobalSyncStartDateHeartbeatConfig(globalSyncStartDatePolicy),
       historicalBackfill,
+      historicalBackfillReportAccepted,
       // A remote update, if one is owed and a rollout slot was free. Null is
       // the ordinary answer. Older agents never read this key.
       updateCommand,

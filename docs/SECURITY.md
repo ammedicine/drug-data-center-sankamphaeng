@@ -115,8 +115,12 @@ JHCIS password ไม่เคยออกจากเครื่อง Agent �
 - desired policy กับ active enforcement ต้องแยกกัน เพื่อไม่ให้ค่าที่ยัง rollout ไม่ครบถูกบังคับใช้
 - offline/pending override ทำได้เมื่อ desired sync state เป็น paused, ไม่มี active Central batch,
   `SUPER_ADMIN` ยืนยันพร้อมเหตุผล และมี audit เท่านั้น Agent นั้นยังต้อง paused จนกว่าจะ applied
-- acknowledgement ผูกกับ Agent identity จาก HMAC credential ฝั่ง server; quarantine report ยังไม่เปิดใช้
-  ห้ามเชื่อ `agentId`/`facility_id` จาก frontend และห้าม infer facility จาก IP หรือ MAC
+- acknowledgement และ quarantine coverage report ผูกกับ Agent identity จาก HMAC credential
+  ฝั่ง server และต้องตรง completed request/revision/range/batch ปัจจุบัน ห้ามเชื่อ
+  `agentId`/`facility_id` จาก frontend และห้าม infer facility จาก IP หรือ MAC
 - การเปลี่ยน policy ไม่อนุญาตให้ลบ Central history, credential, enrollment, control history หรือ
   audit history; purge ยังเป็น destructive operation แยกที่ต้องได้รับ owner approval
 - JHCIS account ต้องคง read-only และ policy/backfill ห้ามเพิ่ม statement ที่เขียน JHCISDB
+
+กติกา RBAC, audit และ narrow pause exception ของ Phase E อยู่ใน
+[GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)

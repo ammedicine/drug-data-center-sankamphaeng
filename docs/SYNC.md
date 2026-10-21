@@ -173,7 +173,7 @@ agent/data/queue/failed/<batchRef>__000001.json    ล้มเหลวถา�
 > แล้วเข้าใจผิดว่า TiDB เป็นคอขวด) ต้องรันซ้ำอย่างน้อย 3 รอบแล้วทิ้งรอบแรก
 > เครื่องมือคือ `agent/measure-central.mts` (ยิงเข้า Central จริง) กับ `agent/bench.mts` (mock Central)
 
-## 8. Global Sync Start Date semantics (forward policy implemented; backfill pending)
+## 8. Global Sync Start Date semantics and controlled backfill
 
 Global Sync Start Date เป็น extraction floor เดียวของทั้งอำเภอ ควบคุมโดย `SUPER_ADMIN` ผ่าน
 Central โดยแยก desired state ออกจาก active enforcement และใช้ revision ที่ไม่เกี่ยวกับ pause
@@ -201,12 +201,18 @@ Central โดยแยก desired state ออกจาก active enforcement �
   `idempotentUploadChunk`
 - ห้าม rehydrate quarantine อัตโนมัติ; successful reread อาจ mark ว่า covered ได้แต่ต้องเก็บ
   quarantine ไว้ตามนโยบาย retention ที่ได้รับอนุมัติ
+- Phase E อนุญาตทีละ Agent ผ่าน durable request ที่ผูก exact policy revision/range/batch เท่านั้น
+  และ mark coverage หลัง Central ยืนยัน completion + reconciliation gap zero แล้ว
+- readiness ใช้หลักฐานของ current request เท่านั้น; telemetry ที่ขาดหรือเก่าเป็น `UNKNOWN`
+
+รายละเอียด lifecycle, retry, pause exception และ coverage อยู่ใน
+[GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 
 ### Idempotency สองระดับ
 
 `record_key` ป้องกัน `drug_usage` ซ้ำ ส่วน `sync_upload_receipts` ป้องกันการประมวลผล chunk,
 batch counters และ reject ซ้ำเมื่อ response สูญหาย สองระดับนี้มีหน้าที่ต่างกัน Stable receipt เป็น
 prerequisite เฉพาะ historical backfill ไม่ใช่ prerequisite ของ desired policy, acknowledgement,
-forward move หรือ active-floor enforcement และ Phase D ยังไม่เปิด backfill
+forward move หรือ active-floor enforcement
 
 Purge เป็น destructive workflow แยกจากนโยบายนี้เสมอ การเปลี่ยนวันห้ามเรียก purge โดยอัตโนมัติ

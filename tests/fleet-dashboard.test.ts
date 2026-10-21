@@ -212,6 +212,18 @@ describe("the fleet as the centre sees it", () => {
     expect(rows.every((r) => r.current === null)).toBe(true);
     expect(fleet.summariseFleet(rows).syncing).toBe(0);
   });
+
+  it("keeps pre-Phase-E telemetry unknown instead of treating omission as healthy zero", async () => {
+    requireDatabase();
+    const rows = await fleet.listFleet();
+    const legacy = rows.find((r) => r.agentId === "agent-old")!;
+    expect(legacy.queuePendingCount).toBeNull();
+    expect(legacy.queueFailedCount).toBeNull();
+    expect(legacy.quarantineTotalCount).toBeNull();
+    expect(legacy.queueTelemetryAt).toBeNull();
+    expect(legacy.historicalBackfill.readiness).toBe("UNKNOWN");
+    expect(legacy.historicalBackfill.requestEligible).toBe(false);
+  });
 });
 
 describe("reset readiness", () => {

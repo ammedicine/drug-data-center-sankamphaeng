@@ -9,23 +9,29 @@ import { resolve } from "node:path";
 
 import type {
   HistoricalBackfillContext,
+  HistoricalBackfillCoverageReport,
   HistoricalBackfillInstruction,
 } from "@shared/canonical";
 export type { HistoricalBackfillContext } from "@shared/canonical";
 
 import { dataDir } from "./config";
+import type { OfflineQueue } from "./queue/queue";
+
+export interface PersistedHistoricalBackfillContext extends HistoricalBackfillContext {
+  coverageReport?: HistoricalBackfillCoverageReport;
+}
 
 export function historicalBackfillPath(): string {
   return resolve(dataDir(), "historical-backfill.json");
 }
 
-export function loadHistoricalBackfill(): HistoricalBackfillContext | null {
+export function loadHistoricalBackfill(): PersistedHistoricalBackfillContext | null {
   const path = historicalBackfillPath();
   if (!existsSync(path)) return null;
   try {
     const parsed = JSON.parse(
       readFileSync(path, "utf8"),
-    ) as HistoricalBackfillContext;
+    ) as PersistedHistoricalBackfillContext;
     if (
       !parsed.requestId ||
       !parsed.batchRef ||
@@ -41,7 +47,7 @@ export function loadHistoricalBackfill(): HistoricalBackfillContext | null {
 }
 
 export function saveHistoricalBackfill(
-  context: HistoricalBackfillContext,
+  context: PersistedHistoricalBackfillContext,
 ): void {
   const target = historicalBackfillPath();
   const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
@@ -62,7 +68,7 @@ export function saveHistoricalBackfill(
 export function adoptHistoricalBackfill(
   instruction: HistoricalBackfillInstruction,
   createBatchRef: () => string,
-): HistoricalBackfillContext {
+): PersistedHistoricalBackfillContext {
   const existing = loadHistoricalBackfill();
   if (existing?.requestId === instruction.requestId) {
     if (
@@ -85,6 +91,35 @@ export function adoptHistoricalBackfill(
   };
   saveHistoricalBackfill(context);
   return context;
+}
+
+/** Runs only after Central completion and persists the report before heartbeat. */
+export function recordHistoricalBackfillCoverage(
+  context: HistoricalBackfillContext,
+  pcucode: string,
+  queue: OfflineQueue,
+  coveredAt = new Date().toISOString(),
+): HistoricalBackfillCoverageReport {
+  const persisted = loadHistoricalBackfill();
+  if (!persisted || persisted.requestId !== context.requestId) {
+    throw new Error("Historical backfill context is not current");
+  }
+  if (persisted.coverageReport) return persisted.coverageReport;
+  const coverage = queue.markQuarantineCovered({
+    requestId: context.requestId,
+    batchRef: context.batchRef,
+    pcucode,
+    from: context.from,
+    to: context.to,
+    coveredAt,
+  });
+  const report: HistoricalBackfillCoverageReport = {
+    ...context,
+    covered: coverage.covered,
+    unresolved: coverage.unresolvedRelevant,
+  };
+  saveHistoricalBackfill({ ...persisted, coverageReport: report });
+  return report;
 }
 
 export function clearHistoricalBackfill(requestId: string): void {

@@ -121,6 +121,11 @@ acknowledgement กลับ Central revision นี้แยกจาก pause 
 - เลื่อนย้อนหลังไม่เริ่ม backfill เอง ต้องรอคำสั่ง `MANUAL_RANGE` แบบ explicit และ reconciliation
 - historical backfill ต้องมีทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk`; forward move
   ไม่ต้องรอ `idempotentUploadChunk`
+- Agent persist exact historical request และ batch ก่อนเริ่ม ใช้ `MANUAL_RANGE` เดิมแต่แยก intent,
+  ไม่เลื่อน local/Central watermark และ retry ด้วย identity เดิม
+- หลัง completion + reconciliation สำเร็จจึง mark quarantine coverage แบบ additive/idempotent
+  แล้วรายงานซ้ำทาง heartbeat จน Central acknowledge; ดู
+  [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 - `idempotentUploadChunk` บันทึก `chunkRef` และ payload SHA-256 ในไฟล์ pending ก่อน request แรก
   retry/restart ใช้ identity และ payload เดิม; queue รุ่นเก่าที่ไม่มี field นี้ถูกเติมแบบ temp+rename
   เมื่อจะส่ง โดยไม่เปลี่ยน `record_key`, watermark หรือพฤติกรรมอ่าน JHCIS

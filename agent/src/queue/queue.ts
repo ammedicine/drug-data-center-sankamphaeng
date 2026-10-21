@@ -31,6 +31,33 @@ export interface QueuedChunk {
   lastError?: string | null;
 }
 
+export interface QuarantineSummary {
+  total: number;
+  covered: number;
+  unresolved: number;
+}
+
+export interface QuarantineCoverageInput {
+  requestId: string;
+  batchRef: string;
+  pcucode: string;
+  from: string;
+  to: string;
+  coveredAt: string;
+}
+
+interface QuarantinedPayload {
+  pcucode?: string;
+  records?: Array<{ usageDate?: string }>;
+  coverage?: {
+    requestId: string;
+    coveredByBatchRef: string;
+    coveredAt: string;
+    coveredRange: { from: string; to: string };
+  };
+  [key: string]: unknown;
+}
+
 function ensure(dir: string): string {
   mkdirSync(dir, { recursive: true });
   return dir;
@@ -223,6 +250,86 @@ export class OfflineQueue {
     const dir = this.quarantineDir();
     if (!existsSync(dir)) return 0;
     return readdirSync(dir).filter((f) => f.endsWith(".json")).length;
+  }
+
+  quarantineSummary(): QuarantineSummary {
+    const dir = this.quarantineDir();
+    const files = existsSync(dir)
+      ? readdirSync(dir).filter((file) => file.endsWith(".json"))
+      : [];
+    let covered = 0;
+    for (const name of files) {
+      try {
+        const payload = JSON.parse(readFileSync(join(dir, name), "utf8")) as QuarantinedPayload;
+        if (
+          payload.coverage?.requestId &&
+          payload.coverage.coveredByBatchRef &&
+          payload.coverage.coveredAt &&
+          payload.coverage.coveredRange?.from &&
+          payload.coverage.coveredRange.to
+        ) covered += 1;
+      } catch {
+        // Unreadable evidence is unresolved, never silently healthy.
+      }
+    }
+    return { total: files.length, covered, unresolved: files.length - covered };
+  }
+
+  /** Adds proof to fully covered files without moving, deleting, or changing records. */
+  markQuarantineCovered(input: QuarantineCoverageInput): {
+    covered: number;
+    unresolvedRelevant: number;
+  } {
+    const dir = this.quarantineDir();
+    if (!existsSync(dir)) return { covered: 0, unresolvedRelevant: 0 };
+    const wanted = {
+      requestId: input.requestId,
+      coveredByBatchRef: input.batchRef,
+      coveredAt: input.coveredAt,
+      coveredRange: { from: input.from, to: input.to },
+    };
+    let covered = 0;
+    let unresolvedRelevant = 0;
+    for (const name of readdirSync(dir).filter((file) => file.endsWith(".json")).sort()) {
+      const path = join(dir, name);
+      let payload: QuarantinedPayload;
+      try {
+        payload = JSON.parse(readFileSync(path, "utf8")) as QuarantinedPayload;
+      } catch {
+        unresolvedRelevant += 1;
+        continue;
+      }
+      if (payload.pcucode !== input.pcucode || !Array.isArray(payload.records)) continue;
+      const dates = payload.records.map((record) => record.usageDate);
+      if (!dates.length || dates.some((date) => typeof date !== "string")) {
+        unresolvedRelevant += 1;
+        continue;
+      }
+      const overlaps = dates.some((date) => date! >= input.from && date! <= input.to);
+      const fullyCovered = dates.every((date) => date! >= input.from && date! <= input.to);
+      if (!overlaps) continue;
+      if (!fullyCovered) {
+        unresolvedRelevant += 1;
+        continue;
+      }
+      if (payload.coverage) {
+        if (
+          payload.coverage.requestId === wanted.requestId &&
+          payload.coverage.coveredByBatchRef === wanted.coveredByBatchRef &&
+          payload.coverage.coveredRange.from === wanted.coveredRange.from &&
+          payload.coverage.coveredRange.to === wanted.coveredRange.to
+        ) {
+          covered += 1;
+          continue;
+        }
+        throw new Error(`Quarantine coverage conflict (${name})`);
+      }
+      const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(temp, JSON.stringify({ ...payload, coverage: wanted }), "utf8");
+      renameSync(temp, path);
+      covered += 1;
+    }
+    return { covered, unresolvedRelevant };
   }
 
   /**
