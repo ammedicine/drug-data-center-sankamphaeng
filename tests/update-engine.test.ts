@@ -46,9 +46,15 @@ const manifestFor = (version: string, sha = SHA) => ({
 });
 
 function hold(store: Awaited<ReturnType<typeof fresh>>["store"], targetVersion = TARGET, sha = SHA) {
-  store.acceptUpdateCommand({ id: "cmd-1", agentId: AGENT_ID, targetVersion, assetName: `SDCAgent-Setup-${targetVersion}.exe`, size: 10, sha256: sha }, AGENT_ID);
+  store.acceptUpdateCommand({ id: "cmd-1", agentId: AGENT_ID, targetVersion, assetName: `SDCAgent-Setup-${targetVersion}.exe`, size: 10, sha256: sha, manifestAssetName: `SDCAgent-Manifest-${targetVersion}.json`, manifestSha256: "d".repeat(64) }, AGENT_ID);
   return store.loadUpdateCommand()!;
 }
+
+const ready = async () => ({
+  readiness: "READY" as const, programFiles: "PASS" as const, missingFiles: 0, corruptedFiles: 0,
+  unreadableFiles: 0, repairedFiles: 0, statePreservation: "PASS" as const, environment: "PASS" as const,
+  targetPackage: "PASS" as const, blockers: [], terminal: false, errorCode: null, installAllowed: true, stagedFiles: {},
+});
 
 describe("controlled release authorization", () => {
   it("discovers a newer latest release without downloading or installing it when no command exists", async () => {
@@ -180,6 +186,7 @@ describe("E. an active sync", () => {
       downloadFn: async () => { seen.push(store.loadUpdateCommand()!.state); return installer; },
       installFn: async () => { seen.push(store.loadUpdateCommand()!.state); },
       busyFn: () => false,
+      readinessFn: ready,
     });
     expect(seen).toEqual(["DOWNLOADING", "INSTALLING"]);
     expect(result.state).toBe("INSTALLING");
@@ -208,6 +215,7 @@ describe("E. an active sync", () => {
       downloadFn: async () => installer,
       installFn: async () => { installs++; },
       busyFn: () => calls++ > 0, // idle at first, busy by the time the download is done
+      readinessFn: ready,
     });
     expect(result.state).toBe("WAITING_FOR_IDLE");
     expect(installs).toBe(0);
@@ -492,31 +500,27 @@ describe("the real `agent auto-update` with a held command", () => {
       child.on("close", (status) => { clearTimeout(t); done({ status, out }); });
     });
 
-  it("checks, downloads, verifies the digest, tries the installer, and records the outcome durably", async () => {
+  it("fails closed before download when a legacy held command lacks manifest authorization", async () => {
     const { status } = await run();
-    // The 'installer' is not executable, so the run ends at INSTALLER_FAILED -
-    // which is the last step a test can reach without installing software on
-    // this machine, and it proves every step before it ran on the real process.
     expect(status).toBe(1);
-    expect(hits).toEqual(["GET /api/agent/update", "GET /download/agent"]);
+    expect(hits).toEqual(["GET /api/agent/update"]);
     const command = JSON.parse(readFileSync(join(home, "update-command.json"), "utf8"));
     expect(command.commandId).toBe("cmd-real");
     expect(command.state).toBe("FAILED");
-    expect(command.errorCode).toBe("INSTALLER_FAILED");
-    expect(command.attempts).toBe(1);
-    // The verified file exists where only SYSTEM may write on a real install.
-    expect(existsSync(join(home, "updates", "9.9.9", "SDCAgent-Setup-9.9.9.exe"))).toBe(true);
+    expect(command.errorCode).toBe("MANIFEST_MISMATCH");
+    expect(command.attempts).toBe(0);
+    expect(existsSync(join(home, "updates", "9.9.9", "SDCAgent-Setup-9.9.9.exe"))).toBe(false);
     // No JHCIS read happened (port 1 would have refused loudly), no batch, no watermark.
     expect(existsSync(join(home, "state.json"))).toBe(false);
     const status2 = JSON.parse(readFileSync(join(home, "status.json"), "utf8"));
-    expect(status2.autoUpdateTaskLastResult).toMatch(/^FAILED version=9\.9\.9 INSTALLER_FAILED .* command=cmd-real/);
+    expect(status2.autoUpdateTaskLastResult).toMatch(/^FAILED version=9\.9\.9 MANIFEST_MISMATCH .* command=cmd-real/);
   }, 180_000);
 
   it("a paused clinic still runs the whole path", async () => {
     writeFileSync(join(home, "state.json"), JSON.stringify({ lastSyncedVisitDate: "2026-09-10", lastSyncAt: null, batchSequence: 3, syncControlState: "PAUSED", appliedControlRevision: 2, pauseReason: "รีเซ็ต" }));
     await run();
     expect(hits[0]).toBe("GET /api/agent/update");
-    expect(hits[1]).toBe("GET /download/agent");
+    expect(hits).toEqual(["GET /api/agent/update"]);
     const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8"));
     expect(state.syncControlState).toBe("PAUSED");
     expect(state.batchSequence).toBe(3);

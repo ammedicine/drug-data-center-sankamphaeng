@@ -544,6 +544,15 @@ export interface AgentStatus {
   updateLatestVersion: string | null;
   updateCheckedAt: string | null;
   updateDetail: string | null;
+  updateReadiness: "READY" | "BLOCKED" | null;
+  updateProgramFiles: "PASS" | "REPAIRED" | "FAIL" | null;
+  updateMissingFiles: number;
+  updateCorruptedFiles: number;
+  updateRepairedFiles: number;
+  updateStatePreservation: "PASS" | "FAIL" | null;
+  updateEnvironment: "PASS" | "FAIL" | null;
+  updateTargetPackage: "PASS" | "FAIL" | null;
+  updateReadinessBlockers: string[];
   /** local minus central, in seconds; positive means this PC is ahead */
   clockSkewSeconds: number | null;
   lastClockCheckAt: string | null;
@@ -647,6 +656,15 @@ export function loadStatus(): AgentStatus {
     updateLatestVersion: null,
     updateCheckedAt: null,
     updateDetail: null,
+    updateReadiness: null,
+    updateProgramFiles: null,
+    updateMissingFiles: 0,
+    updateCorruptedFiles: 0,
+    updateRepairedFiles: 0,
+    updateStatePreservation: null,
+    updateEnvironment: null,
+    updateTargetPackage: null,
+    updateReadinessBlockers: [],
     clockSkewSeconds: null,
     lastClockCheckAt: null,
     syncPhase: "IDLE",

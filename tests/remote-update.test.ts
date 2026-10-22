@@ -32,6 +32,13 @@ const RELEASE = {
   notes: null,
   sha256: "a".repeat(64),
 };
+const INTEGRITY = {
+  version: "1.1.10",
+  manifestAssetName: "SDCAgent-Manifest-1.1.10.json",
+  manifestSha256: "b".repeat(64),
+  manifestBytes: new Uint8Array(),
+  components: [],
+};
 
 function requireDatabase() {
   if (!available) {
@@ -97,6 +104,7 @@ beforeAll(async () => {
 
     vi.doMock("@/lib/services/agent-release", () => ({
       lookupLatestAgentRelease: async () => ({ status: "ok", release: RELEASE }),
+      lookupAgentReleaseIntegrity: async () => INTEGRITY,
       getLatestAgentRelease: async () => RELEASE,
     }));
     svc = await import("@/lib/services/update-commands");
@@ -183,7 +191,7 @@ describe("B. one agent", () => {
   it("an online agent receives it on the next heartbeat, and DELIVERED is recorded", async () => {
     requireDatabase();
     const delivered = await heartbeat("a-new");
-    expect(delivered).toMatchObject({ agentId: "a-new", targetVersion: "1.1.10", assetName: "SDCAgent-Setup-1.1.10.exe", sha256: "a".repeat(64) });
+    expect(delivered).toMatchObject({ agentId: "a-new", targetVersion: "1.1.10", assetName: "SDCAgent-Setup-1.1.10.exe", sha256: "a".repeat(64), manifestAssetName: INTEGRITY.manifestAssetName, manifestSha256: INTEGRITY.manifestSha256 });
     const [row] = await commands("a-new");
     expect(row.status).toBe("DELIVERED");
     // Handed out again on every heartbeat until closed; the agent dedups by id.

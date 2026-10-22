@@ -970,6 +970,17 @@ async function autoUpdate(): Promise<void> {
   });
   const checkedAt = new Date().toISOString();
   const cmdTag = command ? ` command=${command.commandId}` : "";
+  const readinessStatus = result.readiness ? {
+    updateReadiness: result.readiness.readiness,
+    updateProgramFiles: result.readiness.programFiles,
+    updateMissingFiles: result.readiness.missingFiles,
+    updateCorruptedFiles: result.readiness.corruptedFiles,
+    updateRepairedFiles: result.readiness.repairedFiles,
+    updateStatePreservation: result.readiness.statePreservation,
+    updateEnvironment: result.readiness.environment,
+    updateTargetPackage: result.readiness.targetPackage,
+    updateReadinessBlockers: result.readiness.blockers,
+  } : {};
 
   switch (result.state) {
     case "NONE":
@@ -983,14 +994,14 @@ async function autoUpdate(): Promise<void> {
       console.log(result.detail);
       return;
     case "BLOCKED":
-      writeStatus({ updateState: "BLOCKED", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail });
+      writeStatus({ updateState: "BLOCKED", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail, ...readinessStatus });
       record(`BLOCKED version=${result.version} ${result.detail}${cmdTag}`);
       log.warn("มีรุ่นใหม่แต่ติดตั้งอัตโนมัติไม่ได้", { version: result.version, reason: result.detail });
       console.log(`พบรุ่น ${result.version} แต่ ${result.detail}`);
       process.exitCode = 1;
       return;
     case "WAITING_FOR_IDLE":
-      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail });
+      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail, ...readinessStatus });
       record(`WAITING_FOR_SYNC version=${result.version}${cmdTag}`);
       console.log("กำลังซิงก์อยู่ จะติดตั้งรุ่นใหม่รอบถัดไป");
       return;
@@ -1001,7 +1012,7 @@ async function autoUpdate(): Promise<void> {
       // and writes its own, then return and exit. The tray is reopened by the
       // installer itself (`post-install`), because there is no updater left
       // to do it once the install is through.
-      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: "กำลังติดตั้ง รอเริ่มโปรแกรมใหม่" });
+      writeStatus({ updateState: "READY", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: "กำลังติดตั้ง รอเริ่มโปรแกรมใหม่", ...readinessStatus });
       record(`HANDED_OFF version=${result.version}${cmdTag}`);
       console.log(`ส่งต่อให้ตัวติดตั้งรุ่น ${result.version} แล้ว`);
       return;
@@ -1011,7 +1022,7 @@ async function autoUpdate(): Promise<void> {
       // A failed update must never make the thing it was updating unusable.
       // Nothing here touches the queue, the credential or the watermark.
       log.warn("อัปเดตไม่สำเร็จ จะใช้รุ่นเดิมต่อไป", { version: result.version, code: result.errorCode, error: message });
-      writeStatus({ updateState: "FAILED", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: message.slice(0, 200) });
+      writeStatus({ updateState: "FAILED", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: message.slice(0, 200), ...readinessStatus });
       record(`FAILED version=${result.version ?? "?"} ${result.errorCode ?? ""} ${message.slice(0, 120)}${cmdTag}`);
       process.exitCode = 1;
       return;

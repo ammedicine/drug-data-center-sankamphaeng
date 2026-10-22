@@ -40,7 +40,17 @@ cd agent
 1. `npm ci` แล้ว bundle `src/cli.ts` เป็น `build/app/agent.js` ด้วย esbuild
 2. ดาวน์โหลด Node runtime แบบพกพา (ถ้ายังไม่มีใน `build/runtime`)
 3. PyInstaller build `gui/sdc_agent_gui.py` เป็น `SDCAgent.exe`
-4. ISCC ประกอบทุกอย่างเป็น `installer/output/SDCAgent-Setup-x.y.z.exe`
+4. สร้าง deterministic component manifest และ component assets สำหรับ pre-update integrity
+5. ISCC ประกอบทุกอย่างเป็น `installer/output/SDCAgent-Setup-x.y.z.exe`
+
+ตั้งแต่ v1.1.19 release ต้องเผยแพร่ installer พร้อม `SDCAgent-Manifest-x.y.z.json` และไฟล์
+`SDCAgent-Component-*` ที่สคริปต์สร้างทั้งหมด Central จะผูก SHA-256 ของ manifest เข้ากับ
+คำสั่งอัปเดตแบบ exact release และ Agent จะเชื่อ component hash หลังตรวจ manifest แล้วเท่านั้น
+component ที่ซ่อมจะถูกวางใน staging; updater ไม่เขียนทับ live Program Files ระหว่าง preparation
+และไม่รวมไฟล์ mutable ใต้ `%ProgramData%\SDCAgent` ใน manifest
+
+ข้อจำกัด bootstrap: การอัปเกรด v1.1.18 → v1.1.19 ยังทำงานด้วย updater ของ v1.1.18 จึงไม่ได้
+รับ pre-update readiness ย้อนหลัง กลไกนี้เริ่มปกป้องการอัปเดตที่เริ่มจาก v1.1.19 เป็นต้นไป
 
 การอัปเกรดต้องคง AppId ของ installer และเก็บ `%ProgramData%\SDCAgent` ไว้ทั้งหมด ซึ่งรวม
 credential, enrollment, facility/Agent identity, settings, watermark, queue/failed/quarantine,

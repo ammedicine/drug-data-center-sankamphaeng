@@ -1754,6 +1754,8 @@ export class SyncRunner {
         assetName: String(command.assetName ?? ""),
         size: typeof command.size === "number" ? command.size : null,
         sha256: String(command.sha256 ?? "").toLowerCase(),
+        manifestAssetName: String(command.manifestAssetName ?? ""),
+        manifestSha256: String(command.manifestSha256 ?? "").toLowerCase(),
       }, this.credential.agentId);
       if (accepted.accepted) {
         lastUpdateReportSent = null; // report the new state on the next heartbeat

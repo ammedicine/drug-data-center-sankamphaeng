@@ -36,7 +36,7 @@ import {
 } from "@/lib/shared/update-command";
 import { compareVersions, isNewerVersion } from "@/lib/shared/version";
 
-import { lookupLatestAgentRelease } from "./agent-release";
+import { lookupAgentReleaseIntegrity, lookupLatestAgentRelease } from "./agent-release";
 
 /** Refused because the actor is not a usable SUPER_ADMIN. Re-read from the database, never trusted from a session. */
 export class UpdateAuthorizationError extends Error {
@@ -81,6 +81,8 @@ export interface DeliveredUpdateCommand {
   assetName: string;
   size: number | null;
   sha256: string;
+  manifestAssetName: string;
+  manifestSha256: string;
 }
 
 /** What the Agent reports about a command, or about its own scheduled updater. */
@@ -113,11 +115,16 @@ async function currentTarget() {
   if (!release.sha256) {
     throw new NoInstallableReleaseError("รุ่นที่เผยแพร่ไม่มีค่าตรวจสอบไฟล์ (SHA-256) จึงสั่งติดตั้งอัตโนมัติไม่ได้");
   }
+  const version = release.version.replace(/^v/i, "");
+  const integrity = await lookupAgentReleaseIntegrity(version);
+  if (!integrity) throw new NoInstallableReleaseError("รุ่นที่เผยแพร่ไม่มี component manifest ที่ตรวจสอบได้");
   return {
-    version: release.version.replace(/^v/i, ""),
+    version,
     assetName: release.fileName,
     size: release.sizeBytes,
     sha256: release.sha256.toLowerCase(),
+    manifestAssetName: integrity.manifestAssetName,
+    manifestSha256: integrity.manifestSha256,
   };
 }
 
@@ -148,7 +155,7 @@ export async function requestAgentUpdates(input: {
   actor: UpdateActor;
   /** the published release to pin to; production always uses the GitHub lookup, harnesses inject one */
   resolveTarget?: typeof currentTarget;
-}): Promise<{ groupId: string; target: { version: string; assetName: string; size: number | null; sha256: string }; outcomes: UpdateRequestOutcome[] }> {
+}): Promise<{ groupId: string; target: { version: string; assetName: string; size: number | null; sha256: string; manifestAssetName: string; manifestSha256: string }; outcomes: UpdateRequestOutcome[] }> {
   const actor = await requireSuperAdmin(input.actor.userId);
   const target = await (input.resolveTarget ?? currentTarget)();
   const groupId = newId();
@@ -237,6 +244,7 @@ export async function requestAgentUpdates(input: {
           groupId,
           currentVersion: agent.version,
           targetVersion: target.version,
+          integrityManifest: { assetName: target.manifestAssetName, digest: target.manifestSha256 },
           supersededCommandId: active?.status === "REQUESTED" ? active.id : null,
         },
       });
@@ -359,7 +367,20 @@ export async function openCommandsFor(agentId: string) {
     .where(and(eq(agentUpdateCommands.agentId, agentId), inArray(agentUpdateCommands.status, ["REQUESTED", ...ROLLOUT_ACTIVE_STATES])));
 }
 
-function toDelivered(row: typeof agentUpdateCommands.$inferSelect): DeliveredUpdateCommand {
+async function toDelivered(row: typeof agentUpdateCommands.$inferSelect): Promise<DeliveredUpdateCommand | null> {
+  const candidates = await db
+    .select({ metadata: auditLogs.metadata })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "AGENT_UPDATE_REQUESTED"), eq(auditLogs.resourceId, row.agentId)))
+    .orderBy(desc(auditLogs.createdAt))
+    .limit(50);
+  const audit = candidates.find(({ metadata }) => {
+    const value = metadata as Record<string, unknown> | null;
+    return value?.commandId === row.id;
+  });
+  const metadata = audit?.metadata as Record<string, unknown> | null | undefined;
+  const manifest = metadata?.integrityManifest as Record<string, unknown> | null | undefined;
+  if (!manifest || typeof manifest.assetName !== "string" || typeof manifest.digest !== "string" || !/^[0-9a-f]{64}$/.test(manifest.digest)) return null;
   return {
     id: row.id,
     agentId: row.agentId,
@@ -367,6 +388,8 @@ function toDelivered(row: typeof agentUpdateCommands.$inferSelect): DeliveredUpd
     assetName: row.targetAssetName,
     size: row.targetSize ?? null,
     sha256: row.targetSha256,
+    manifestAssetName: manifest.assetName,
+    manifestSha256: manifest.digest,
   };
 }
 

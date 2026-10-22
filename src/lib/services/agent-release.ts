@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Looks up the published Agent installer on GitHub Releases.
  *
@@ -16,6 +18,8 @@ const API = `https://api.github.com/repos/${OWNER}/${REPO}/releases/latest`;
 
 /** Only a Windows installer may be served, whatever else a release carries. */
 const INSTALLER_PATTERN = /^SDCAgent-Setup-.*\.exe$/i;
+const MANIFEST_PATTERN = /^SDCAgent-Manifest-([0-9]+\.[0-9]+\.[0-9]+)\.json$/;
+const COMPONENT_PATTERN = /^SDCAgent-Component-[A-Za-z0-9._-]+$/;
 
 export interface AgentRelease {
   /** git tag the release was cut from, e.g. "v1.0.1" */
@@ -54,6 +58,14 @@ interface GitHubRelease {
   draft: boolean;
   prerelease: boolean;
   assets: GitHubAsset[];
+}
+
+export interface AgentReleaseIntegrity {
+  version: string;
+  manifestAssetName: string;
+  manifestSha256: string;
+  manifestBytes: Uint8Array;
+  components: Array<{ assetName: string; assetId: number; size: number; sha256: string }>;
 }
 
 /** Accepts only a full lowercase hex SHA-256 announced as such. */
@@ -162,6 +174,75 @@ export async function lookupLatestAgentRelease(
 export async function getLatestAgentRelease(): Promise<AgentRelease | null> {
   const lookup = await lookupLatestAgentRelease();
   return lookup.status === "ok" ? lookup.release : null;
+}
+
+async function fetchReleaseByVersion(version: string): Promise<GitHubRelease | null> {
+  if (!token() || !/^\d+\.\d+\.\d+$/.test(version)) return null;
+  const response = await fetch(
+    `https://api.github.com/repos/${OWNER}/${REPO}/releases/tags/v${version}`,
+    { headers: headers("application/vnd.github+json"), cache: "no-store" },
+  );
+  if (!response.ok) return null;
+  const release = (await response.json()) as GitHubRelease;
+  if (release.draft || release.prerelease || release.tag_name !== `v${version}`) return null;
+  return release;
+}
+
+async function downloadReleaseAsset(assetId: number): Promise<Uint8Array | null> {
+  const response = await fetch(
+    `https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${assetId}`,
+    { headers: headers("application/octet-stream"), redirect: "follow", cache: "no-store" },
+  );
+  return response.ok ? new Uint8Array(await response.arrayBuffer()) : null;
+}
+
+/** Exact, published release integrity metadata; no caller can select another repository. */
+export async function lookupAgentReleaseIntegrity(version: string): Promise<AgentReleaseIntegrity | null> {
+  const release = await fetchReleaseByVersion(version);
+  if (!release) return null;
+  const manifestAssetName = `SDCAgent-Manifest-${version}.json`;
+  const manifestAsset = release.assets.find((asset) => asset.name === manifestAssetName && MANIFEST_PATTERN.test(asset.name));
+  const manifestSha256 = manifestAsset ? sha256Of(manifestAsset) : null;
+  if (!manifestAsset || !manifestSha256) return null;
+  const manifestBytes = await downloadReleaseAsset(manifestAsset.id);
+  if (!manifestBytes) return null;
+  const actualHex = createHash("sha256").update(manifestBytes).digest("hex");
+  if (actualHex !== manifestSha256) return null;
+
+  let declared: { schemaVersion?: unknown; version?: unknown; files?: Array<Record<string, unknown>> };
+  try {
+    declared = JSON.parse(Buffer.from(manifestBytes).toString("utf8")) as typeof declared;
+  } catch {
+    return null;
+  }
+  if (declared.schemaVersion !== 1 || declared.version !== version || !Array.isArray(declared.files)) return null;
+  const components: AgentReleaseIntegrity["components"] = [];
+  for (const file of declared.files) {
+    const assetName = typeof file.assetName === "string" ? file.assetName : "";
+    const size = Number(file.size);
+    const sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : "";
+    if (!COMPONENT_PATTERN.test(assetName) || !Number.isSafeInteger(size) || size < 0 || !/^[0-9a-f]{64}$/.test(sha256)) return null;
+    const asset = release.assets.find((candidate) => candidate.name === assetName);
+    if (!asset || asset.size !== size || sha256Of(asset) !== sha256) return null;
+    components.push({ assetName, assetId: asset.id, size, sha256 });
+  }
+  return { version, manifestAssetName, manifestSha256, manifestBytes, components };
+}
+
+export async function openAgentComponent(version: string, assetName: string): Promise<{
+  body: ReadableStream<Uint8Array>;
+  fileName: string;
+  sizeBytes: number;
+} | null> {
+  const integrity = await lookupAgentReleaseIntegrity(version);
+  const component = integrity?.components.find((entry) => entry.assetName === assetName);
+  if (!component) return null;
+  const response = await fetch(
+    `https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${component.assetId}`,
+    { headers: headers("application/octet-stream"), redirect: "follow", cache: "no-store" },
+  );
+  if (!response.ok || !response.body) return null;
+  return { body: response.body, fileName: component.assetName, sizeBytes: component.size };
 }
 
 /**

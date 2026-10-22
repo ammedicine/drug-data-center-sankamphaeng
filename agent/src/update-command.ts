@@ -35,6 +35,9 @@ export interface LocalUpdateCommand {
   assetName: string;
   size: number | null;
   sha256: string;
+  /** Exact verified component manifest pinned by the authenticated command. */
+  manifestAssetName?: string | null;
+  manifestSha256?: string | null;
   state: UpdateCommandState;
   /** how many times an install attempt has started on this command */
   attempts: number;
@@ -150,12 +153,25 @@ export function acceptUpdateCommand(incoming: {
   assetName: string;
   size: number | null;
   sha256: string;
+  manifestAssetName?: string | null;
+  manifestSha256?: string | null;
 }, expectedAgentId: string): { accepted: boolean; reason: string } {
   if (!incoming.agentId || incoming.agentId !== expectedAgentId) {
     return { accepted: false, reason: "command belongs to another Agent" };
   }
   const current = loadUpdateCommand();
-  if (current?.commandId === incoming.id) return { accepted: false, reason: "already held" };
+  if (current?.commandId === incoming.id) {
+    const unchanged =
+      current.agentId === incoming.agentId && current.targetVersion === incoming.targetVersion &&
+      current.assetName === incoming.assetName && current.size === incoming.size &&
+      current.sha256 === incoming.sha256 && (current.manifestAssetName ?? null) === (incoming.manifestAssetName ?? null) &&
+      (current.manifestSha256 ?? null) === (incoming.manifestSha256 ?? null);
+    if (!unchanged && !isTerminal(current.state)) {
+      advanceUpdateCommand("FAILED", { errorCode: "AUTHORIZATION_MISMATCH", errorMessage: "same command id arrived with different release authorization" });
+      return { accepted: false, reason: "command authorization changed" };
+    }
+    return { accepted: false, reason: "already held" };
+  }
   if (current && current.commandId && !isTerminal(current.state)) {
     return { accepted: false, reason: `command ${current.commandId} still ${current.state}` };
   }
@@ -168,6 +184,8 @@ export function acceptUpdateCommand(incoming: {
       assetName: incoming.assetName,
       size: incoming.size,
       sha256: incoming.sha256,
+      manifestAssetName: incoming.manifestAssetName ?? null,
+      manifestSha256: incoming.manifestSha256 ?? null,
       state: "SUCCESS",
       attempts: 0,
       errorCode: null,
@@ -186,6 +204,8 @@ export function acceptUpdateCommand(incoming: {
     assetName: incoming.assetName,
     size: incoming.size,
     sha256: incoming.sha256,
+    manifestAssetName: incoming.manifestAssetName ?? null,
+    manifestSha256: incoming.manifestSha256 ?? null,
     state: "DELIVERED",
     attempts: 0,
     errorCode: null,

@@ -317,6 +317,8 @@ export interface AgentConfigResponse {
     assetName: string;
     size: number | null;
     sha256: string;
+    manifestAssetName: string;
+    manifestSha256: string;
   } | null;
 }
 

@@ -140,12 +140,26 @@ export const UPDATE_ERROR_CODES = [
   "UPDATE_TIMED_OUT",
   "UNSUPPORTED_CLIENT",
   "CENTRAL_UNAVAILABLE",
+  "MANIFEST_MISMATCH",
+  "COMPONENT_MISMATCH",
+  "STATE_INVALID",
+  "UNTRUSTED_REPAIR_SOURCE",
+  "REPAIR_SOURCE_UNAVAILABLE",
+  "STAGING_UNAVAILABLE",
+  "PREPARATION_LOCKED",
+  "INSUFFICIENT_DISK",
+  "PAYLOAD_STATE_CHANGED",
+  "SYNC_BUSY",
+  "TARGET_PACKAGE_MISMATCH",
 ] as const;
 export type UpdateErrorCode = (typeof UPDATE_ERROR_CODES)[number];
 
 /** Which failures are worth another attempt without a person looking. */
 export function isTransientUpdateError(code: string | null | undefined): boolean {
-  return code === "DOWNLOAD_FAILED" || code === "CENTRAL_UNAVAILABLE" || code === "INSTALL_INCOMPLETE";
+  return [
+    "DOWNLOAD_FAILED", "CENTRAL_UNAVAILABLE", "INSTALL_INCOMPLETE", "REPAIR_SOURCE_UNAVAILABLE",
+    "STAGING_UNAVAILABLE", "PREPARATION_LOCKED", "INSUFFICIENT_DISK", "PAYLOAD_STATE_CHANGED", "SYNC_BUSY",
+  ].includes(code ?? "");
 }
 
 /** Attempts an Agent makes on one command before giving up on it. */
@@ -186,6 +200,17 @@ export const UPDATE_ERROR_LABELS: Record<UpdateErrorCode, string> = {
   UPDATE_TIMED_OUT: "หมดเวลารอ Agent (เครื่องอาจปิดอยู่)",
   UNSUPPORTED_CLIENT: "รุ่นที่ติดตั้งอยู่ไม่รองรับคำสั่งอัปเดตจากศูนย์กลาง",
   CENTRAL_UNAVAILABLE: "ติดต่อศูนย์กลางไม่ได้ชั่วคราว",
+  MANIFEST_MISMATCH: "component manifest ไม่ตรงกับคำสั่งที่อนุมัติ",
+  COMPONENT_MISMATCH: "ส่วนประกอบโปรแกรมไม่ผ่านการตรวจสอบ",
+  STATE_INVALID: "สถานะสำคัญของ Agent อ่านหรือรักษาไว้ไม่ได้",
+  UNTRUSTED_REPAIR_SOURCE: "แหล่งซ่อมส่วนประกอบไม่ได้รับการยืนยัน",
+  REPAIR_SOURCE_UNAVAILABLE: "แหล่งซ่อมส่วนประกอบไม่พร้อมใช้งานชั่วคราว",
+  STAGING_UNAVAILABLE: "พื้นที่เตรียมอัปเดตไม่พร้อมใช้งานชั่วคราว",
+  PREPARATION_LOCKED: "มีตัวอัปเดตอีกตัวกำลังทำงาน",
+  INSUFFICIENT_DISK: "พื้นที่ดิสก์ไม่เพียงพอสำหรับเตรียมอัปเดต",
+  PAYLOAD_STATE_CHANGED: "คิวหรือ recovery เปลี่ยนระหว่างเตรียมอัปเดต",
+  SYNC_BUSY: "กำลังซิงก์หรือ recovery อยู่",
+  TARGET_PACKAGE_MISMATCH: "ตัวติดตั้งเป้าหมายไม่ตรงกับคำสั่ง",
 };
 
 /** The capability flag a client must report for the centre to hand it a command. */

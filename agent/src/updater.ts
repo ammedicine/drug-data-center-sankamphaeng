@@ -18,7 +18,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { createReadStream, createWriteStream, existsSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -30,6 +30,13 @@ import { isNewerVersion } from "@shared/version";
 
 import { AGENT_VERSION, dataDir, loadStatus } from "./config";
 import { log } from "./logger";
+import {
+  acquirePreparationLock,
+  prepareUpdateReadiness,
+  type ManifestEnvelope,
+  type ReadinessInput,
+  type UpdateReadinessResult,
+} from "./update-readiness";
 import { UPDATE_CHECK_INTERVAL_MINUTES } from "./schedule";
 import { SYSTEM_SID, UPDATE_TASK_NAME, updateTaskDefinition, updateTaskXml } from "./task-definition";
 import {
@@ -173,6 +180,25 @@ export async function sha256Of(path: string): Promise<string> {
   return digest.digest("hex");
 }
 
+export async function fetchComponentManifest(baseUrl: string, version: string): Promise<ManifestEnvelope> {
+  const url = new URL("/api/agent/update/integrity", baseUrl);
+  url.searchParams.set("version", version);
+  const response = await fetch(url, { headers: { "cache-control": "no-cache" } });
+  if (!response.ok) throw new Error(`verified manifest unavailable (${response.status})`);
+  const value = await response.json() as { assetName?: unknown; sha256?: unknown; contentBase64?: unknown };
+  if (typeof value.assetName !== "string" || typeof value.sha256 !== "string" || typeof value.contentBase64 !== "string") throw new Error("invalid manifest response");
+  return { assetName: value.assetName, sha256: value.sha256.toLowerCase(), bytes: Buffer.from(value.contentBase64, "base64") };
+}
+
+export async function fetchVerifiedComponent(baseUrl: string, version: string, assetName: string): Promise<Buffer> {
+  const url = new URL("/download/agent/component", baseUrl);
+  url.searchParams.set("version", version);
+  url.searchParams.set("asset", assetName);
+  const response = await fetch(url, { headers: { "cache-control": "no-cache" } });
+  if (!response.ok) throw new Error(`verified component unavailable (${response.status})`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
 /** True while a sync is doing something it would be rude to interrupt. */
 export function syncIsBusy(): boolean {
   const phase = loadStatus().syncPhase;
@@ -212,10 +238,14 @@ export function handoffRuntimePath(): string {
  * /VERYSILENT is the mode proven on this installer; /SUPPRESSMSGBOXES is
  * deliberately absent (it once turned Inno's questions into an auto-Cancel).
  */
-export async function handOffInstaller(installerPath: string, version: string): Promise<InstallHandoff> {
+export async function handOffInstaller(
+  installerPath: string,
+  version: string,
+  prepared: { runtimePath?: string; helperPath?: string } = {},
+): Promise<InstallHandoff> {
   const logPath = join(dataDir(), "logs", `update-${version}.log`);
   const resultPath = join(updatesDir(), `handoff-${version}.result.json`);
-  const helper = installerHelperPath();
+  const helper = prepared.helperPath ?? installerHelperPath();
   if (!existsSync(helper)) throw new Error(`ไม่พบตัวช่วยติดตั้ง: ${helper}`);
   // The helper writes its result into the updates directory; make sure it is
   // there, and that no stale result from a previous attempt is read as this
@@ -230,8 +260,9 @@ export async function handOffInstaller(installerPath: string, version: string): 
   // PowerShell, launched the same way, dies with the launching console.
   const runtimeCopy = handoffRuntimePath();
   try {
-    if (!existsSync(runtimeCopy) || statSync(runtimeCopy).size !== statSync(process.execPath).size) {
-      await copyFile(process.execPath, runtimeCopy);
+    const runtimeSource = prepared.runtimePath ?? process.execPath;
+    if (!existsSync(runtimeCopy) || statSync(runtimeCopy).size !== statSync(runtimeSource).size || await sha256Of(runtimeCopy) !== await sha256Of(runtimeSource)) {
+      await copyFile(runtimeSource, runtimeCopy);
     }
   } catch (error) {
     throw new Error(`เตรียม node สำหรับตัวช่วยติดตั้งไม่ได้: ${error instanceof Error ? error.message : String(error)}`);
@@ -308,6 +339,7 @@ export interface UpdateEngineResult {
   errorCode?: UpdateErrorCode | null;
   version?: string | null;
   installed?: boolean;
+  readiness?: UpdateReadinessResult;
 }
 
 function classifyDownloadFailure(message: string): UpdateErrorCode {
@@ -329,11 +361,13 @@ export async function runUpdateEngine(input: {
   downloadFn?: typeof downloadVerified;
   installFn?: typeof handOffInstaller;
   busyFn?: typeof syncIsBusy;
+  readinessFn?: typeof prepareUpdateReadiness;
 }): Promise<UpdateEngineResult> {
   const getManifest = input.fetchManifestFn ?? fetchManifest;
   const download = input.downloadFn ?? downloadVerified;
   const install = input.installFn ?? handOffInstaller;
   const busy = input.busyFn ?? syncIsBusy;
+  const readiness = input.readinessFn ?? prepareUpdateReadiness;
   const command = input.trigger === "command" ? input.command : null;
 
   // A command is authorization, not merely a convenient trigger. Old local
@@ -424,6 +458,10 @@ export async function runUpdateEngine(input: {
   // A command pins one release. If the centre now publishes something else,
   // installing "whatever is latest" is not what the operator approved.
   if (command) {
+    if (!command.manifestAssetName || !command.manifestSha256 || !/^[0-9a-f]{64}$/.test(command.manifestSha256)) {
+      advanceUpdateCommand("FAILED", { errorCode: "MANIFEST_MISMATCH", errorMessage: "คำสั่งไม่มี component manifest ที่ตรวจสอบได้" });
+      return { state: "FAILED", detail: "exact component manifest authorization is missing", errorCode: "MANIFEST_MISMATCH", version: command.targetVersion };
+    }
     const identityMatches =
       decision.version === command.targetVersion &&
       decision.sha256 === command.sha256.toLowerCase() &&
@@ -484,30 +522,72 @@ export async function runUpdateEngine(input: {
     return { state: "FAILED", detail: "installer on disk no longer matches its digest", errorCode: "DIGEST_MISMATCH", version: decision.version };
   }
 
+  const lock = acquirePreparationLock(updatesDir(), command.commandId ?? "scheduled");
+  if (!lock) {
+    advanceUpdateCommand("DELIVERED");
+    return { state: "BLOCKED", detail: "another valid update preparation process owns the lock", errorCode: "PREPARATION_LOCKED", version: decision.version };
+  }
+
+  let readinessResult: UpdateReadinessResult;
+  try {
+    const filesystem = statfsSync(updatesDir());
+    const appDir = resolve(process.execPath, "..", "..");
+    const readinessInput: ReadinessInput = {
+      command: {
+        commandId: command.commandId!, agentId: command.agentId!, targetVersion: command.targetVersion,
+        assetName: command.assetName, size: command.size, sha256: command.sha256,
+        manifestAssetName: command.manifestAssetName!, manifestSha256: command.manifestSha256!,
+      },
+      authenticatedAgentId: input.agentId!, currentVersion: AGENT_VERSION, installRoot: appDir,
+      dataRoot: dataDir(), stageRoot: join(updatesDir(), decision.version, "components"), installerPath: installer,
+      freeBytes: Number(filesystem.bavail) * Number(filesystem.bsize), syncBusy: busy,
+      handoffActive: handoffInProgress(loadInstallHandoff()),
+      fetchManifest: (version) => fetchComponentManifest(input.baseUrl, version),
+      fetchComponent: (assetName) => fetchVerifiedComponent(input.baseUrl, decision.version, assetName),
+    };
+    readinessResult = await readiness(readinessInput);
+  } catch (error) {
+    lock.release();
+    advanceUpdateCommand("DELIVERED");
+    return { state: "BLOCKED", detail: error instanceof Error ? error.message : String(error), errorCode: "STAGING_UNAVAILABLE", version: decision.version };
+  }
+  if (!readinessResult.installAllowed) {
+    lock.release();
+    if (readinessResult.terminal) advanceUpdateCommand("FAILED", { errorCode: readinessResult.errorCode, errorMessage: readinessResult.blockers.join("; ") });
+    else advanceUpdateCommand(readinessResult.errorCode === "SYNC_BUSY" || readinessResult.errorCode === "PAYLOAD_STATE_CHANGED" ? "WAITING_FOR_IDLE" : "DELIVERED");
+    return { state: "BLOCKED", detail: readinessResult.blockers.join("; "), errorCode: readinessResult.errorCode, version: decision.version, readiness: readinessResult };
+  }
+
   // Idle is re-checked right before the installer runs: a sync may have
   // started during a slow download.
   if (busy() && !input.force) {
+    lock.release();
     if (command) advanceUpdateCommand("WAITING_FOR_IDLE");
-    return { state: "WAITING_FOR_IDLE", detail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง", version: decision.version };
+    return { state: "WAITING_FOR_IDLE", detail: "รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง", version: decision.version, readiness: readinessResult };
   }
 
   // INSTALLING is written before the installer starts, never after: once it
   // has started, this program may be replaced at any moment.
   if (command) advanceUpdateCommand("INSTALLING");
   try {
-    await install(installer, decision.version);
+    await install(installer, decision.version, {
+      runtimePath: readinessResult.stagedFiles["runtime/node.exe"],
+      helperPath: readinessResult.stagedFiles["run-installer.mjs"],
+    });
+    lock.release();
   } catch (error) {
+    lock.release();
     const message = error instanceof Error ? error.message : String(error);
     clearInstallHandoff();
     if (command) advanceUpdateCommand("FAILED", { errorCode: "INSTALLER_FAILED", errorMessage: message });
-    return { state: "FAILED", detail: message, errorCode: "INSTALLER_FAILED", version: decision.version };
+    return { state: "FAILED", detail: message, errorCode: "INSTALLER_FAILED", version: decision.version, readiness: readinessResult };
   }
   // SUCCESS is not written here on purpose: the installer is replacing this
   // program as we return, and this process must exit for it to finish. The
   // new build's first start reads INSTALLING, sees its own version at the
   // target, and records SUCCESS - the state that survives the restart is the
   // one the restart proves.
-  return { state: "INSTALLING", detail: `ส่งต่อให้ตัวติดตั้งรุ่น ${decision.version} แล้ว`, version: decision.version, installed: true };
+  return { state: "INSTALLING", detail: `ส่งต่อให้ตัวติดตั้งรุ่น ${decision.version} แล้ว`, version: decision.version, installed: true, readiness: readinessResult };
 }
 
 /* ================================================= the task, from inside */

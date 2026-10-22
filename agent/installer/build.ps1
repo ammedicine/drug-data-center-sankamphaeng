@@ -215,6 +215,39 @@ Invoke-Native {
 } "PyInstaller"
 Info "ได้ $BuildDir\gui\SDCAgent.exe"
 
+# Deterministic, release-managed component set used by v1.1.19+ readiness.
+# Mutable ProgramData is deliberately absent: identity, settings, watermark,
+# queue, failed/quarantine and recovery state are never release payloads.
+Step "เตรียม component manifest สำหรับ pre-update integrity"
+$components = @(
+  [ordered]@{ path = "SDCAgent.exe"; role = "program"; source = (Join-Path $BuildDir "gui\SDCAgent.exe"); suffix = "gui.exe" },
+  [ordered]@{ path = "app/agent.js"; role = "program"; source = (Join-Path $BuildDir "app\agent.js"); suffix = "agent.js" },
+  [ordered]@{ path = "runtime/node.exe"; role = "runtime"; source = $NodeExe; suffix = "node.exe" },
+  [ordered]@{ path = "run-installer.mjs"; role = "handoff"; source = (Join-Path $PSScriptRoot "run-installer.mjs"); suffix = "run-installer.mjs" }
+)
+$manifestFiles = @()
+foreach ($component in $components) {
+  if (-not (Test-Path -LiteralPath $component.source -PathType Leaf)) { throw "ขาด component ที่ต้องเผยแพร่: $($component.path)" }
+  $assetName = "SDCAgent-Component-$Version-$($component.suffix)"
+  $assetPath = Join-Path $OutputDir $assetName
+  Copy-Item -LiteralPath $component.source -Destination $assetPath -Force
+  $item = Get-Item -LiteralPath $assetPath
+  $digest = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $manifestFiles += [ordered]@{
+    path = $component.path
+    role = $component.role
+    assetName = $assetName
+    size = [long]$item.Length
+    sha256 = $digest
+  }
+}
+$manifest = [ordered]@{ schemaVersion = 1; version = $Version; files = $manifestFiles }
+$manifestPath = Join-Path $OutputDir "SDCAgent-Manifest-$Version.json"
+$manifestJson = $manifest | ConvertTo-Json -Depth 5 -Compress
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding $false))
+Info "manifest: $manifestPath"
+Info "manifest SHA-256: $((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash)"
+
 # 4 -------------------------------------------------------------- installer
 Step "4/4 ประกอบเป็นตัวติดตั้ง (Inno Setup)"
 if ($SkipInstaller) {
