@@ -21,6 +21,10 @@ import {
   GlobalSyncBackfillError,
   globalSyncBackfillService,
 } from "@/lib/services/global-sync-backfill";
+import {
+  StaleSyncBatchAbandonmentError,
+  staleSyncBatchAbandonmentService,
+} from "@/lib/services/stale-sync-batch-abandonment";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { requireApiUser } from "@/lib/auth/rbac";
 import {
@@ -962,6 +966,31 @@ export async function resumeAgentSyncAction(
 ): Promise<ActionState> {
   const ids = await resolveSelection(formData);
   return applySyncControl(ids, "RUNNING", null);
+}
+
+/* -------------------------------------- bounded legacy batch abandonment */
+
+export async function abandonApprovedStaleBatchAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireApiUser();
+  if (!isSuperAdmin(user)) return fail("เฉพาะผู้ดูแลระบบส่วนกลางเท่านั้น");
+
+  try {
+    const result = await staleSyncBatchAbandonmentService.abandon({
+      actorUserId: user.userId,
+      batchRef: String(formData.get("batchRef") ?? "").trim(),
+      reason: String(formData.get("reason") ?? ""),
+      ip: clientIp(await headers()),
+    });
+    revalidatePath("/admin/monitoring");
+    revalidatePath("/sync");
+    return { success: `บันทึก ${result.batchRef} เป็น ABORTED แล้ว โดยไม่แก้ counters หรือ watermark` };
+  } catch (error) {
+    if (error instanceof StaleSyncBatchAbandonmentError) return fail(error.message);
+    throw error;
+  }
 }
 
 /* ------------------------------------------ Global Sync Start Date policy */

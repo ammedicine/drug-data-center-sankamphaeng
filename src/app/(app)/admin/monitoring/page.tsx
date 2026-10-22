@@ -12,20 +12,23 @@ import {
   relativeTime,
 } from "@/components/ui/primitives";
 import { SyncHistoryCard } from "@/components/ui/sync-history";
-import { requireAllFacilityViewer } from "@/lib/auth/rbac";
+import { isSuperAdmin, requireAllFacilityViewer } from "@/lib/auth/rbac";
 import {
   getFleetSummary,
   listAgents,
   listRunningBatches,
   listSyncBatches,
 } from "@/lib/services/monitoring";
+import { APPROVED_STALE_BATCH_REF } from "@/lib/services/stale-sync-batch-abandonment";
 import { liveSignature } from "@/lib/shared/live-signature";
+
+import { StaleBatchAbandonmentPanel } from "./stale-batch-abandonment-panel";
 
 export const metadata = { title: "การเฝ้าระวังระบบ" };
 export const dynamic = "force-dynamic";
 
 export default async function MonitoringPage() {
-  await requireAllFacilityViewer();
+  const user = await requireAllFacilityViewer();
 
   const [fleet, agentRows, failed, recent, running] = await Promise.all([
     getFleetSummary(null),
@@ -72,6 +75,10 @@ export default async function MonitoringPage() {
           icon={TriangleAlert}
         />
       </div>
+
+      {isSuperAdmin(user) ? (
+        <StaleBatchAbandonmentPanel batchRef={APPROVED_STALE_BATCH_REF} />
+      ) : null}
 
       <Card className="my-5" title="Agent ที่ต้องตรวจสอบ" description="ออฟไลน์หรือมีข้อผิดพลาด">
         <DataTable

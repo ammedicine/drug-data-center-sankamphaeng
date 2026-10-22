@@ -162,6 +162,10 @@ agent/data/queue/normal-sync-recovery.json         identity/phase ของ norm
 เหตุผลถูกเก็บใน `sync_rejects` และนับใน `sync_batches.records_rejected`
 ทั้ง batch จะล้มก็ต่อเมื่อ pcucode ไม่ตรงกับสถานบริการ (กันข้อมูลข้ามสถานบริการ)
 
+Legacy batch ที่ค้างและไม่มี completion evidence ห้ามปิดเป็น `COMPLETED` หรือเดาสถานะขึ้นใหม่
+การปิดทางบริหารที่ได้รับอนุมัติต้องเป็น `ABORTED` โดย `SUPER_ADMIN` ผ่าน conditional transaction
+พร้อม USER audit เท่านั้น และต้องไม่แก้ counters, Agent state, watermark, `drug_usage` หรือ batch รุ่นใหม่กว่า
+
 ## 6. Retry / backoff
 
 `withRetry()` — exponential backoff + jitter, 5 ครั้ง, เริ่ม 2 วินาที
