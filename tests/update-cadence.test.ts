@@ -13,7 +13,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -86,6 +86,17 @@ describe("the scheduled task the installer writes", () => {
     // And the uninstaller removes exactly that name, so a remove/reinstall
     // cycle cannot accumulate copies either.
     expect(source().match(/\/Delete \/TN "SDCAgentAutoUpdate" \/F/g) ?? []).toHaveLength(1);
+  });
+
+  it("preserves the existing Agent identity and every ProgramData queue during an upgrade", () => {
+    const iss = source();
+    expect(iss).toContain("AppId={{8E2C1F4A-6D33-4B77-9E51-2C6A7B0D9A11}");
+    const uninstallDelete = iss.slice(iss.indexOf("[UninstallDelete]"), iss.indexOf("[Code]"));
+    expect(uninstallDelete).not.toMatch(/commonappdata|SDCAgent/i);
+    // The installer may create these paths and repair permissions, but no
+    // upgrade code may remove or rewrite credential/state/queue contents.
+    expect(iss).not.toMatch(/DelTree\s*\(\s*ExpandConstant\('\{commonappdata\}\\SDCAgent/i);
+    expect(iss).toContain("ห้ามแตะ %ProgramData%\\SDCAgent");
   });
 
   it("11. touches only its own two tasks", () => {
@@ -377,7 +388,7 @@ describe("a check that finds nothing new", () => {
 });
 
 describe("a check that finds a newer release", () => {
-  it("12. waits for an active sync rather than interrupting it", async () => {
+  it("12. reports availability but never downloads without an exact command, even during a sync", async () => {
     manifest = { ...manifest, version: "9.9.9" };
     writeFileSync(join(home, "state.json"), JSON.stringify({
       lastSyncedVisitDate: "2026-09-10", lastSyncAt: null, batchSequence: 7,
@@ -390,9 +401,32 @@ describe("a check that finds a newer release", () => {
     // It looked, saw the sync, and did not download.
     expect(hits).toEqual(["GET /api/agent/update"]);
     const status = JSON.parse(readFileSync(join(home, "status.json"), "utf8"));
-    expect(status.updateState).toBe("READY");
-    expect(status.autoUpdateTaskLastResult).toMatch(/^WAITING_FOR_SYNC version=9\.9\.9/);
+    expect(status.updateState).toBe("AVAILABLE");
+    expect(status.autoUpdateTaskLastResult).toMatch(/^AVAILABLE version=9\.9\.9 authorization=required as=/);
     expect(status.syncPhase).toBe("UPLOADING");
+  }, 180_000);
+
+  it("13. preserves a paused Agent's legacy pending queue while discovering the release", async () => {
+    manifest = { ...manifest, version: "9.9.9" };
+    writeFileSync(join(home, "state.json"), JSON.stringify({
+      lastSyncedVisitDate: "2026-09-10", lastSyncAt: null, batchSequence: 7,
+      syncControlState: "PAUSED", appliedControlRevision: 3, pauseReason: "owner pause",
+    }));
+    const pending = join(home, "queue", "pending");
+    mkdirSync(pending, { recursive: true });
+    for (let sequence = 1; sequence <= 7; sequence++) {
+      writeFileSync(join(pending, `SYNC-LEGACY__${String(sequence).padStart(6, "0")}.json`), JSON.stringify({
+        batchRef: "SYNC-LEGACY", sequence, totalChunks: 7, records: [],
+      }));
+    }
+    const before = readdirSync(pending).map((name) => [name, readFileSync(join(pending, name), "utf8")]);
+
+    const result = await runAutoUpdate();
+    expect(result.status, result.stderr).toBe(0);
+    expect(hits).toEqual(["GET /api/agent/update"]);
+    expect(readdirSync(pending).map((name) => [name, readFileSync(join(pending, name), "utf8")])).toEqual(before);
+    expect(state().syncControlState).toBe("PAUSED");
+    expect(JSON.parse(readFileSync(join(home, "status.json"), "utf8")).updateState).toBe("AVAILABLE");
   }, 180_000);
 });
 

@@ -183,7 +183,7 @@ describe("B. one agent", () => {
   it("an online agent receives it on the next heartbeat, and DELIVERED is recorded", async () => {
     requireDatabase();
     const delivered = await heartbeat("a-new");
-    expect(delivered).toMatchObject({ targetVersion: "1.1.10", assetName: "SDCAgent-Setup-1.1.10.exe", sha256: "a".repeat(64) });
+    expect(delivered).toMatchObject({ agentId: "a-new", targetVersion: "1.1.10", assetName: "SDCAgent-Setup-1.1.10.exe", sha256: "a".repeat(64) });
     const [row] = await commands("a-new");
     expect(row.status).toBe("DELIVERED");
     // Handed out again on every heartbeat until closed; the agent dedups by id.

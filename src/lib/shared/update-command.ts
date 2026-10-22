@@ -127,6 +127,7 @@ export function canTransition(from: UpdateCommandState, to: UpdateCommandState):
 
 /** Error codes an Agent or the centre may attach to a FAILED command. */
 export const UPDATE_ERROR_CODES = [
+  "AUTHORIZATION_MISMATCH",
   "TARGET_NOT_NEWER",
   "TARGET_NOT_AVAILABLE",
   "ASSET_NAME_INVALID",
@@ -172,6 +173,7 @@ export const UPDATE_STATE_LABELS: Record<UpdateCommandState | "OFFLINE_REQUESTED
 
 /** Thai for an error code, without leaking anything internal. */
 export const UPDATE_ERROR_LABELS: Record<UpdateErrorCode, string> = {
+  AUTHORIZATION_MISMATCH: "คำสั่งอัปเดตไม่ได้รับอนุญาตสำหรับ Agent เครื่องนี้",
   TARGET_NOT_NEWER: "รุ่นเป้าหมายไม่ใหม่กว่ารุ่นที่ติดตั้งอยู่",
   TARGET_NOT_AVAILABLE: "รุ่นเป้าหมายไม่ใช่รุ่นที่เผยแพร่อยู่แล้ว",
   ASSET_NAME_INVALID: "ชื่อไฟล์ติดตั้งไม่ถูกต้อง",

@@ -136,10 +136,16 @@ acknowledgement กลับ Central revision นี้แยกจาก pause 
 queue/quarantine, pause/control state และ updater state เดิม Agent รุ่นเก่าหรือออฟไลน์ต้องคง
 centrally paused จนกว่าอัปเกรด รับ policy และรายงาน applied แล้ว JHCIS ยังเป็น read-only ทุกกรณี
 
-release/tag `v1.1.16` ที่เผยแพร่แล้วห้ามแก้ `v1.1.17` ถูก build และใช้ทดสอบบนเครื่อง Dev แบบ
-local/unpublished แต่ไม่เคยมี tag/release รุ่นทดสอบถัดไปจึงเป็น `v1.1.18`
+release/tag ที่เผยแพร่แล้วเป็น immutable: `v1.1.17` เป็น local/unpublished Dev build,
+`v1.1.18` เผยแพร่แล้ว และ controlled-update patch รุ่นทดสอบถัดไปคือ `v1.1.19`
 
 v1.1.18 เพิ่ม normal-sync recovery manifest ก่อน `sync/start`, durable acknowledged chunk receipts,
 same-batch retry/restart/completion และล้าง recovery state หลัง Central completion, reconciliation และ
 durable watermark เท่านั้น หลักฐาน legacy queue ต้องตรง exact batch/range/count มิฉะนั้นหยุดแบบ fail closed
 กลไกนี้ไม่เปลี่ยน JHCIS query/write behavior, ordinary MANUAL_RANGE หรือ authorized historical backfill
+
+ตั้งแต่ v1.1.19 งาน `SDCAgentAutoUpdate` ตรวจ GitHub latest เพื่อ discovery เท่านั้น การพบ release ใหม่
+ทำได้เพียงบันทึก `AVAILABLE`; ห้าม download/install จนกว่าจะมี durable `agent_update_commands` ที่ส่งผ่าน
+authenticated heartbeat และตรง exact Agent ID, version, asset name, optional size และ SHA-256 คำสั่ง terminal,
+stale, ของ Agent อื่น หรือ metadata ไม่ตรงต้อง fail closed การ pause data sync ไม่ปิดสิทธิ์คำสั่ง update ที่ตรง
+กัน และ restart ต้องใช้คำสั่งเดิมโดยไม่ขยายสิทธิ์ `%ProgramData%\SDCAgent` ทั้งหมดรวม queue ต้องคงเดิม

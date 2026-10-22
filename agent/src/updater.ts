@@ -36,6 +36,7 @@ import {
   advanceUpdateCommand,
   clearInstallHandoff,
   handoffInProgress,
+  isTerminal,
   type InstallHandoff,
   loadInstallHandoff,
   type LocalUpdateCommand,
@@ -81,7 +82,7 @@ export function decideUpdate(manifest: UpdateManifest, installed: string): Updat
     return { action: "none", reason: `ติดตั้งรุ่น ${installed} อยู่แล้ว` };
   }
   const sha256 = String(manifest.sha256 ?? "").toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(sha256) || manifest.autoInstall === false) {
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
     return { action: "blocked", version, reason: "ไม่มีค่าตรวจสอบไฟล์ (SHA-256) จึงติดตั้งอัตโนมัติไม่ได้" };
   }
   if (!/^SDCAgent-Setup-.*\.exe$/i.test(String(manifest.assetName ?? ""))) {
@@ -302,7 +303,7 @@ export type UpdateTrigger = "scheduled" | "command";
 
 export interface UpdateEngineResult {
   /** what the run concluded, in the command vocabulary */
-  state: UpdateCommandState | "NONE" | "BLOCKED";
+  state: UpdateCommandState | "NONE" | "AVAILABLE" | "BLOCKED";
   detail: string;
   errorCode?: UpdateErrorCode | null;
   version?: string | null;
@@ -317,6 +318,8 @@ function classifyDownloadFailure(message: string): UpdateErrorCode {
 
 export async function runUpdateEngine(input: {
   baseUrl: string;
+  /** Authenticated local identity; update authorization is bound to it. */
+  agentId: string | null;
   trigger: UpdateTrigger;
   /** the held command, when the trigger is "command" */
   command: LocalUpdateCommand | null;
@@ -332,6 +335,31 @@ export async function runUpdateEngine(input: {
   const install = input.installFn ?? handOffInstaller;
   const busy = input.busyFn ?? syncIsBusy;
   const command = input.trigger === "command" ? input.command : null;
+
+  // A command is authorization, not merely a convenient trigger. Old local
+  // files without an Agent binding, commands copied from another machine,
+  // and terminal commands must never authorize another install.
+  if (command && isTerminal(command.state)) {
+    return {
+      state: "NONE",
+      detail: `คำสั่ง ${command.commandId ?? "?"} ปิดแล้ว`,
+      version: command.targetVersion,
+      installed: false,
+    };
+  }
+  if (command && (!input.agentId || !command.agentId || command.agentId !== input.agentId)) {
+    advanceUpdateCommand("FAILED", {
+      errorCode: "AUTHORIZATION_MISMATCH",
+      errorMessage: "คำสั่งอัปเดตไม่ได้ผูกกับ Agent เครื่องนี้",
+    });
+    return {
+      state: "FAILED",
+      detail: "update command authorization does not match this Agent",
+      errorCode: "AUTHORIZATION_MISMATCH",
+      version: command.targetVersion,
+      installed: false,
+    };
+  }
 
   // An installer handed off by an earlier run may still be working - this
   // task fires every half hour and ignores nothing but itself. Two installers
@@ -382,13 +410,29 @@ export async function runUpdateEngine(input: {
     return { state: "BLOCKED", detail: decision.reason, version: decision.version };
   }
 
+  // The scheduled task discovers and reports a release, but only an exact,
+  // durable command from the authenticated heartbeat authorizes installation.
+  if (!command) {
+    return {
+      state: "AVAILABLE",
+      detail: `พบรุ่น ${manifest.version} รอคำสั่งอัปเดตจากศูนย์กลาง`,
+      version: manifest.version ?? null,
+      installed: false,
+    };
+  }
+
   // A command pins one release. If the centre now publishes something else,
   // installing "whatever is latest" is not what the operator approved.
   if (command) {
-    if (decision.version !== command.targetVersion || decision.sha256 !== command.sha256.toLowerCase()) {
+    const identityMatches =
+      decision.version === command.targetVersion &&
+      decision.sha256 === command.sha256.toLowerCase() &&
+      decision.assetName === command.assetName &&
+      (command.size === null || decision.size === command.size);
+    if (!identityMatches) {
       advanceUpdateCommand("FAILED", {
         errorCode: "TARGET_NOT_AVAILABLE",
-        errorMessage: `ศูนย์กลางเผยแพร่รุ่น ${decision.version} แต่คำสั่งระบุรุ่น ${command.targetVersion}`,
+        errorMessage: "รุ่น ไฟล์ ขนาด หรือ SHA-256 ที่เผยแพร่ไม่ตรงกับคำสั่ง",
       });
       return {
         state: "FAILED",

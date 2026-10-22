@@ -80,9 +80,9 @@ function record(usageDate: string, drugCode: string): DrugUsageRecord {
   };
 }
 
-describe("Agent v1.1.18 managed sync floor", () => {
+describe("Agent v1.1.19 managed sync floor", () => {
   it("advertises remote policy support without removing the existing capability", () => {
-    expect(AGENT_VERSION).toBe("1.1.18");
+    expect(AGENT_VERSION).toBe("1.1.19");
     expect(AGENT_CAPABILITIES.syncStartDate).toBe(true);
     expect(AGENT_CAPABILITIES.remoteSyncStartDate).toBe(true);
   });

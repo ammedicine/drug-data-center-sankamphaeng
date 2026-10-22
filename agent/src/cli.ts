@@ -961,7 +961,13 @@ async function autoUpdate(): Promise<void> {
   const command = held && held.commandId && !isTerminal(held.state) ? held : null;
   const trigger = command ? "command" : "scheduled";
 
-  const result = await runUpdateEngine({ baseUrl, trigger, command, force: has("force") });
+  const result = await runUpdateEngine({
+    baseUrl,
+    agentId: credential?.agentId ?? null,
+    trigger,
+    command,
+    force: has("force"),
+  });
   const checkedAt = new Date().toISOString();
   const cmdTag = command ? ` command=${command.commandId}` : "";
 
@@ -969,6 +975,11 @@ async function autoUpdate(): Promise<void> {
     case "NONE":
       writeStatus({ updateState: "NONE", updateLatestVersion: result.version ?? AGENT_VERSION, updateCheckedAt: checkedAt, updateDetail: null });
       record(`NONE latest=${result.version ?? AGENT_VERSION} running=${AGENT_VERSION}${cmdTag}`);
+      console.log(result.detail);
+      return;
+    case "AVAILABLE":
+      writeStatus({ updateState: "AVAILABLE", updateLatestVersion: result.version ?? null, updateCheckedAt: checkedAt, updateDetail: result.detail });
+      record(`AVAILABLE version=${result.version ?? "?"} authorization=required`);
       console.log(result.detail);
       return;
     case "BLOCKED":

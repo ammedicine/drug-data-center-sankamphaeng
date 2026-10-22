@@ -81,10 +81,10 @@ describe("receiving a command", () => {
     // there is nothing to say - the centre learns the report shape exists.
     expect(bodies[0].update).toBeDefined();
 
-    reply = { id: "cmd-9", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
+    reply = { id: "cmd-9", agentId: "a", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
     await r.heartbeat("ONLINE");
     const file = JSON.parse(readFileSync(join(home, "update-command.json"), "utf8"));
-    expect(file).toMatchObject({ commandId: "cmd-9", targetVersion: "9.9.9", state: "DELIVERED", sha256: "c".repeat(64) });
+    expect(file).toMatchObject({ commandId: "cmd-9", agentId: "a", targetVersion: "9.9.9", state: "DELIVERED", sha256: "c".repeat(64) });
 
     // Next heartbeat carries the new state; the one after that, unchanged, carries nothing.
     await r.heartbeat("ONLINE");
@@ -104,7 +104,7 @@ describe("receiving a command", () => {
       lastSyncedVisitDate: "2026-09-10", lastSyncAt: null, batchSequence: 4,
       syncControlState: "PAUSED", appliedControlRevision: 2, pauseReason: "รีเซ็ต",
     }));
-    reply = { id: "cmd-p", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
+    reply = { id: "cmd-p", agentId: "a", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
     const r = await runner();
     await r.heartbeat("ONLINE");
     expect(JSON.parse(readFileSync(join(home, "update-command.json"), "utf8")).state).toBe("DELIVERED");
@@ -121,8 +121,15 @@ describe("receiving a command", () => {
     expect(existsSync(join(home, "update-command.json"))).toBe(false);
   }, 60_000);
 
+  it("rejects a command addressed to another Agent", async () => {
+    reply = { id: "cmd-other", agentId: "other", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
+    const r = await runner();
+    await expect(r.heartbeat("ONLINE")).resolves.toBeTruthy();
+    expect(existsSync(join(home, "update-command.json"))).toBe(false);
+  }, 60_000);
+
   it("what it sends never includes a secret", async () => {
-    reply = { id: "cmd-s", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
+    reply = { id: "cmd-s", agentId: "a", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: 10, sha256: "c".repeat(64) };
     const r = await runner();
     await r.heartbeat("ONLINE");
     await r.heartbeat("ONLINE");

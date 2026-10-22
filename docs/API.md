@@ -64,6 +64,12 @@ Error: `INVALID_TOKEN` 401 · `TOKEN_USED` 409 · `TOKEN_EXPIRED` 410 · `PCUCOD
 
 ตอบ `{ ok, serverTime, config }` — `config` คือค่าที่ Central อนุมัติให้ Agent ใช้
 
+ถ้ามีคำสั่งอัปเดตที่ `SUPER_ADMIN` สร้างให้ Agent นี้โดยเฉพาะ `config.updateCommand` จะมี
+`id`, server-derived `agentId`, `targetVersion`, `assetName`, optional `size` และ `sha256` ที่ pin ไว้
+Agent v1.1.19 ใช้ tuple นี้เป็น authorization แบบ exact-match; `GET /api/agent/update` เป็นเพียง
+published-release discovery/verification metadata และไม่อนุญาตให้ scheduled check ติดตั้งเอง
+Agent รุ่นเก่าจะ ignore field `agentId` เพิ่มเติม จึงยังรับ response แบบ backward-compatible
+
 ### GET /api/agent/config
 
 ตอบ `AgentConfigResponse`: facility, `expectedPcucode`, `syncIntervalMinutes`,

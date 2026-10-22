@@ -29,6 +29,8 @@ import { log } from "./logger";
 export interface LocalUpdateCommand {
   /** null for the scheduled check's own runs, an id for a centre command */
   commandId: string | null;
+  /** Agent identity the authenticated Central heartbeat bound this command to. */
+  agentId: string | null;
   targetVersion: string;
   assetName: string;
   size: number | null;
@@ -143,11 +145,15 @@ export function saveUpdateCommand(command: LocalUpdateCommand): void {
  */
 export function acceptUpdateCommand(incoming: {
   id: string;
+  agentId: string;
   targetVersion: string;
   assetName: string;
   size: number | null;
   sha256: string;
-}): { accepted: boolean; reason: string } {
+}, expectedAgentId: string): { accepted: boolean; reason: string } {
+  if (!incoming.agentId || incoming.agentId !== expectedAgentId) {
+    return { accepted: false, reason: "command belongs to another Agent" };
+  }
   const current = loadUpdateCommand();
   if (current?.commandId === incoming.id) return { accepted: false, reason: "already held" };
   if (current && current.commandId && !isTerminal(current.state)) {
@@ -157,6 +163,7 @@ export function acceptUpdateCommand(incoming: {
     // Nothing to do and nothing to install: say so and close it at once.
     saveUpdateCommand({
       commandId: incoming.id,
+      agentId: incoming.agentId,
       targetVersion: incoming.targetVersion,
       assetName: incoming.assetName,
       size: incoming.size,
@@ -174,6 +181,7 @@ export function acceptUpdateCommand(incoming: {
   }
   saveUpdateCommand({
     commandId: incoming.id,
+    agentId: incoming.agentId,
     targetVersion: incoming.targetVersion,
     assetName: incoming.assetName,
     size: incoming.size,

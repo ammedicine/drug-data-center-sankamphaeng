@@ -31,7 +31,7 @@ C:\Program Files\SDC Agent\
 ```powershell
 cd agent
 .\installer\build.ps1              # ทำครบทุกขั้นตอน
-.\installer\build.ps1 -Version 1.1.18  # สร้าง unpublished release candidate แบบระบุ version
+.\installer\build.ps1 -Version 1.1.19  # สร้าง unpublished release candidate แบบระบุ version
 .\installer\build.ps1 -SkipInstaller   # ข้ามขั้นตอน Inno Setup
 ```
 

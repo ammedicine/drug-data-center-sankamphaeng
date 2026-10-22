@@ -43,6 +43,7 @@ function seedCommand(s: Store, over: Partial<Parameters<typeof s.saveUpdateComma
   const now = new Date().toISOString();
   s.saveUpdateCommand({
     commandId: "cmd-eperm",
+    agentId: "agent-cleanup",
     targetVersion: "1.0.0", // <= AGENT_VERSION, so "target reached"
     assetName: "SDCAgent-Setup-1.0.0.exe",
     size: 10,

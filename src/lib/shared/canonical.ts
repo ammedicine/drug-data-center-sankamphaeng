@@ -312,6 +312,7 @@ export interface AgentConfigResponse {
    */
   updateCommand?: {
     id: string;
+    agentId: string;
     targetVersion: string;
     assetName: string;
     size: number | null;

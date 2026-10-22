@@ -267,8 +267,10 @@ describe("deciding whether to install an update", () => {
     expect(decideUpdate({ ...good, sha256: null }, "1.1.7")).toMatchObject({ action: "blocked" });
     expect(decideUpdate({ ...good, sha256: "" }, "1.1.7")).toMatchObject({ action: "blocked" });
     expect(decideUpdate({ ...good, sha256: "short" }, "1.1.7")).toMatchObject({ action: "blocked" });
-    // The server says the digest could not be trusted.
-    expect(decideUpdate({ ...good, autoInstall: false }, "1.1.7")).toMatchObject({ action: "blocked" });
+    // autoInstall is legacy manifest metadata, not authorization. A valid
+    // digest remains verifiable; runUpdateEngine separately requires an
+    // exact durable command before it may use this decision.
+    expect(decideUpdate({ ...good, autoInstall: false }, "1.1.7")).toMatchObject({ action: "install" });
     // Something that is not our installer.
     expect(decideUpdate({ ...good, assetName: "payload.exe" }, "1.1.7")).toMatchObject({
       action: "blocked",
@@ -417,8 +419,8 @@ describe("deciding whether to install an update", () => {
   });
 });
 
-describe("an update found while a sync is running", () => {
-  it("TEST 20: waits, and says it is waiting, instead of interrupting", async () => {
+describe("an update found by a scheduled discovery", () => {
+  it("TEST 20: reports availability and does not interrupt an active sync", async () => {
     // The queue would survive an interruption, but a run that is most of the
     // way through a clinic's history should not be cut short for an update
     // that can wait an hour. Run end to end through the CLI, because the
@@ -448,15 +450,15 @@ describe("an update found while a sync is running", () => {
     const result = await runCli(["auto-update"], workDir);
 
     expect(result.code, result.out.slice(-300)).toBe(0);
-    expect(result.out).toMatch(/รอบถัดไป/);
+    expect(result.out).toMatch(/รอคำสั่งอัปเดตจากศูนย์กลาง/);
     // Nothing was fetched and nothing was installed.
     expect(central.downloads).toBe(0);
     const status = loadStatus();
-    expect(status.updateState).toBe("READY");
+    expect(status.updateState).toBe("AVAILABLE");
     expect(status.updateLatestVersion).toBe("9.9.9");
   }, 180_000);
 
-  it("installs once the sync is idle", async () => {
+  it("does not turn an idle machine into implicit installation authority", async () => {
     const { writeStatus, loadStatus } = await configModule();
     central.asset = randomBytes(1024);
     central.manifest = {
@@ -480,28 +482,18 @@ describe("an update found while a sync is running", () => {
 
     const result = await runCli(["auto-update"], workDir);
 
-    // It downloaded and verified, then tried to hand the install off. The
-    // hand-off cannot even begin here - there is no runnable installer, and no
-    // helper laid down beside a real installation - so it fails, and is
-    // reported as a failure rather than pretending an install is under way.
-    // (The full, working hand-off is proven with real processes in
-    // update-handoff.test.ts, which this end-to-end run does not duplicate.)
-    expect(central.downloads).toBe(1);
+    // Latest release discovery is never installation authorization.
+    expect(central.downloads).toBe(0);
     const status = loadStatus();
-    expect(status.updateState).toBe("FAILED");
+    expect(status.updateState).toBe("AVAILABLE");
 
-    // The whole chain ran under one command, unattended, with nothing asked of
-    // a person: manifest -> version compare -> download -> size -> sha256 ->
-    // idle check -> hand off -> report. What the machine did is on the record.
     expect(status.updateLatestVersion).toBe("9.9.9");
     expect(status.autoUpdateTaskLastRunAt).toBeTruthy();
-    expect(status.autoUpdateTaskLastResult).toMatch(/FAILED version=9\.9\.9/);
+    expect(status.autoUpdateTaskLastResult).toMatch(/AVAILABLE version=9\.9\.9 authorization=required/);
     // And the account that ran it, which is the only thing that separates a
     // SYSTEM scheduled task from somebody pressing the button on the window.
     expect(status.autoUpdateTaskLastResult).toMatch(/ as=\S+/);
-    // It could not hand the install off, and says so - the failure is at the
-    // hand-off, not a later exit code, because nothing is waited for.
-    expect(status.updateDetail).toMatch(/ตัวช่วยติดตั้ง/);
+    expect(status.updateDetail).toMatch(/รอคำสั่งอัปเดตจากศูนย์กลาง/);
     void result;
   }, 180_000);
 
@@ -637,7 +629,7 @@ describe("the update a clinic would actually get", () => {
   // beside a real installation, which a CLI spawned from the system node here
   // has no way to stage, so it is not duplicated in this end-to-end run.
 
-  it("a file whose hash is wrong is never launched", async () => {
+  it("a scheduled discovery never downloads or launches even when metadata is wrong", async () => {
     if (!stub) return;
     const { writeStatus, loadStatus } = await configModule();
     enrol();
@@ -649,10 +641,10 @@ describe("the update a clinic would actually get", () => {
 
     await runCli(["auto-update"], workDir);
 
-    expect(central.downloads).toBe(1);
+    expect(central.downloads).toBe(0);
     // The only assertion that really matters here.
     expect(existsSync(marker)).toBe(false);
-    expect(loadStatus().updateState).toBe("FAILED");
+    expect(loadStatus().updateState).toBe("AVAILABLE");
     // And the file it could not vouch for is gone, not left where the next
     // run - or anything else - could execute it.
     const updates = join(workDir, "updates");
@@ -660,7 +652,7 @@ describe("the update a clinic would actually get", () => {
     expect(kept.filter((name) => name.endsWith(".exe"))).toEqual([]);
   }, 180_000);
 
-  it("will not start an installer while a sync is running", async () => {
+  it("will not start an installer while a sync is running without a command", async () => {
     if (!stub) return;
     const { writeStatus, loadStatus } = await configModule();
     enrol();
@@ -673,9 +665,9 @@ describe("the update a clinic would actually get", () => {
     expect(central.downloads).toBe(0);
     expect(existsSync(marker)).toBe(false);
     const status = loadStatus();
-    expect(status.updateState).toBe("READY");
-    expect(status.updateDetail).toBe("รอการซิงก์ปัจจุบันเสร็จก่อนติดตั้ง");
-    expect(status.autoUpdateTaskLastResult).toMatch(/WAITING_FOR_SYNC/);
+    expect(status.updateState).toBe("AVAILABLE");
+    expect(status.updateDetail).toMatch(/รอคำสั่งอัปเดตจากศูนย์กลาง/);
+    expect(status.autoUpdateTaskLastResult).toMatch(/authorization=required/);
 
     // One check, one decision. A run that finds a busy agent must not sit
     // there retrying - the next scheduled check is hours away, and fifteen

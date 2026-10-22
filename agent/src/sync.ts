@@ -1741,14 +1741,20 @@ export class SyncRunner {
     // run now; if it cannot be asked, its own schedule finds the file within
     // the half hour. Independent of pause: a paused clinic can still be fixed.
     const command = response.config.updateCommand;
-    if (command && typeof command.id === "string" && typeof command.targetVersion === "string") {
+    if (
+      command &&
+      typeof command.id === "string" &&
+      typeof command.agentId === "string" &&
+      typeof command.targetVersion === "string"
+    ) {
       const accepted = acceptUpdateCommand({
         id: command.id,
+        agentId: command.agentId,
         targetVersion: command.targetVersion,
         assetName: String(command.assetName ?? ""),
         size: typeof command.size === "number" ? command.size : null,
         sha256: String(command.sha256 ?? "").toLowerCase(),
-      });
+      }, this.credential.agentId);
       if (accepted.accepted) {
         lastUpdateReportSent = null; // report the new state on the next heartbeat
         void requestUpdateTaskRun();

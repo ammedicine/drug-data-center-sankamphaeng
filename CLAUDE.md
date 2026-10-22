@@ -529,6 +529,18 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 - **ข้อจำกัด bootstrap**: v1.1.6 อัปเดตตัวเองไม่ได้เพราะยังไม่มีตัวอัปเดต
   ต้องติดตั้ง v1.1.7 ด้วยมือครั้งเดียว หลังจากนั้นรุ่นถัดไปจึงอัปเดตเองได้
 
+### v1.1.19: แยก release discovery ออกจาก authorization
+
+- การขึ้นจาก v1.1.18 เป็น one-time coordinated bootstrap ขณะ fleet paused; implementation/build phase
+  ห้าม publish, เปลี่ยน production manifest หรือแตะ Agent จริง
+- `SDCAgentAutoUpdate` ยังตรวจ `/api/agent/update` ตามรอบ แต่ถ้าไม่มี durable command จะรายงาน
+  `AVAILABLE` เท่านั้น ห้าม download/install แม้ manifest เดิมมี `autoInstall:true`
+- สิทธิ์ติดตั้งมาจาก `agent_update_commands` ที่ส่งใน authenticated heartbeat เท่านั้น Central ส่ง
+  server-derived `agentId` เพิ่ม และ Agent persist พร้อม command ID/version/asset/size/SHA-256 แบบ atomic
+- ก่อนติดตั้งต้องตรง exact Agent และ published metadata; คำสั่ง terminal/stale/คนละ Agent หรือไฟล์เก่าที่ไม่มี
+  Agent binding ต้อง fail closed คำสั่ง exact ยังทำงานได้ขณะ paused โดยไม่เปลี่ยน pause/queue/watermark
+- restart ใช้ durable command เดิมต่อได้ แต่ห้ามนำ terminal command ไปอนุญาต release ถัดไป
+
 ## 8.8 อัปเดตจากศูนย์กลาง + ต้นเหตุที่ 1.1.8 ไม่อัปเดตเอง (v1.1.10)
 
 ### ต้นเหตุจริง (สืบจาก tag v1.1.8 กับข้อมูลใน Central ของ DESKTOP-741A6BC)

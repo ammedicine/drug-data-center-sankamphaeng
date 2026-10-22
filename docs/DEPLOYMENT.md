@@ -120,3 +120,14 @@ Rollback ห้ามลด revision, ลบข้อมูล หรือแ�
 - [ ] ทดสอบ forward policy ก่อน; historical backfill ทำหลัง explicit owner/SUPER_ADMIN approval เท่านั้น
 - [ ] monitor reconciliation, errors และ TiDB RU จากระบบภายนอก
 - [ ] ผ่าน readiness gate ก่อนดำเนินการกับ Agent ถัดไป; ห้าม auto-resume หรือ fleet-wide backfill
+
+### Controlled Agent updates (v1.1.19)
+
+- การย้ายจาก legacy updater ของ v1.1.18 เป็น v1.1.19 เป็น one-time coordinated bootstrap ขณะ fleet
+  paused; ห้ามเปลี่ยน production manifest ก่อน owner อนุมัติขั้น release/rollout แยกต่างหาก
+- การ publish release ทำให้ scheduled task เห็นรุ่นใหม่เป็น `AVAILABLE` เท่านั้น ไม่ใช่ rollout authorization
+- การติดตั้งต้องเริ่มจากคำสั่ง `SUPER_ADMIN` ที่ durable ใน `agent_update_commands` สำหรับ Agent เป้าหมาย
+  และ Agent ต้องตรวจ exact Agent ID/version/asset/size/SHA-256 กับ published release ก่อน download/install
+- คำสั่งเก่า, terminal, คนละ Agent หรือ metadata ไม่ตรงห้ามนำกลับมาใช้ และการ restart ห้ามขยายสิทธิ์
+- paused Agent อัปเดตได้เมื่อมีคำสั่ง exact นี้ โดย pause state, identity, credential, enrollment, settings,
+  watermark, recovery manifest และ queue/failed/quarantine ต้องไม่เปลี่ยน ห้ามอาศัย GitHub latest เพื่อ rollout

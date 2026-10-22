@@ -35,6 +35,7 @@ const fresh = async () => ({
 
 const TARGET = "9.9.9";
 const SHA = "b".repeat(64);
+const AGENT_ID = "agent-a";
 const manifestFor = (version: string, sha = SHA) => ({
   available: true,
   version,
@@ -45,9 +46,100 @@ const manifestFor = (version: string, sha = SHA) => ({
 });
 
 function hold(store: Awaited<ReturnType<typeof fresh>>["store"], targetVersion = TARGET, sha = SHA) {
-  store.acceptUpdateCommand({ id: "cmd-1", targetVersion, assetName: `SDCAgent-Setup-${targetVersion}.exe`, size: 10, sha256: sha });
+  store.acceptUpdateCommand({ id: "cmd-1", agentId: AGENT_ID, targetVersion, assetName: `SDCAgent-Setup-${targetVersion}.exe`, size: 10, sha256: sha }, AGENT_ID);
   return store.loadUpdateCommand()!;
 }
+
+describe("controlled release authorization", () => {
+  it("discovers a newer latest release without downloading or installing it when no command exists", async () => {
+    const { engine } = await fresh();
+    let downloads = 0;
+    let installs = 0;
+    const result = await engine.runUpdateEngine({
+      baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
+      trigger: "scheduled",
+      command: null,
+      fetchManifestFn: async () => manifestFor(TARGET),
+      downloadFn: async () => { downloads++; return join(home, "x.exe"); },
+      installFn: async () => { installs++; },
+      busyFn: () => false,
+    });
+
+    expect(result).toMatchObject({ state: "AVAILABLE", version: TARGET, installed: false });
+    expect(downloads).toBe(0);
+    expect(installs).toBe(0);
+  });
+
+  it("treats manifest autoInstall as metadata, never as authority", async () => {
+    const { engine } = await fresh();
+    const result = await engine.runUpdateEngine({
+      baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
+      trigger: "scheduled",
+      command: null,
+      fetchManifestFn: async () => ({ ...manifestFor(TARGET), autoInstall: true }),
+      downloadFn: async () => { throw new Error("must not download"); },
+      installFn: async () => { throw new Error("must not install"); },
+      busyFn: () => false,
+    });
+
+    expect(result.state).toBe("AVAILABLE");
+  });
+
+  it("rejects a durable command bound to another Agent before any download", async () => {
+    const { engine, store } = await fresh();
+    store.acceptUpdateCommand({ id: "cmd-other", agentId: "agent-other", targetVersion: TARGET, assetName: `SDCAgent-Setup-${TARGET}.exe`, size: 10, sha256: SHA }, "agent-other");
+    const result = await engine.runUpdateEngine({
+      baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
+      trigger: "command",
+      command: store.loadUpdateCommand()!,
+      fetchManifestFn: async () => manifestFor(TARGET),
+      downloadFn: async () => { throw new Error("must not download"); },
+      installFn: async () => { throw new Error("must not install"); },
+      busyFn: () => false,
+    });
+
+    expect(result).toMatchObject({ state: "FAILED", errorCode: "AUTHORIZATION_MISMATCH" });
+  });
+
+  it("rejects a command whose asset identity or expected size differs from the published release", async () => {
+    const { engine, store } = await fresh();
+    const command = hold(store);
+    const result = await engine.runUpdateEngine({
+      baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
+      trigger: "command",
+      command,
+      fetchManifestFn: async () => ({ ...manifestFor(TARGET), assetName: "SDCAgent-Setup-other.exe", size: 11 }),
+      downloadFn: async () => { throw new Error("must not download"); },
+      installFn: async () => { throw new Error("must not install"); },
+      busyFn: () => false,
+    });
+
+    expect(result).toMatchObject({ state: "FAILED", errorCode: "TARGET_NOT_AVAILABLE" });
+  });
+
+  it("never reuses a terminal command as authorization for a later release", async () => {
+    const { engine, store } = await fresh();
+    const command = hold(store);
+    store.saveUpdateCommand({ ...command, state: "SUCCESS", succeededAt: new Date().toISOString() });
+    const result = await engine.runUpdateEngine({
+      baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
+      trigger: "command",
+      command: store.loadUpdateCommand()!,
+      fetchManifestFn: async () => manifestFor("9.9.10"),
+      downloadFn: async () => { throw new Error("must not download"); },
+      installFn: async () => { throw new Error("must not install"); },
+      busyFn: () => false,
+    });
+
+    expect(result).toMatchObject({ state: "NONE", installed: false });
+    expect(store.loadUpdateCommand()?.state).toBe("SUCCESS");
+  });
+});
 
 describe("E. an active sync", () => {
   it("makes the command wait; no download and no installer while a run is in flight", async () => {
@@ -57,6 +149,7 @@ describe("E. an active sync", () => {
     let installs = 0;
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command,
       fetchManifestFn: async () => manifestFor(TARGET),
@@ -80,9 +173,10 @@ describe("E. an active sync", () => {
     store.saveUpdateCommand({ ...command, sha256: sha });
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command: store.loadUpdateCommand()!,
-      fetchManifestFn: async () => manifestFor(TARGET, sha),
+      fetchManifestFn: async () => ({ ...manifestFor(TARGET, sha), autoInstall: false }),
       downloadFn: async () => { seen.push(store.loadUpdateCommand()!.state); return installer; },
       installFn: async () => { seen.push(store.loadUpdateCommand()!.state); },
       busyFn: () => false,
@@ -107,6 +201,7 @@ describe("E. an active sync", () => {
     let installs = 0;
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command: store.loadUpdateCommand()!,
       fetchManifestFn: async () => manifestFor(TARGET, sha),
@@ -126,6 +221,7 @@ describe("F. what may never be installed", () => {
     let installs = 0;
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command,
       fetchManifestFn: async () => manifestFor(TARGET),
@@ -145,6 +241,7 @@ describe("F. what may never be installed", () => {
     const command = hold(store);
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command,
       fetchManifestFn: async () => ({ ...manifestFor(TARGET), sha256: null, autoInstall: false }),
@@ -160,12 +257,13 @@ describe("F. what may never be installed", () => {
   it("never a downgrade or a reinstall: a command for an older or equal version closes as done", async () => {
     const { engine, store, config } = await fresh();
     // The centre would never send this, but the Agent must not trust that.
-    const accepted = store.acceptUpdateCommand({ id: "cmd-old", targetVersion: "1.0.0", assetName: "SDCAgent-Setup-1.0.0.exe", size: 1, sha256: SHA });
+    const accepted = store.acceptUpdateCommand({ id: "cmd-old", agentId: AGENT_ID, targetVersion: "1.0.0", assetName: "SDCAgent-Setup-1.0.0.exe", size: 1, sha256: SHA }, AGENT_ID);
     expect(accepted.accepted).toBe(true);
     expect(store.loadUpdateCommand()?.state).toBe("SUCCESS"); // nothing to do, and it says so
     // And through the engine, a manifest that is not newer is NONE.
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "scheduled",
       command: null,
       fetchManifestFn: async () => manifestFor(config.AGENT_VERSION),
@@ -181,6 +279,7 @@ describe("F. what may never be installed", () => {
     const command = hold(store, "9.9.9");
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command,
       fetchManifestFn: async () => manifestFor("9.9.10"),
@@ -196,6 +295,7 @@ describe("F. what may never be installed", () => {
     const { engine } = await fresh();
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "scheduled",
       command: null,
       fetchManifestFn: async () => ({ ...manifestFor(TARGET), assetName: "evil.exe" }),
@@ -214,6 +314,7 @@ describe("retry policy", () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const result = await engine.runUpdateEngine({
         baseUrl: "http://central.invalid/",
+        agentId: AGENT_ID,
         trigger: "command",
         command,
         fetchManifestFn: async () => manifestFor(TARGET),
@@ -234,6 +335,7 @@ describe("retry policy", () => {
     const command = hold(store);
     const result = await engine.runUpdateEngine({
       baseUrl: "http://central.invalid/",
+      agentId: AGENT_ID,
       trigger: "command",
       command,
       fetchManifestFn: async () => { throw new Error("fetch failed"); },
@@ -251,7 +353,7 @@ describe("G. a restart in the middle", () => {
   it("INSTALLING plus a build at the target is SUCCESS", async () => {
     const { store, config } = await fresh();
     store.saveUpdateCommand({
-      commandId: "cmd-r", targetVersion: config.AGENT_VERSION, assetName: "x.exe", size: 1, sha256: SHA,
+      commandId: "cmd-r", agentId: AGENT_ID, targetVersion: config.AGENT_VERSION, assetName: "x.exe", size: 1, sha256: SHA,
       state: "INSTALLING", attempts: 1, errorCode: null, errorMessage: null, errorAt: null,
       receivedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), succeededAt: null,
     });
@@ -265,7 +367,7 @@ describe("G. a restart in the middle", () => {
   it("INSTALLING but still the old build, with attempts left, goes back to DELIVERED for another go", async () => {
     const { store } = await fresh();
     store.saveUpdateCommand({
-      commandId: "cmd-r", targetVersion: "9.9.9", assetName: "x.exe", size: 1, sha256: SHA,
+      commandId: "cmd-r", agentId: AGENT_ID, targetVersion: "9.9.9", assetName: "x.exe", size: 1, sha256: SHA,
       state: "INSTALLING", attempts: 1, errorCode: null, errorMessage: null, errorAt: null,
       receivedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), succeededAt: null,
     });
@@ -275,7 +377,7 @@ describe("G. a restart in the middle", () => {
   it("INSTALLING with attempts exhausted is FAILED, so a person is told", async () => {
     const { store } = await fresh();
     store.saveUpdateCommand({
-      commandId: "cmd-r", targetVersion: "9.9.9", assetName: "x.exe", size: 1, sha256: SHA,
+      commandId: "cmd-r", agentId: AGENT_ID, targetVersion: "9.9.9", assetName: "x.exe", size: 1, sha256: SHA,
       state: "INSTALLING", attempts: 3, errorCode: null, errorMessage: null, errorAt: null,
       receivedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), succeededAt: null,
     });
@@ -287,13 +389,13 @@ describe("G. a restart in the middle", () => {
   it("a terminal SUCCESS is never lost by a later restart or a repeated delivery", async () => {
     const { store, config } = await fresh();
     store.saveUpdateCommand({
-      commandId: "cmd-r", targetVersion: config.AGENT_VERSION, assetName: "x.exe", size: 1, sha256: SHA,
+      commandId: "cmd-r", agentId: AGENT_ID, targetVersion: config.AGENT_VERSION, assetName: "x.exe", size: 1, sha256: SHA,
       state: "SUCCESS", attempts: 1, errorCode: null, errorMessage: null, errorAt: null,
       receivedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), succeededAt: new Date().toISOString(),
     });
     store.reconcileUpdateCommandAfterRestart();
     // The centre repeats the command (it has not heard SUCCESS yet); same id, no change.
-    const again = store.acceptUpdateCommand({ id: "cmd-r", targetVersion: config.AGENT_VERSION, assetName: "x.exe", size: 1, sha256: SHA });
+    const again = store.acceptUpdateCommand({ id: "cmd-r", agentId: AGENT_ID, targetVersion: config.AGENT_VERSION, assetName: "x.exe", size: 1, sha256: SHA }, AGENT_ID);
     expect(again.accepted).toBe(false);
     expect(store.loadUpdateCommand()?.state).toBe("SUCCESS");
     // The report carries it.
@@ -307,7 +409,7 @@ describe("G. a restart in the middle", () => {
     const { store } = await fresh();
     hold(store);
     store.advanceUpdateCommand("DOWNLOADING", { attempt: true });
-    const other = store.acceptUpdateCommand({ id: "cmd-2", targetVersion: "9.9.10", assetName: "x.exe", size: 1, sha256: SHA });
+    const other = store.acceptUpdateCommand({ id: "cmd-2", agentId: AGENT_ID, targetVersion: "9.9.10", assetName: "x.exe", size: 1, sha256: SHA }, AGENT_ID);
     expect(other.accepted).toBe(false);
     expect(store.loadUpdateCommand()?.commandId).toBe("cmd-1");
   });
@@ -371,7 +473,7 @@ describe("the real `agent auto-update` with a held command", () => {
     writeFileSync(join(home, "jhcis.json"), JSON.stringify({ host: "127.0.0.1", port: 1, database: "none", user: "root", password: "" }));
     mkdirSync(join(home, "updates"), { recursive: true });
     writeFileSync(join(home, "update-command.json"), JSON.stringify({
-      commandId: "cmd-real", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: installerBytes.length, sha256: sha,
+      commandId: "cmd-real", agentId: "a", targetVersion: "9.9.9", assetName: "SDCAgent-Setup-9.9.9.exe", size: installerBytes.length, sha256: sha,
       state: "DELIVERED", attempts: 0, errorCode: null, errorMessage: null, errorAt: null,
       receivedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), succeededAt: null,
     }));

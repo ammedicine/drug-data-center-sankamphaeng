@@ -76,6 +76,7 @@ export interface UpdateRequestOutcome {
 /** What rides back to the Agent in the heartbeat response. */
 export interface DeliveredUpdateCommand {
   id: string;
+  agentId: string;
   targetVersion: string;
   assetName: string;
   size: number | null;
@@ -361,6 +362,7 @@ export async function openCommandsFor(agentId: string) {
 function toDelivered(row: typeof agentUpdateCommands.$inferSelect): DeliveredUpdateCommand {
   return {
     id: row.id,
+    agentId: row.agentId,
     targetVersion: row.targetVersion,
     assetName: row.targetAssetName,
     size: row.targetSize ?? null,
