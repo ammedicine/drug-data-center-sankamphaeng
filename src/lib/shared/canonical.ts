@@ -31,6 +31,7 @@ export {
   PRIMARY_DRUG_TYPES,
   drugStatus,
   drugTypeLabel,
+  drugTypeScopeNote,
   isPrimaryDrugType,
 } from "./drug-types";
 

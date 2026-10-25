@@ -44,6 +44,13 @@ export function drugTypeLabel(code: string | null | undefined): string {
   return DRUG_TYPE_LABELS[code] ?? `ประเภท ${code}`;
 }
 
+/** User-facing report note derived from the canonical JHCIS category labels. */
+export function drugTypeScopeNote(canWiden: boolean): string {
+  const primaryLabels = PRIMARY_DRUG_TYPES.map((code) => drugTypeLabel(code)).join("และ");
+  if (!canWiden) return `บัญชีของคุณดูได้เฉพาะ${primaryLabels}`;
+  return `ค่าเริ่มต้นแสดงเฉพาะ ${primaryLabels} (${drugTypeLabel("05")}ติ๊กเพิ่มได้)`;
+}
+
 /**
  * How a drug code's cdrug.drugflag reads on screen.
  *

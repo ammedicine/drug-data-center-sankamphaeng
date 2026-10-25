@@ -34,7 +34,7 @@ import {
   fiscalYearOf,
   recentFiscalYears,
 } from "@/lib/fiscal-year";
-import { PRIMARY_DRUG_TYPES, drugTypeLabel } from "@/lib/shared/canonical";
+import { PRIMARY_DRUG_TYPES, drugTypeLabel, drugTypeScopeNote } from "@/lib/shared/canonical";
 
 export const metadata = { title: "รายงานปริมาณการจ่ายยา" };
 export const dynamic = "force-dynamic";
@@ -80,7 +80,7 @@ export default async function DrugUsageReportPage({
   const requestedFacility = typeof params.facility === "string" ? params.facility : null;
 
   // Category scope is decided server-side: USER/ADMIN can never widen past
-  // ยา (01, 05, 10); SUPER_ADMIN starts on the same three and may add more.
+  // the medicine categories (01, 10); SUPER_ADMIN starts there and may add more.
   const typeScope = resolveDrugTypeScope(user, parseTypes(params.types));
 
   let scope;
@@ -118,7 +118,7 @@ export default async function DrugUsageReportPage({
     isSuper ? listFacilityOptions(null) : Promise.resolve([]),
   ]);
 
-  // Checkbox list: the three medicine categories always, plus whatever else the
+  // Checkbox list: the two medicine categories always, plus whatever else the
   // facility actually has (SUPER_ADMIN only).
   const selectableTypes = [
     ...PRIMARY_DRUG_TYPES,
@@ -157,11 +157,7 @@ export default async function DrugUsageReportPage({
       <FilterBar
         resetHref="/reports/drug-usage"
         className="mb-5"
-        note={
-          typeScope.canWiden
-            ? "ค่าเริ่มต้นแสดงเฉพาะ ยาแผนปัจจุบันและยาสมุนไพร (วัคซีนติ๊กเพิ่มได้)"
-            : "บัญชีของคุณดูได้เฉพาะยา 3 หมวดนี้"
-        }
+        note={drugTypeScopeNote(typeScope.canWiden)}
       >
         <FilterField label="ปีงบประมาณ" hint="เลือกแล้วกดค้นหา จะใช้ช่วง 1 ต.ค. - 30 ก.ย.">
           <select name="fy" defaultValue="" className={inputClass}>

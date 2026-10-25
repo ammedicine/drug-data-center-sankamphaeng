@@ -26,7 +26,7 @@ import {
   getUsageSummary,
   getUsageTrend,
 } from "@/lib/services/reports";
-import { drugTypeLabel } from "@/lib/shared/canonical";
+import { PRIMARY_DRUG_TYPES, drugTypeLabel } from "@/lib/shared/canonical";
 
 export const metadata = { title: "แดชบอร์ด" };
 export const dynamic = "force-dynamic";
@@ -43,9 +43,10 @@ export default async function DashboardPage({
   const params = await searchParams;
   const user = await requireUser();
   const scope = resolveFacilityScope(user);
-  // The dashboard always shows the medicine categories only (01, 05, 10) so the
+  // The dashboard always shows the medicine categories only (01, 10) so the
   // headline totals mean the same thing for every role.
   const typeScope = resolveDrugTypeScope(user);
+  const primaryTypeLabels = PRIMARY_DRUG_TYPES.map((type) => drugTypeLabel(type)).join("และ");
   // Default window is the current fiscal year (1 ต.ค. - วันนี้); picking a
   // fiscal year overrides the two date fields.
   const fallback = currentFiscalRange();
@@ -84,7 +85,7 @@ export default async function DashboardPage({
     <>
       <PageHeader
         title={isSuper ? "ภาพรวมทั้งอำเภอ" : "ภาพรวมสถานบริการ"}
-        subtitle={`${fiscal.label} · ข้อมูล ${range.from} ถึง ${range.to} · เฉพาะยาแผนปัจจุบันและยาสมุนไพร`}
+        subtitle={`${fiscal.label} · ข้อมูล ${range.from} ถึง ${range.to} · เฉพาะ${primaryTypeLabels}`}
       />
 
       <div className="mb-5 rounded-[10px] border border-line bg-surface no-print">
@@ -114,7 +115,7 @@ export default async function DashboardPage({
 
       <Section
         title="แยกตามหมวดยา"
-        description="ยาแผนปัจจุบันและยาสมุนไพร ในช่วงเวลาที่เลือก"
+        description={`${primaryTypeLabels} ในช่วงเวลาที่เลือก`}
       >
         <div className="grid gap-3 sm:grid-cols-3">
           {byType.map((row) => (

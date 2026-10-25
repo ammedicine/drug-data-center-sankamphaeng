@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { drugTypeLabel } from "@/lib/shared/drug-types";
+import { drugTypeLabel, drugTypeScopeNote } from "@/lib/shared/drug-types";
 
 describe("JHCIS drug type labels", () => {
   it.each([
@@ -22,5 +22,17 @@ describe("JHCIS drug type labels", () => {
     expect(drugTypeLabel("99")).toBe("ประเภท 99");
     expect(drugTypeLabel(null)).toBe("ไม่ระบุ");
     expect(drugTypeLabel(undefined)).toBe("ไม่ระบุ");
+  });
+
+  it("describes the restricted report scope as exactly the two primary medicine categories", () => {
+    expect(drugTypeScopeNote(false)).toBe(
+      "บัญชีของคุณดูได้เฉพาะยาแผนปัจจุบันและยาสมุนไพร",
+    );
+  });
+
+  it("describes the expandable report scope with canonical category labels", () => {
+    expect(drugTypeScopeNote(true)).toBe(
+      "ค่าเริ่มต้นแสดงเฉพาะ ยาแผนปัจจุบันและยาสมุนไพร (วัคซีนติ๊กเพิ่มได้)",
+    );
   });
 });

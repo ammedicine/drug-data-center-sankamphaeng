@@ -26,7 +26,7 @@ import {
   planConsumptionRateReport,
   withReserve,
 } from "@/lib/reports/consumption-rate";
-import { PRIMARY_DRUG_TYPES, drugTypeLabel } from "@/lib/shared/canonical";
+import { PRIMARY_DRUG_TYPES, drugTypeLabel, drugTypeScopeNote } from "@/lib/shared/canonical";
 
 export const metadata = { title: "อัตราการใช้ยาเฉลี่ย" };
 export const dynamic = "force-dynamic";
@@ -157,11 +157,7 @@ export default async function DrugConsumptionRatePage({
         resetHref="/reports/drug-consumption-rate"
         submitLabel="คำนวณ"
         className="mb-5"
-        note={
-          typeScope.canWiden
-            ? "ค่าเริ่มต้นแสดงเฉพาะ ยาแผนปัจจุบันและยาสมุนไพร (วัคซีนติ๊กเพิ่มได้)"
-            : "บัญชีของคุณดูได้เฉพาะยา 3 หมวดนี้"
-        }
+        note={drugTypeScopeNote(typeScope.canWiden)}
       >
         <FilterField label="เดือนเริ่มต้น">
           <input type="month" name="startMonth" defaultValue={view.startMonth} className={inputClass} />
