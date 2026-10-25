@@ -19,6 +19,7 @@ const base: FleetUpdateInput = {
   updateAvailable: false,
   supportsRemoteUpdate: true,
   command: null,
+  updater: null,
 };
 const cmd = (over: Partial<NonNullable<FleetUpdateInput["command"]>>): NonNullable<FleetUpdateInput["command"]> => ({
   status: "SUCCESS",
@@ -26,6 +27,14 @@ const cmd = (over: Partial<NonNullable<FleetUpdateInput["command"]>>): NonNullab
   terminal: true,
   errorCode: null,
   completedAtLabel: null,
+  ...over,
+});
+const updater = (over: Partial<NonNullable<FleetUpdateInput["updater"]>>): NonNullable<FleetUpdateInput["updater"]> => ({
+  state: "SUCCESS",
+  targetVersion: "1.1.15",
+  succeededAtLabel: null,
+  errorCode: null,
+  errorAtLabel: null,
   ...over,
 });
 
@@ -118,5 +127,101 @@ describe("current state wins over a superseded failure", () => {
     });
     expect(s.tone).toBe("warn");
     expect(s.text).toContain("รอเครื่องออนไลน์");
+  });
+
+  it("1. failed updater for 1.1.16 is history after the Agent reaches 1.1.19", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      version: "1.1.19",
+      latestVersion: "1.1.19",
+      updater: updater({
+        state: "FAILED",
+        targetVersion: "1.1.16",
+        errorCode: "INSTALLER_FAILED",
+        errorAtLabel: "38 วันที่แล้ว",
+      }),
+    });
+
+    expect(s.tone).toBe("ok");
+    expect(s.currentError).toBeUndefined();
+    expect(s.history).toContain("1.1.16");
+  });
+
+  it("2. failed update to 1.1.19 remains a current red error while the Agent is still old", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      version: "1.1.18",
+      latestVersion: "1.1.19",
+      updateAvailable: true,
+      updater: updater({
+        state: "FAILED",
+        targetVersion: "1.1.19",
+        errorCode: "INSTALLER_FAILED",
+        errorAtLabel: "5 นาทีที่แล้ว",
+      }),
+    });
+
+    expect(s.tone).toBe("danger");
+    expect(s.currentError).toContain("5 นาทีที่แล้ว");
+  });
+
+  it("3. a failed command is historical after a newer running version proves success", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      version: "1.1.19",
+      latestVersion: "1.1.19",
+      command: cmd({ status: "FAILED", targetVersion: "1.1.16", errorCode: "INSTALLER_FAILED" }),
+    });
+
+    expect(s.tone).toBe("ok");
+    expect(s.currentError).toBeUndefined();
+    expect(s.history).toContain("1.1.16");
+  });
+
+  it("4. latest software does not render a superseded raw updater error as current", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      version: "1.1.19",
+      latestVersion: "1.1.19",
+      updater: updater({ state: "FAILED", targetVersion: "1.1.19", errorCode: "INSTALLER_FAILED" }),
+    });
+
+    expect(s.text).toContain("เป็นรุ่นล่าสุด");
+    expect(s.currentError).toBeUndefined();
+  });
+
+  it("5. an active command remains the current operation despite stale updater history", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      version: "1.1.18",
+      latestVersion: "1.1.19",
+      updateAvailable: true,
+      command: cmd({ status: "INSTALLING", targetVersion: "1.1.19", terminal: false }),
+      updater: updater({ state: "FAILED", targetVersion: "1.1.16", errorCode: "INSTALLER_FAILED" }),
+    });
+
+    expect(s.tone).toBe("warn");
+    expect(s.text).toContain("1.1.19");
+    expect(s.currentError).toBeUndefined();
+  });
+
+  it("6. a success timestamp is displayed when its target is the running version", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      updater: updater({ targetVersion: "1.1.15", succeededAtLabel: "5 นาทีที่แล้ว" }),
+    });
+
+    expect(s.successAtLabel).toBe("5 นาทีที่แล้ว");
+  });
+
+  it("7. an older success timestamp is not presented as the latest upgrade", () => {
+    const s = deriveUpdateStatus({
+      ...base,
+      version: "1.1.19",
+      latestVersion: "1.1.19",
+      updater: updater({ targetVersion: "1.1.16", succeededAtLabel: "40 วันที่แล้ว" }),
+    });
+
+    expect(s.successAtLabel).toBeUndefined();
   });
 });

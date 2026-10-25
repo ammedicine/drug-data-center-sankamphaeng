@@ -107,6 +107,7 @@ export default async function FleetPage() {
     })(),
     updater: {
       state: r.update.state,
+      targetVersion: r.update.targetVersion,
       checkedAtLabel: r.update.checkedAt ? relativeTime(r.update.checkedAt) : null,
       succeededAtLabel: r.update.succeededAt ? relativeTime(r.update.succeededAt) : null,
       errorCode: r.update.errorCode,

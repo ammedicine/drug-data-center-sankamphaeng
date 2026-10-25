@@ -15,7 +15,6 @@ import {
   resumeAgentSyncAction,
   type ActionState,
 } from "../actions";
-import { UPDATE_ERROR_LABELS, type UpdateErrorCode } from "@/lib/shared/update-command";
 import { deriveUpdateStatus } from "@/lib/shared/fleet-update-status";
 
 /**
@@ -88,6 +87,7 @@ export interface FleetRowView {
   /** the agent's own last word about its updater */
   updater: {
     state: string | null;
+    targetVersion: string | null;
     checkedAtLabel: string | null;
     succeededAtLabel: string | null;
     errorCode: string | null;
@@ -498,21 +498,16 @@ export function FleetControls({ rows }: { rows: FleetRowView[] }) {
                     return (
                       <>
                         <div className={TONE_CLASS[s.tone]}>{s.text}</div>
+                        {s.currentError ? <div className="text-xs text-rose-700">{s.currentError}</div> : null}
                         {s.history ? <div className="text-xs text-slate-400">ประวัติ: {s.history}</div> : null}
+                        <div className="text-xs text-slate-500">
+                          {r.latestVersion ? `ล่าสุด ${r.latestVersion}` : "ยังไม่มีรุ่นเผยแพร่"}
+                          {r.updater.checkedAtLabel ? ` · ตรวจ ${r.updater.checkedAtLabel}` : ""}
+                          {s.successAtLabel ? ` · อัปเดตสำเร็จ ${s.successAtLabel}` : ""}
+                        </div>
                       </>
                     );
                   })()}
-                  <div className="text-xs text-slate-500">
-                    {r.latestVersion ? `ล่าสุด ${r.latestVersion}` : "ยังไม่มีรุ่นเผยแพร่"}
-                    {r.updater.checkedAtLabel ? ` · ตรวจ ${r.updater.checkedAtLabel}` : ""}
-                    {r.updater.succeededAtLabel ? ` · สำเร็จ ${r.updater.succeededAtLabel}` : ""}
-                  </div>
-                  {r.updater.errorCode && !(r.command && !r.command.terminal) ? (
-                    <div className="text-xs text-rose-700">
-                      {UPDATE_ERROR_LABELS[r.updater.errorCode as UpdateErrorCode] ?? r.updater.errorCode}
-                      {r.updater.errorAtLabel ? ` (${r.updater.errorAtLabel})` : ""}
-                    </div>
-                  ) : null}
                   {r.command && !r.command.terminal ? (
                     <div className="text-xs text-slate-500">
                       สั่งโดย {r.command.requestedByName ?? "-"} {r.command.requestedAtLabel}
