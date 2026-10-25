@@ -86,9 +86,9 @@ export function FacilityDrilldown({
   };
 
   return (
-    <div className="space-y-5">
-      <section className="rounded-[10px] border border-line bg-surface">
-        <div className="border-b border-hairline px-5 py-3.5">
+    <section className="overflow-hidden rounded-[10px] border border-line bg-surface">
+      <div>
+        <div className="border-b border-hairline px-4 py-3 sm:px-5">
           <h2 className="text-[15px] font-semibold text-ink">ปริมาณการจ่ายยาแยกตามสถานบริการ</h2>
           <p className="mt-0.5 text-[13px] text-muted">
             เรียงจากปริมาณมากไปน้อย · เลือกสถานบริการเพื่อดูรายการยาทั้งหมดด้านล่าง
@@ -124,11 +124,14 @@ export function FacilityDrilldown({
                     <tr
                       key={facility.facilityId}
                       onClick={() => select(facility.facilityId)}
+                      aria-selected={active}
                       className={`cursor-pointer border-b border-hairline transition-colors duration-150 last:border-0 ${
-                        active ? "bg-brand-soft" : "hover:bg-raised"
+                        active ? "bg-brand-soft/80" : "hover:bg-raised"
                       }`}
                     >
-                      <td className="px-4 py-2.5">
+                      <td
+                        className={`px-4 py-2.5 ${active ? "border-l-[3px] border-l-brand" : "border-l-[3px] border-l-transparent"}`}
+                      >
                         <button
                           type="button"
                           onClick={(event) => {
@@ -166,11 +169,11 @@ export function FacilityDrilldown({
             </table>
           </div>
         )}
-      </section>
+      </div>
 
       {current ? (
-        <section className="rounded-[10px] border border-line bg-surface">
-          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-hairline px-5 py-3.5">
+        <div className="border-t border-line">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-hairline bg-raised/35 px-4 py-3 sm:px-5">
             <div>
               <h2 className="text-[15px] font-semibold text-ink">
                 รายการยาที่จ่าย · {current.facilityName}
@@ -290,8 +293,8 @@ export function FacilityDrilldown({
               ) : null}
             </>
           )}
-        </section>
+        </div>
       ) : null}
-    </div>
+    </section>
   );
 }
