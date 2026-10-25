@@ -52,6 +52,9 @@ component ที่ซ่อมจะถูกวางใน staging; updater �
 ข้อจำกัด bootstrap: การอัปเกรด v1.1.18 → v1.1.19 ยังทำงานด้วย updater ของ v1.1.18 จึงไม่ได้
 รับ pre-update readiness ย้อนหลัง กลไกนี้เริ่มปกป้องการอัปเดตที่เริ่มจาก v1.1.19 เป็นต้นไป
 
+รุ่นเผยแพร่ปัจจุบันคือ v1.1.20 ซึ่งแก้ PAUSED GUI control-card crash และคง controlled-update,
+manifest trust-chain, readiness/repair และ state/queue preservation ของ v1.1.19 ทั้งหมด
+
 การอัปเกรดต้องคง AppId ของ installer และเก็บ `%ProgramData%\SDCAgent` ไว้ทั้งหมด ซึ่งรวม
 credential, enrollment, facility/Agent identity, settings, watermark, queue/failed/quarantine,
 normal-sync recovery manifest/receipts, historical backfill context, updater และ pause state

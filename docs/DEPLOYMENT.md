@@ -76,58 +76,46 @@ git push        # Vercel build อัตโนมัติ
 - [ ] ตรวจ `/reports/drug-usage` ว่ามีข้อมูล
 - [ ] ทดสอบ facility isolation: ผู้ใช้ รพ.สต. A ใส่ `?facility=<B>` ต้องได้ 403
 
-## 5. Global Sync Start Date rollout (code implemented; rollout not performed)
+## 5. Global Sync Start Date rollout (Central deployed; policy inactive)
 
-โค้ด Phase B–E พร้อมสำหรับลำดับ deploy แบบ Central-first ด้านล่าง แต่ยังไม่ได้ apply migration
-0012–0014 ใน production, publish Agent รุ่นใหม่, activate policy หรือเริ่ม rollout:
+### Current verified production state (2026-10-25)
 
-1. backup Central DB แล้ว apply เฉพาะ additive migration ที่ตรวจแล้ว
-2. deploy Central ที่เข้าใจ policy/heartbeat ใหม่ แต่ยังไม่มี policy row และยังไม่ enforce
-3. ยืนยันว่า Agent `v1.1.16` ยัง sync แบบ legacy โดยไม่ต้อง remote acknowledgement
-4. build รุ่นใหม่เป็น `v1.1.18` โดยไม่แก้ tag/release `v1.1.16` ที่เผยแพร่แล้ว (`v1.1.17`
-   เป็น local/unpublished Dev build และไม่มี tag/release จึงห้ามนำเลขเดิมกลับมาใช้กับ recovery build)
-5. pause และอัปเกรด canary หนึ่งเครื่อง ตรวจว่า identity, credential, enrollment, settings,
-   queue/quarantine และ updater state ไม่เปลี่ยน
-6. สร้าง desired policy รอ canary persist/apply และรายงาน revision ตรงกัน
-7. ก่อน activate ต้อง desired-paused, ไม่มี active Central batch และผ่าน owner review
-8. resume canary หนึ่งเครื่อง ตรวจ scheduled sync + reconciliation ก่อนขยาย rollout
+- Central deploy architecture Phase B–E แล้ว และ production apply additive migrations 0012 → 0013 → 0014 แล้ว
+- desired policy revision มีอยู่ แต่ active revision = `0`, active date ไม่มี และ enforcement ยัง inactive
+- ไม่มี historical backfill และไม่มี automatic backfill/automatic fleet resume
+- `v1.1.16` เป็น published historical release, `v1.1.17` เป็น local/unpublished Dev build,
+  `v1.1.18`/`v1.1.19` เผยแพร่แล้ว และ `v1.1.20` เป็น current published patch release
+- rollout Phase 1–3 เสร็จแล้ว: 05957 For-dev ใช้ v1.1.20, legacy recovery batch
+  `SYNC-20261021-000001` COMPLETED และ queue/failed/quarantine = 0
+- Agent production ที่เหลืออาจยังเป็น v1.1.19 และ fleet ยัง centrally paused ระหว่างรอ controlled rollout Phase 4/4
 
-ไม่จำเป็นต้องรอ Agent ออฟไลน์ทุกเครื่อง แต่ override ต้องเป็นคำสั่ง explicit ของ `SUPER_ADMIN`
-พร้อมเหตุผลและ audit เครื่องนั้นต้องคง centrally paused จนกว่าอัปเกรด รับ policy และ applied แล้ว
-
-forward rollout ไม่ต้องรอ `idempotentUploadChunk` ส่วน historical backfill ต้องปิด UI ไว้จน Agent
-มีทั้ง `remoteSyncStartDate` และ `idempotentUploadChunk` และผ่าน receipt/reconciliation gate
-
-ก่อนเปิดใช้ Phase E ให้ apply additive migration `0014_global_sync_backfill`, deploy Central ก่อน,
-จากนั้นอัปเกรด canary Agent และยืนยันว่า nullable telemetry รายงานจริง (`NULL` ไม่ใช่ healthy zero)
-การ backfill ต้องเริ่มจากคำขอ `SUPER_ADMIN` ทีละ Agent เท่านั้น ไม่มี auto backfill/auto resume;
-runbook contract อยู่ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
+Central-first schema/deployment และ v1.1.18 durable-recovery canary เป็น milestone ที่เสร็จแล้ว ไม่ใช่
+ขั้นตอนที่ยังรอทำ Protocol semantics ยังเหมือนเดิม: forward rollout ไม่ต้องรอ
+`idempotentUploadChunk`; historical backfill ต้องมีทั้ง `remoteSyncStartDate` และ
+`idempotentUploadChunk` ผ่าน receipt/reconciliation gate และเริ่มได้เฉพาะคำขอ `SUPER_ADMIN`
+ทีละ Agent ตาม [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 
 Rollback ห้ามลด revision, ลบข้อมูล หรือแก้ release เดิม: pause fleet, สร้าง revision ใหม่ที่คืนวันก่อนหน้า,
 รอ acknowledgement, activate แล้ว resume canary อย่างมีลำดับ Purge ไม่ใช่ขั้นตอน rollback ของ policy
 
-### Production canary checklist (ยังไม่ execute)
+### Controlled rollout Phase 4/4 gate (ยังไม่เริ่ม)
 
-- [ ] apply Central migrations 0012–0014 ก่อน และ deploy Central ก่อน Agent
-- [ ] pause Agent เป้าหมายทั้งหมด แล้วเลือก canary เพียงหนึ่ง Agent
-- [ ] upgrade canary เป็น v1.1.18 โดยยืนยัน Agent identity, credential, enrollment, facility,
-  settings, watermark, queue/quarantine, updater/pause state และ installer/scheduled-task identity เดิม
-- [ ] จำลอง response loss/restart บน canary แล้วตรวจว่า normal recovery ใช้ batchRef เดิม, ส่ง pending
-  queue ต่อ, complete/reconcile สำเร็จ และเลื่อน watermark เพียงครั้งเดียว
-- [ ] ยืนยัน heartbeat, capability `remoteSyncStartDate` และ `idempotentUploadChunk`
-- [ ] ยืนยัน `remoteSyncStartDate` เป็น `APPLIED` ตรง revision และ queue/quarantine telemetry ไม่ใช่
-  healthy zero เมื่อไม่มีข้อมูล
-- [ ] ทดสอบ forward policy ก่อน; historical backfill ทำหลัง explicit owner/SUPER_ADMIN approval เท่านั้น
-- [ ] monitor reconciliation, errors และ TiDB RU จากระบบภายนอก
-- [ ] ผ่าน readiness gate ก่อนดำเนินการกับ Agent ถัดไป; ห้าม auto-resume หรือ fleet-wide backfill
+- [ ] ยืนยัน backup/schema/health ปัจจุบัน โดยไม่ apply migration ซ้ำและไม่ใช้ `db:push`
+- [ ] คง fleet paused และอัปเดต Agent ทีละเครื่องด้วย exact Agent-scoped `SUPER_ADMIN` command เท่านั้น
+- [ ] หลังแต่ละเครื่องตรวจ identity, credential, enrollment, facility, settings, watermark,
+  queue/failed/quarantine, recovery state, updater/pause state และ installer/scheduled-task identity เดิม
+- [ ] ยืนยัน heartbeat/capability/readiness ของ Agent ปัจจุบันก่อนดำเนินการกับเครื่องถัดไป
+- [ ] ห้าม activate policy, resume Agent หรือสร้าง historical backfill โดยอัตโนมัติ
+- [ ] การ activate policy และ controlled resume ต้องเป็น milestone แยกที่ owner อนุมัติอย่างชัดเจน
 
-### Controlled Agent updates (v1.1.19)
+### Controlled Agent updates (v1.1.19+)
 
-- การย้ายจาก legacy updater ของ v1.1.18 เป็น v1.1.19 เป็น one-time coordinated bootstrap ขณะ fleet
-  paused; ห้ามเปลี่ยน production manifest ก่อน owner อนุมัติขั้น release/rollout แยกต่างหาก
+- การย้ายจาก legacy updater ของ v1.1.18 เป็น v1.1.19 เป็น historical one-time bootstrap ที่เสร็จแล้ว
 - การ publish release ทำให้ scheduled task เห็นรุ่นใหม่เป็น `AVAILABLE` เท่านั้น ไม่ใช่ rollout authorization
 - การติดตั้งต้องเริ่มจากคำสั่ง `SUPER_ADMIN` ที่ durable ใน `agent_update_commands` สำหรับ Agent เป้าหมาย
   และ Agent ต้องตรวจ exact Agent ID/version/asset/size/SHA-256 กับ published release ก่อน download/install
 - คำสั่งเก่า, terminal, คนละ Agent หรือ metadata ไม่ตรงห้ามนำกลับมาใช้ และการ restart ห้ามขยายสิทธิ์
 - paused Agent อัปเดตได้เมื่อมีคำสั่ง exact นี้ โดย pause state, identity, credential, enrollment, settings,
   watermark, recovery manifest และ queue/failed/quarantine ต้องไม่เปลี่ยน ห้ามอาศัย GitHub latest เพื่อ rollout
+- ก่อน handoff ต้องผ่าน manifest trust-chain, component integrity, environment/readiness และ exclusive lock;
+  v1.1.20 คงกติกานี้ทั้งหมดและแก้เฉพาะ PAUSED GUI startup/control-card crash

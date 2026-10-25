@@ -282,9 +282,9 @@ Central ใช้ `INSERT ... ON DUPLICATE KEY UPDATE` บน record_key → ส
 | role | เห็นข้อมูล | จัดการระบบ |
 |---|---|---|
 | SUPER_ADMIN | ทุกสถานบริการ ทุกหมวดยา | ได้ทั้งหมด (facility/agent/user) |
-| ADMIN | ทุกสถานบริการ เฉพาะยา 3 หมวด | **ไม่ได้** (อ่านอย่างเดียว) |
-| FACILITY_ADMIN | สถานบริการตัวเอง เฉพาะยา 3 หมวด | ผู้ใช้ในสถานบริการตัวเอง + สั่งซิงก์ |
-| USER | สถานบริการตัวเอง เฉพาะยา 3 หมวด | ไม่ได้ |
+| ADMIN | ทุกสถานบริการ เฉพาะยาแผนปัจจุบันและยาสมุนไพร | **ไม่ได้** (อ่านอย่างเดียว) |
+| FACILITY_ADMIN | สถานบริการตัวเอง เฉพาะยาแผนปัจจุบันและยาสมุนไพร | ผู้ใช้ในสถานบริการตัวเอง + สั่งซิงก์ |
+| USER | สถานบริการตัวเอง เฉพาะยาแผนปัจจุบันและยาสมุนไพร | ไม่ได้ |
 
 - สมัครสมาชิกเองได้ที่ `/register` เก็บ: ชื่อ-นามสกุล, ตำแหน่ง, user id, รหัสผ่าน, รหัสสถานบริการ (pcucode), ชื่อสถานบริการ
 - บัญชีที่สมัครเองจะ **inactive จนกว่าผู้ดูแลอนุมัติ** ที่ `/admin/users` (ถ้าเปิดใช้ทันทีเท่ากับไม่มี facility isolation)
@@ -330,7 +330,7 @@ deployment status หรือ implementation checklist ปัจจุบัน
 - TiDB Cloud `sankamphaeng_drug` (TiDB v8.5.3 serverless) — 15 ตาราง, migration 0000-0002
 - sync ข้อมูลจริง 2026-06-01→08-08 = **4,650 แถว** ปฏิเสธ 0 · sync ซ้ำแล้วยัง 4,650 (idempotent)
 - หน่วยแปลงถูก: เม็ด/ขวด/แคปซูล/หลอด/อัน
-- รายงานหน้าเว็บ: ยา 3 หมวด = 93,618 หน่วย (01 = 93,260 / 10 = 358)
+- รายงานหน้าเว็บ (historical snapshot): ยา 2 หมวด = 93,618 หน่วย (01 = 93,260 / 10 = 358)
 
 ### บั๊กที่เจอตอนทดสอบจริงและแก้แล้ว
 1. `getUsageTrend` — drizzle เรนเดอร์ expression เดียวกันต่างกันใน SELECT (`usage_date`) กับ GROUP BY
@@ -378,7 +378,7 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 | docs/GLOBAL_SYNC_BACKFILL.md | controlled historical backfill contract |
 | docs/DEPLOYMENT.md | Vercel + TiDB |
 
-### Global Sync Start Date (Phase B–E implemented in source; ยังไม่ deploy/publish)
+### Global Sync Start Date (Central deployed; production enforcement ยัง inactive)
 
 รายละเอียด authoritative อยู่ที่ `PROJECT_SPEC.md` §36 และหัวข้อ Global Sync Start Date ใน
 `docs/GLOBAL_SYNC_BACKFILL.md`, `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`,
@@ -391,8 +391,10 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 - desired กับ active แยกกัน และ policy revision ไม่ใช่ pause `controlRevision`
 - forward move ไม่ลบ history/ไม่ reset watermark; backward move ไม่ backfill อัตโนมัติ
 - historical backfill ต้องเป็นคำขอ explicit ของ `SUPER_ADMIN` ทีละ Agent และไม่เลื่อน watermark
-- `v1.1.16` ที่เผยแพร่แล้ว immutable; `v1.1.17` เป็น local/unpublished Dev build และรุ่นทดสอบ
-  durable recovery ถัดไปคือ `v1.1.18` โดยยังห้าม tag/release จนกว่า owner จะอนุมัติ
+- migrations 0012–0014 apply ใน production แล้ว แต่ policy enforcement ยัง inactive (`active revision = 0`,
+  ไม่มี active date) และยังไม่มี historical backfill; controlled rollout Phase 4/4 ยังไม่เริ่ม
+- release/tag ที่เผยแพร่แล้ว `v1.1.16`, `v1.1.18`, `v1.1.19`, `v1.1.20` เป็น immutable;
+  `v1.1.17` ยังเป็น local/unpublished Dev build และ `v1.1.20` คือ current patch release
 
 ## 7. กติกาเวลาทดสอบในเครื่อง
 
@@ -531,8 +533,8 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 
 ### v1.1.19: แยก release discovery ออกจาก authorization
 
-- การขึ้นจาก v1.1.18 เป็น one-time coordinated bootstrap ขณะ fleet paused; implementation/build phase
-  ห้าม publish, เปลี่ยน production manifest หรือแตะ Agent จริง
+- Historical rollout note: การขึ้นจาก v1.1.18 เป็น v1.1.19 ใช้ one-time coordinated bootstrap
+  ขณะ fleet paused และเสร็จแล้ว; ตั้งแต่ v1.1.19 เป็นต้นไปต้องใช้ controlled update ด้านล่าง
 - `SDCAgentAutoUpdate` ยังตรวจ `/api/agent/update` ตามรอบ แต่ถ้าไม่มี durable command จะรายงาน
   `AVAILABLE` เท่านั้น ห้าม download/install แม้ manifest เดิมมี `autoInstall:true`
 - สิทธิ์ติดตั้งมาจาก `agent_update_commands` ที่ส่งใน authenticated heartbeat เท่านั้น Central ส่ง
@@ -540,6 +542,8 @@ cd agent && npm run doctor   # ตรวจ JHCIS connection + schema
 - ก่อนติดตั้งต้องตรง exact Agent และ published metadata; คำสั่ง terminal/stale/คนละ Agent หรือไฟล์เก่าที่ไม่มี
   Agent binding ต้อง fail closed คำสั่ง exact ยังทำงานได้ขณะ paused โดยไม่เปลี่ยน pause/queue/watermark
 - restart ใช้ durable command เดิมต่อได้ แต่ห้ามนำ terminal command ไปอนุญาต release ถัดไป
+- v1.1.20 เป็น current patch release แก้ PAUSED GUI control-card crash โดยคง authorization,
+  readiness/trust-chain, identity และ queue-preservation semantics ของ v1.1.19 ทั้งหมด
 
 ## 8.8 อัปเดตจากศูนย์กลาง + ต้นเหตุที่ 1.1.8 ไม่อัปเดตเอง (v1.1.10)
 

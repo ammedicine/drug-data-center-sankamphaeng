@@ -97,3 +97,6 @@ batch, stable chunk reference, payload SHA-256, status, accepted/rejected counts
 fact upsert, reject และ batch counters อยู่ transaction เดียวกัน จึง retry หลัง timeout ได้โดยไม่เพิ่ม
 counter/reject ซ้ำ ตารางนี้ไม่แก้ `drug_usage` key, watermark หรือ Global Sync Start Date schema
 และไม่ได้เปิด historical backfill
+
+Production apply additive migrations 0012, 0013 และ 0014 ตามลำดับแล้ว การมี schema เหล่านี้ไม่เท่ากับ
+การ activate Global Sync Start Date; active revision ปัจจุบันยังเป็น `0` และ historical backfill ไม่มี

@@ -86,7 +86,7 @@ Review the final diff and confirm it contains no secrets before any commit.
 
 ## Global Sync Start Date
 
-The Phase B–E architecture is implemented in source but has not been deployed or published. Treat
+The Phase B–E architecture is deployed in Central and migrations 0012–0014 are applied. Treat
 `PROJECT_SPEC.md` §36, `docs/GLOBAL_SYNC_BACKFILL.md`, and the relevant sections of
 `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`,
 `docs/SECURITY.md`, and `docs/DEPLOYMENT.md` as the shared source of truth. Do not duplicate or
@@ -95,6 +95,9 @@ redefine that protocol here.
 Preserve legacy operation when no policy exists, keep desired policy separate from active
 enforcement and pause control, preserve all Central history and Agent state, and keep purge
 separate. Forward operation must remain compatible with older Agents; historical backfill requires
-an explicit one-Agent request and the approved idempotent chunk gate. The published `v1.1.16`
-release/tag is immutable; `v1.1.17` is a local/unpublished Dev build, `v1.1.18` is published, and
-the controlled-update test version is `v1.1.19` until owner review authorizes any release action.
+an explicit one-Agent request and the approved idempotent chunk gate. Production policy enforcement
+is still inactive (`active revision = 0`, no active date) and no historical backfill exists; do not
+start controlled rollout Phase 4/4, activate the policy, resume the fleet, or create backfill work without explicit owner
+approval. Published `v1.1.16`, `v1.1.18`, `v1.1.19`, and `v1.1.20` releases/tags are immutable;
+`v1.1.17` remains a local/unpublished Dev build. `v1.1.20` is the current patch release and preserves
+the controlled-update and pre-update readiness/trust-chain behavior introduced in `v1.1.19`.

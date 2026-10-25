@@ -94,15 +94,20 @@ revision นี้แยกจาก pause `controlRevision` โดยเด็�
 และ rollback ต้องสร้าง revision ที่สูงขึ้น ไม่ลดเลขเดิม
 
 Central เก็บ policy ใน `system_settings` และส่ง desired/active state ผ่าน heartbeat แบบ optional
-พร้อมรับ applied revision ที่ผูกกับ Agent identity ซึ่ง authenticate แล้วเท่านั้น Agent v1.1.17
-นำ desired policy ไปใช้ และ `/admin/fleet` รองรับ readiness/activation กับ active-floor enforcement
-แล้ว และ upload chunk receipts ป้องกัน counter/reject ซ้ำจาก ambiguous retry แล้ว Phase E เพิ่ม
+พร้อมรับ applied revision ที่ผูกกับ Agent identity ซึ่ง authenticate แล้วเท่านั้น Capability นี้เริ่ม
+ใน local/unpublished v1.1.17 baseline และอยู่ใน published v1.1.18+ `/admin/fleet` รองรับ
+readiness/activation กับ active-floor enforcement แล้ว และ upload chunk receipts ป้องกัน
+counter/reject ซ้ำจาก ambiguous retry แล้ว Phase E เพิ่ม
 คำขอ backfill ทีละ Agent, narrow pause authorization, nullable queue/quarantine telemetry และ
 current-request readiness ตาม contract ใน [GLOBAL_SYNC_BACKFILL.md](GLOBAL_SYNC_BACKFILL.md)
 
 Agent v1.1.18 เพิ่ม normal-sync durable recovery โดยไม่เปลี่ยน historical intent: Central ปิด normal
 batch แบบ transactional/idempotent และ exact duplicate `/sync/complete` ไม่มี counter, audit หรือ
 watermark side effect ซ้ำ ส่วน payload หรือ authenticated Agent/batch identity ที่ต่างกันต้องถูกปฏิเสธ
+
+Production apply migrations 0012–0014 และ deploy Central architecture นี้แล้ว ปัจจุบัน desired policy
+มีอยู่แต่ active revision ยังเป็น `0`/ไม่มี active date จึงยังไม่ enforce ไม่มี historical backfill และ
+controlled rollout Phase 4/4 ยังไม่เริ่ม สถานะปฏิบัติการล่าสุดอยู่ใน [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ```
 SUPER_ADMIN sets desired policy

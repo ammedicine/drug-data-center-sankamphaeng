@@ -1110,10 +1110,11 @@ SYNC.md
 
 # 36. Global Sync Start Date — Approved Architecture Contract
 
-> สถานะ: Phase B–E implement ใน source แล้ว ครอบคลุม policy persistence, Agent application,
-> UI, activation/enforcement, idempotent upload, controlled historical backfill และ nullable
-> queue/quarantine telemetry รวมถึง normal-sync durable recovery/idempotent completion ใน v1.1.18;
-> ยังไม่ได้ deploy, activate production policy หรือ publish Agent รุ่นใหม่
+> สถานะ: Phase B–E deploy ใน Central แล้ว และ production apply migrations 0012–0014 แล้ว
+> ครอบคลุม policy persistence, Agent application, UI, activation/enforcement, idempotent upload,
+> controlled historical backfill, nullable queue/quarantine telemetry และ normal-sync durable
+> recovery/idempotent completion อย่างไรก็ตาม Global Sync Start Date enforcement ยัง inactive
+> (`active revision = 0`, ไม่มี active date), ไม่มี historical backfill และ controlled rollout Phase 4/4 ยังไม่เริ่ม
 
 ระบบจะมี **Global Sync Start Date เพียงค่าเดียวสำหรับทั้งอำเภอ** และเฉพาะ `SUPER_ADMIN`
 เท่านั้นที่สร้างหรือเปลี่ยนนโยบายได้ Central เป็นเจ้าของ desired policy โดยแยกสถานะ
@@ -1149,9 +1150,10 @@ SYNC.md
   authenticate ฝั่ง server ไม่ใช่ IP, MAC หรือค่า `facility_id` จาก frontend
 - ต้องรักษา Agent ID, credential, enrollment, settings, queue/quarantine, updater state,
   pause/control state และ audit history เดิม
-- release/tag `v1.1.16` ที่เผยแพร่แล้วเป็น immutable; `v1.1.17` เป็น local/unpublished Dev build
-  ที่ไม่มี tag/release รุ่น Agent สำหรับทดสอบ durable recovery ถัดไปคือ `v1.1.18` แต่ห้ามสร้าง tag
-  หรือ release ก่อนผ่าน staged rollout และ owner approval
+- release/tag ที่เผยแพร่แล้ว `v1.1.16`, `v1.1.18`, `v1.1.19` และ `v1.1.20` เป็น immutable;
+  `v1.1.17` เป็น local/unpublished Dev build ที่ไม่มี tag/release `v1.1.18` เพิ่ม durable recovery,
+  `v1.1.19` เพิ่ม controlled update กับ pre-update readiness/trust-chain และ `v1.1.20` เป็น current
+  patch release ที่แก้ PAUSED GUI crash โดยไม่เปลี่ยน update/recovery protocol
 
 รายละเอียดแยกตาม concern อยู่ใน `docs/GLOBAL_SYNC_BACKFILL.md`, `docs/ARCHITECTURE.md`, `docs/API.md`,
 `docs/DATABASE.md`, `docs/SYNC.md`, `docs/AGENT.md`, `docs/SECURITY.md` และ

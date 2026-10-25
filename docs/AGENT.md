@@ -111,7 +111,7 @@ Log ผ่านตัวกรอง redact — คำที่เข้าข�
 
 ## 8. Global Sync Start Date และ durable recovery
 
-Agent v1.1.17 ประกาศ capability `remoteSyncStartDate` รับ desired policy จาก
+Local/unpublished Agent v1.1.17 baseline ประกาศ capability `remoteSyncStartDate` รับ desired policy จาก
 heartbeat บันทึก effective `syncStartDate` กับ applied revision แบบ temp+rename แล้วจึงรายงาน
 acknowledgement กลับ Central revision นี้แยกจาก pause `controlRevision`
 
@@ -136,8 +136,9 @@ acknowledgement กลับ Central revision นี้แยกจาก pause 
 queue/quarantine, pause/control state และ updater state เดิม Agent รุ่นเก่าหรือออฟไลน์ต้องคง
 centrally paused จนกว่าอัปเกรด รับ policy และรายงาน applied แล้ว JHCIS ยังเป็น read-only ทุกกรณี
 
-release/tag ที่เผยแพร่แล้วเป็น immutable: `v1.1.17` เป็น local/unpublished Dev build,
-`v1.1.18` เผยแพร่แล้ว และ controlled-update patch รุ่นทดสอบถัดไปคือ `v1.1.19`
+release/tag ที่เผยแพร่แล้วเป็น immutable: `v1.1.16`, `v1.1.18`, `v1.1.19` และ `v1.1.20`
+เผยแพร่แล้ว ส่วน `v1.1.17` เป็น local/unpublished Dev build `v1.1.20` คือ current patch release;
+Agent production ที่เหลืออาจยังเป็น v1.1.19 จนกว่าจะได้รับ exact Agent-scoped update command
 
 v1.1.18 เพิ่ม normal-sync recovery manifest ก่อน `sync/start`, durable acknowledged chunk receipts,
 same-batch retry/restart/completion และล้าง recovery state หลัง Central completion, reconciliation และ
@@ -149,3 +150,8 @@ durable watermark เท่านั้น หลักฐาน legacy queue �
 authenticated heartbeat และตรง exact Agent ID, version, asset name, optional size และ SHA-256 คำสั่ง terminal,
 stale, ของ Agent อื่น หรือ metadata ไม่ตรงต้อง fail closed การ pause data sync ไม่ปิดสิทธิ์คำสั่ง update ที่ตรง
 กัน และ restart ต้องใช้คำสั่งเดิมโดยไม่ขยายสิทธิ์ `%ProgramData%\SDCAgent` ทั้งหมดรวม queue ต้องคงเดิม
+
+v1.1.19 เพิ่ม pre-update integrity/readiness และ repair trust-chain: exact authenticated command ต้องผูก
+target release กับ manifest SHA-256 ก่อนเชื่อ component hashes และห้ามเขียนทับ live installation ระหว่าง
+preparation v1.1.20 แก้ GUI crash เมื่อ `control` telemetry ยังไม่มีในช่วง PAUSED/startup โดยไม่เปลี่ยน
+controlled-update, sync, queue/recovery หรือ JHCIS behavior ของ v1.1.19
