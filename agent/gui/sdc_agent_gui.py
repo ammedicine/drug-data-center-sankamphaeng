@@ -599,6 +599,32 @@ def set_autostart(enabled: bool) -> str:
         return f"ตั้งค่าเปิดพร้อม Windows ไม่สำเร็จ: {error}"
 
 
+# ---------------------------------------------------------------- status cards
+
+
+def render_status_items(
+    status_cards: dict[str, dict[str, Any]], items: list[theme.StatusItem]
+) -> None:
+    """Apply the dynamic status view-model without letting an optional key crash the GUI."""
+    for widgets in status_cards.values():
+        if widgets.get("optional"):
+            widgets["card"].grid_remove()
+
+    for item in items:
+        widgets = status_cards.get(item.key)
+        if not widgets:
+            # A newer theme may add an optional card before an older GUI has a
+            # place for it. Keep the three core cards and the polling loop alive.
+            continue
+        if widgets.get("optional"):
+            widgets["card"].grid()
+        colour = theme.TONE_COLOURS[item.tone]
+        widgets["dot"].configure(text_color=colour)
+        widgets["name"].configure(text=item.label)
+        widgets["value"].configure(text=item.text, text_color=colour)
+        widgets["detail"].configure(text=item.detail)
+
+
 # ------------------------------------------------------------------------- UI
 
 
@@ -864,16 +890,24 @@ class AgentApp(ctk.CTk):
         body = ctk.CTkFrame(page, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=theme.SPACE["xl"], pady=(0, theme.SPACE["lg"]))
         body.grid_columnconfigure((0, 1, 2), weight=1, uniform="status")
-        body.grid_rowconfigure(1, weight=1)
+        body.grid_rowconfigure(2, weight=1)
 
-        self.status_cards: dict[str, dict[str, ctk.CTkLabel]] = {}
-        for column, key in enumerate(("jhcis", "central", "worker")):
+        self.status_cards: dict[str, dict[str, Any]] = {}
+        layouts = (
+            ("jhcis", 0, 0, 1, False),
+            ("central", 0, 1, 1, False),
+            ("worker", 0, 2, 1, False),
+            ("control", 1, 0, 3, True),
+        )
+        for key, row, column, columnspan, optional in layouts:
             card = self._card(body)
             card.grid(
-                row=0,
+                row=row,
                 column=column,
+                columnspan=columnspan,
                 sticky="nsew",
                 padx=(0 if column == 0 else theme.SPACE["md"], 0),
+                pady=(theme.SPACE["md"], 0) if row else 0,
             )
             head = ctk.CTkFrame(card, fg_color="transparent")
             head.pack(fill="x", padx=theme.SPACE["lg"], pady=(theme.SPACE["md"], 0))
@@ -896,12 +930,21 @@ class AgentApp(ctk.CTk):
                 justify="left",
             )
             detail.pack(fill="x", padx=theme.SPACE["lg"], pady=(0, theme.SPACE["md"]))
-            self.status_cards[key] = {"dot": dot, "name": name, "value": value, "detail": detail}
+            self.status_cards[key] = {
+                "card": card,
+                "optional": optional,
+                "dot": dot,
+                "name": name,
+                "value": value,
+                "detail": detail,
+            }
+            if optional:
+                card.grid_remove()
 
         # The current sync is the loudest thing on the page by design.
         sync_card = self._card(body, "การซิงก์รอบปัจจุบัน")
         sync_card.grid(
-            row=1, column=0, columnspan=3, sticky="nsew", pady=(theme.SPACE["md"], 0)
+            row=2, column=0, columnspan=3, sticky="nsew", pady=(theme.SPACE["md"], 0)
         )
 
         self.sync_headline = ctk.CTkLabel(
@@ -1680,13 +1723,10 @@ class AgentApp(ctk.CTk):
 
         # Every visible state comes from theme.py, so what the screen says and
         # what the tests assert cannot drift apart.
-        for item in theme.system_status(status, credential, self.bridge.background_running(), self.worker_error):
-            widgets = self.status_cards[item.key]
-            colour = theme.TONE_COLOURS[item.tone]
-            widgets["dot"].configure(text_color=colour)
-            widgets["name"].configure(text=item.label)
-            widgets["value"].configure(text=item.text, text_color=colour)
-            widgets["detail"].configure(text=item.detail)
+        render_status_items(
+            self.status_cards,
+            theme.system_status(status, credential, self.bridge.background_running(), self.worker_error),
+        )
 
         view = theme.sync_view(status)
         if not self.busy:

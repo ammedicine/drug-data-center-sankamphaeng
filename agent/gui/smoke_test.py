@@ -550,6 +550,92 @@ def check(theme) -> list[str]:
     return failures
 
 
+def check_status_card_rendering(app) -> list[str]:
+    """The real refresh contract, exercised without opening a desktop window."""
+    failures: list[str] = []
+
+    def expect(condition: bool, message: str) -> None:
+        if not condition:
+            failures.append(message)
+
+    class FakeWidget:
+        def __init__(self, visible: bool = True) -> None:
+            self.visible = visible
+            self.options: dict[str, object] = {}
+            self.grid_calls = 0
+
+        def configure(self, **options) -> None:
+            self.options.update(options)
+
+        def grid(self) -> None:
+            self.visible = True
+            self.grid_calls += 1
+
+        def grid_remove(self) -> None:
+            self.visible = False
+
+    def card(optional: bool = False) -> dict[str, FakeWidget]:
+        return {
+            "card": FakeWidget(visible=not optional),
+            "optional": optional,
+            "dot": FakeWidget(),
+            "name": FakeWidget(),
+            "value": FakeWidget(),
+            "detail": FakeWidget(),
+        }
+
+    cards = {
+        "jhcis": card(),
+        "central": card(),
+        "worker": card(),
+        "control": card(optional=True),
+    }
+    original_ids = {key: id(value["card"]) for key, value in cards.items()}
+    render = getattr(app, "render_status_items", None)
+    expect(callable(render), "status cards need one safe renderer for optional control items")
+    if not callable(render):
+        return failures
+
+    enrolled = {"facilityCode": "RPST-05957", "facilityName": "test", "expectedPcucode": "05957"}
+
+    def refresh(status: dict[str, object]) -> None:
+        items = app.theme.system_status(status, enrolled, True, None)
+        render(cards, items)
+
+    # 1/5/6. Startup RUNNING, missing optional state and an empty/loading file.
+    for status in ({"syncControlState": "RUNNING"}, {}, {"centralState": "UNKNOWN"}):
+        refresh(status)
+        expect(not cards["control"]["card"].visible, "control card must stay hidden without PAUSED")
+
+    # 2/8. PAUSED is a normal fourth card, not a KeyError.
+    refresh({"syncControlState": "PAUSED", "pauseReason": "operator pause"})
+    expect(cards["control"]["card"].visible, "PAUSED must render the control card")
+    expect(cards["control"]["value"].options.get("text") == "หยุดโดยผู้ดูแลระบบ", "control card text missing")
+
+    # 3/4. Repeated RUNNING -> PAUSED -> RUNNING reuses widgets and clears the optional card.
+    refresh({"syncControlState": "RUNNING"})
+    refresh({"syncControlState": "PAUSED"})
+    refresh({"syncControlState": "RUNNING"})
+    expect(not cards["control"]["card"].visible, "control card must hide after returning to RUNNING")
+    expect({key: id(value["card"]) for key, value in cards.items()} == original_ids, "refresh must not leak widgets")
+
+    # 7. Central unavailable still renders the existing cards and keeps polling safely.
+    refresh({"centralState": "NETWORK_ERROR", "syncControlState": "RUNNING"})
+    expect(cards["central"]["value"].options.get("text") == "ติดต่อไม่ได้", "offline Central status changed")
+
+    # 9. A future optional card is ignored instead of taking down the whole GUI.
+    future = app.theme.StatusItem("future", "Future", "muted", "unknown", "optional")
+    render(cards, app.theme.system_status({}, enrolled, True, None) + [future])
+    expect(len(cards) == 4, "unknown optional card must not create or replace widgets")
+
+    # 10. The original three cards still use their existing view-model labels.
+    refresh({})
+    expect(cards["jhcis"]["name"].options.get("text") == "JHCIS", "JHCIS card changed")
+    expect(cards["central"]["name"].options.get("text") == "ศูนย์กลาง", "Central card changed")
+    expect(cards["worker"]["name"].options.get("text") == "ตัวทำงานเบื้องหลัง", "worker card changed")
+    return failures
+
+
 def main() -> int:
     # Windows consoles default to cp874 here, which cannot print Thai output.
     for stream in (sys.stdout, sys.stderr):
@@ -656,7 +742,7 @@ def main() -> int:
         return 1
 
     # Every state the window can be in, checked without opening one.
-    failures = check(app.theme)
+    failures = check(app.theme) + check_status_card_rendering(app)
     print("สถานะหน้าจอที่ตรวจ :", "ผ่านทั้งหมด" if not failures else f"ไม่ผ่าน {len(failures)} ข้อ")
     for failure in failures:
         print("   !", failure)
