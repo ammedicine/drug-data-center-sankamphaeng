@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { Search } from "lucide-react";
-import { useDeferredValue, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 
+import { useDrugUsageSearch } from "@/components/ui/drug-usage-report-workspace";
 import { EmptyState, formatNumber, inputClass } from "@/components/ui/primitives";
 import { drugStatus, drugTypeLabel } from "@/lib/shared/drug-types";
 
@@ -72,14 +73,12 @@ function score(row: DrugUsageTableRow, query: string): number {
 export function DrugUsageTable({
   rows,
   linkParams,
-  initialQuery = "",
 }: {
   rows: DrugUsageTableRow[];
   /** query string appended to each drug link, e.g. "from=...&to=..." */
   linkParams: string;
-  initialQuery?: string;
 }) {
-  const [query, setQuery] = useState(initialQuery);
+  const { query } = useDrugUsageSearch();
   const [sort, setSort] = useState<SortKey>("name");
   const [status, setStatus] = useState<StatusKey>("all");
   const [page, setPage] = useState(1);
@@ -87,6 +86,8 @@ export function DrugUsageTable({
   // Keeps typing responsive on large lists: the input updates immediately and
   // the filtered list catches up on the next render pass.
   const deferredQuery = useDeferredValue(query);
+
+  useEffect(() => setPage(1), [query]);
 
   const counts = useMemo(
     () => ({
@@ -138,77 +139,58 @@ export function DrugUsageTable({
 
   return (
     <div>
-      <div className="flex flex-wrap gap-1.5 border-b border-hairline px-4 pt-3 no-print">
-        {(
-            [
-              ["all", "ทั้งหมด"],
-              ["active", "รหัสที่เปิดใช้งาน"],
-              ["inactive", "รหัสที่ปิดใช้งานแล้ว"],
-            ] as Array<[StatusKey, string]>
-          ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => {
-              setStatus(key);
-              setPage(1);
-            }}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors duration-150 ${
-              status === key
-                ? "border-brand-line bg-brand-soft text-brand-ink"
-                : "border-line text-muted hover:bg-raised"
-            }`}
-          >
-            {label} ({formatNumber(counts[key])})
-          </button>
-        ))}
-      </div>
+      <div className="border-b border-slate-100 bg-slate-50/45 px-4 py-3.5 no-print sm:px-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label="กรองตามสถานะรหัสยา">
+            {(
+                [
+                  ["all", "ทั้งหมด"],
+                  ["active", "รหัสที่เปิดใช้งาน"],
+                  ["inactive", "รหัสที่ปิดใช้งานแล้ว"],
+                ] as Array<[StatusKey, string]>
+              ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  setStatus(key);
+                  setPage(1);
+                }}
+                aria-pressed={status === key}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30 ${
+                  status === key
+                    ? "border-blue-200 bg-blue-50 text-blue-700"
+                    : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                }`}
+              >
+                {label} ({formatNumber(counts[key])})
+              </button>
+            ))}
+          </div>
 
-      <div className="flex flex-wrap items-end gap-3 border-b border-hairline px-4 py-3 no-print">
-        <label className="min-w-[220px] flex-1">
-          <span className="mb-1 block text-xs font-medium text-muted">
-            ค้นหาชื่อยา / รหัสยา (พิมพ์แล้วกรองทันที)
-          </span>
-          <span className="relative block">
-            <Search
-              aria-hidden
-              className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted"
-            />
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setPage(1);
-              }}
-              placeholder="เช่น พารา, amlo, P189"
-              className={`${inputClass} pl-8`}
-              autoComplete="off"
-            />
-          </span>
-        </label>
-
-        <label>
-          <span className="mb-1 block text-xs font-medium text-muted">เรียงลำดับ</span>
-          <select
-            value={sort}
-            onChange={(event) => {
-              setSort(event.target.value as SortKey);
-              setPage(1);
-            }}
-            className={inputClass}
-          >
-            <option value="name">ชื่อยา (ก-ฮ / A-Z)</option>
-            <option value="quantity">ปริมาณจ่ายมากสุด</option>
-            <option value="rows">จ่ายบ่อยสุด</option>
-            <option value="code">รหัสยา</option>
-          </select>
-        </label>
-
-        <p className="pb-2.5 text-xs text-muted">
-          พบ {formatNumber(filtered.length)} รายการ
-          {query ? ` จากทั้งหมด ${formatNumber(rows.length)}` : ""}
-        </p>
+          <div className="flex items-end gap-3">
+            <label className="min-w-[190px]">
+              <span className="mb-1 block text-xs font-semibold text-slate-600">เรียงลำดับ</span>
+              <select
+                value={sort}
+                onChange={(event) => {
+                  setSort(event.target.value as SortKey);
+                  setPage(1);
+                }}
+                className={`${inputClass} border-slate-200 bg-white shadow-sm`}
+              >
+                <option value="name">ชื่อยา (ก-ฮ / A-Z)</option>
+                <option value="quantity">ปริมาณจ่ายมากสุด</option>
+                <option value="rows">จ่ายบ่อยสุด</option>
+                <option value="code">รหัสยา</option>
+              </select>
+            </label>
+            <p className="pb-2.5 text-xs text-muted" aria-live="polite">
+              พบ {formatNumber(filtered.length)} รายการ
+              {query ? ` จากทั้งหมด ${formatNumber(rows.length)}` : ""}
+            </p>
+          </div>
+        </div>
       </div>
 
       {visible.length === 0 ? (
@@ -219,9 +201,9 @@ export function DrugUsageTable({
         />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] border-collapse text-[13.5px]">
-            <thead className="sticky top-0 z-10 bg-raised">
-              <tr className="border-b border-line">
+          <table className="w-full min-w-[980px] border-collapse text-[13px]">
+            <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm">
+              <tr className="border-b border-slate-200">
                 {[
                   "ลำดับ",
                   "หมวดยา",
@@ -236,7 +218,7 @@ export function DrugUsageTable({
                   <th
                     key={header}
                     scope="col"
-                    className={`whitespace-nowrap px-4 py-2.5 text-[12.5px] font-semibold text-muted ${
+                    className={`whitespace-nowrap px-4 py-3 text-[11.5px] font-bold uppercase tracking-[0.02em] text-slate-500 ${
                       index === 6 || index === 7 ? "text-right" : "text-left"
                     }`}
                   >
@@ -249,26 +231,30 @@ export function DrugUsageTable({
               {visible.map((row, index) => (
                 <tr
                   key={`${row.drugType ?? "x"}-${row.drugCode}`}
-                  className="border-b border-hairline transition-colors duration-150 last:border-0 hover:bg-raised"
+                  className="border-b border-slate-100 transition-colors duration-150 last:border-0 hover:bg-blue-50/35"
                 >
-                  <td className="px-4 py-2.5 text-xs text-muted numeric">
+                  <td className="px-4 py-3 text-xs text-muted numeric">
                     {(currentPage - 1) * PAGE_SIZE + index + 1}
                   </td>
-                  <td className="px-4 py-2.5">
-                    <span className="inline-flex whitespace-nowrap rounded-full bg-raised px-2 py-0.5 text-xs text-muted">
-                      {drugTypeLabel(row.drugType)}
+                  <td className="px-4 py-3">
+                    <span className="inline-flex whitespace-nowrap rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                      {row.drugType ?? "-"} {drugTypeLabel(row.drugType)}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 numeric text-xs text-muted">{row.drugCode}</td>
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-3 numeric text-xs font-medium text-slate-500">{row.drugCode}</td>
+                  <td className="px-4 py-3">
                     <Link
                       href={`/reports/drug-usage/${encodeURIComponent(row.drugCode)}?${linkParams}`}
-                      className="font-medium text-ink transition-colors duration-150 hover:text-brand"
+                      className="group inline-flex items-center gap-1.5 font-semibold text-ink transition-colors duration-150 hover:text-blue-600"
                     >
-                      {row.drugName}
+                      <span>{row.drugName}</span>
+                      <ChevronRight
+                        aria-hidden
+                        className="size-3.5 text-slate-300 transition-transform group-hover:translate-x-0.5 group-hover:text-blue-500"
+                      />
                     </Link>
                   </td>
-                  <td className="px-4 py-2.5">
+                  <td className="px-4 py-3">
                     <span
                       className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${
                         drugStatus(row.drugFlag).className
@@ -277,19 +263,19 @@ export function DrugUsageTable({
                       {drugStatus(row.drugFlag).label}
                     </span>
                   </td>
-                  <td className="whitespace-nowrap px-4 py-2.5 text-xs text-muted numeric">
+                  <td className="whitespace-nowrap px-4 py-3 text-xs text-muted numeric">
                     {row.firstUsageDate ?? "-"}
                     {row.lastUsageDate && row.lastUsageDate !== row.firstUsageDate
                       ? ` – ${row.lastUsageDate}`
                       : ""}
                   </td>
-                  <td className="px-4 py-2.5 text-right numeric">
+                  <td className="px-4 py-3 text-right font-semibold text-ink numeric">
                     {formatNumber(row.dispensingRows)}
                   </td>
-                  <td className="px-4 py-2.5 text-right numeric">
+                  <td className="px-4 py-3 text-right font-bold text-ink numeric">
                     {formatNumber(row.totalQuantity)}
                   </td>
-                  <td className="px-4 py-2.5 text-xs text-muted">{row.unit ?? "-"}</td>
+                  <td className="px-4 py-3 text-xs font-medium text-muted">{row.unit ?? "-"}</td>
                 </tr>
               ))}
             </tbody>
@@ -298,31 +284,33 @@ export function DrugUsageTable({
       )}
 
       {totalPages > 1 ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-hairline px-4 py-2.5 no-print">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/45 px-4 py-3 no-print sm:px-5">
           <p className="text-xs text-muted">
             แสดง {formatNumber((currentPage - 1) * PAGE_SIZE + 1)}-
             {formatNumber(Math.min(currentPage * PAGE_SIZE, filtered.length))} จาก{" "}
             {formatNumber(filtered.length)} รายการ
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={currentPage === 1}
-              className="rounded-[6px] border border-line px-2.5 py-1 text-xs transition-colors duration-150 hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent"
+              aria-label="หน้าก่อนหน้า"
+              className="inline-flex size-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-40 disabled:hover:bg-white"
             >
-              ก่อนหน้า
+              <ChevronLeft aria-hidden className="size-4" />
             </button>
-            <span className="text-xs text-muted">
+            <span className="min-w-[88px] text-center text-xs font-medium text-muted">
               หน้า {currentPage} / {totalPages}
             </span>
             <button
               type="button"
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={currentPage === totalPages}
-              className="rounded-[6px] border border-line px-2.5 py-1 text-xs transition-colors duration-150 hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent"
+              aria-label="หน้าถัดไป"
+              className="inline-flex size-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-40 disabled:hover:bg-white"
             >
-              ถัดไป
+              <ChevronRight aria-hidden className="size-4" />
             </button>
           </div>
         </div>
