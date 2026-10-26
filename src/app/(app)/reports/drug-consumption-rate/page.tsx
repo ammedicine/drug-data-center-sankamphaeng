@@ -1,13 +1,17 @@
 import Link from "next/link";
 import { Download } from "lucide-react";
 
-import { FilterBar, FilterChip, FilterField } from "@/components/ui/filter-bar";
 import { AverageUsageTable } from "@/components/ui/average-usage-table";
+import {
+  ConsumptionRateCategoryChip,
+  ConsumptionRateField,
+  ConsumptionRateFilterPanel,
+  ConsumptionRateKpiGrid,
+  ConsumptionRatePageHeader,
+} from "@/components/ui/drug-consumption-rate-workspace";
 import {
   Card,
   ErrorState,
-  PageHeader,
-  StatCard,
   buttonClass,
   formatNumber,
   inputClass,
@@ -85,7 +89,7 @@ export default async function DrugConsumptionRatePage({
     if (error instanceof ForbiddenError) {
       return (
         <>
-          <PageHeader title={TITLE} />
+          <ConsumptionRatePageHeader title={TITLE} subtitle={SUBTITLE} />
           <ErrorState
             title="ไม่มีสิทธิ์เข้าถึงข้อมูลของสถานบริการนี้"
             detail="บัญชีของคุณเห็นได้เฉพาะข้อมูลสถานบริการของตนเองเท่านั้น"
@@ -137,7 +141,7 @@ export default async function DrugConsumptionRatePage({
 
   return (
     <>
-      <PageHeader
+      <ConsumptionRatePageHeader
         title={TITLE}
         subtitle={SUBTITLE}
         actions={
@@ -153,60 +157,56 @@ export default async function DrugConsumptionRatePage({
         }
       />
 
-      <FilterBar
+      <ConsumptionRateFilterPanel
         resetHref="/reports/drug-consumption-rate"
-        submitLabel="คำนวณ"
-        className="mb-5"
         note={drugTypeScopeNote(typeScope.canWiden)}
-      >
-        <FilterField label="เดือนเริ่มต้น">
-          <input type="month" name="startMonth" defaultValue={view.startMonth} className={inputClass} />
-        </FilterField>
-        <FilterField label="เดือนสิ้นสุด">
-          <input type="month" name="endMonth" defaultValue={view.endMonth} className={inputClass} />
-        </FilterField>
-        <FilterField label="สำรองคงคลัง (เดือน)" hint="จำนวนเดือนที่ต้องการสำรองจากอัตราการใช้เฉลี่ย">
-          <input
-            type="number"
-            name="reserveMonths"
-            defaultValue={view.reserveMonthsInput}
-            min={MIN_RESERVE_MONTHS}
-            max={MAX_RESERVE_MONTHS}
-            step={0.1}
-            className={inputClass}
-          />
-        </FilterField>
-        {isSuper ? (
-          <FilterField label="สถานบริการ" className="min-w-[220px] flex-1">
-            <select name="facility" defaultValue={requestedFacility ?? ""} className={inputClass}>
-              <option value="">ทุกสถานบริการ</option>
-              {facilityOptions.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.code} · {f.name}
-                </option>
-              ))}
-            </select>
-          </FilterField>
-        ) : null}
-
-        <fieldset className="w-full">
-          <legend className="mb-1.5 text-xs font-medium text-muted">หมวดยา</legend>
-          <div className="flex flex-wrap gap-2">
-            {selectableTypes.map((type) => (
-              <FilterChip
-                key={type}
-                name="types"
-                value={type}
-                label={drugTypeLabel(type)}
-                suffix={
-                  (PRIMARY_DRUG_TYPES as readonly string[]).includes(type) ? undefined : "ไม่ใช่ยา"
-                }
-                defaultChecked={typeScope.types.includes(type)}
+        fields={
+          <>
+            <ConsumptionRateField label="เดือนเริ่มต้น">
+              <input type="month" name="startMonth" defaultValue={view.startMonth} className={inputClass} />
+            </ConsumptionRateField>
+            <ConsumptionRateField label="เดือนสิ้นสุด">
+              <input type="month" name="endMonth" defaultValue={view.endMonth} className={inputClass} />
+            </ConsumptionRateField>
+            <ConsumptionRateField
+              label="ตัวคูณระยะเวลา / สำรองคงคลัง (เดือน)"
+              hint="จำนวนเดือนที่ต้องการสำรองจากอัตราการใช้เฉลี่ย"
+            >
+              <input
+                type="number"
+                name="reserveMonths"
+                defaultValue={view.reserveMonthsInput}
+                min={MIN_RESERVE_MONTHS}
+                max={MAX_RESERVE_MONTHS}
+                step={0.1}
+                className={inputClass}
               />
-            ))}
-          </div>
-        </fieldset>
-      </FilterBar>
+            </ConsumptionRateField>
+            {isSuper ? (
+              <ConsumptionRateField label="สถานบริการ">
+                <select name="facility" defaultValue={requestedFacility ?? ""} className={inputClass}>
+                  <option value="">ทุกสถานบริการ</option>
+                  {facilityOptions.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.code} · {f.name}
+                    </option>
+                  ))}
+                </select>
+              </ConsumptionRateField>
+            ) : null}
+          </>
+        }
+        categories={selectableTypes.map((type) => (
+          <ConsumptionRateCategoryChip
+            key={type}
+            name="types"
+            value={type}
+            label={drugTypeLabel(type)}
+            suffix={(PRIMARY_DRUG_TYPES as readonly string[]).includes(type) ? undefined : "ไม่ใช่ยา"}
+            defaultChecked={typeScope.types.includes(type)}
+          />
+        ))}
+      />
 
       {view.mode === "error" ? (
         <ErrorState title="ช่วงเดือนไม่ถูกต้อง" detail={view.error ?? undefined} />
@@ -224,38 +224,25 @@ export default async function DrugConsumptionRatePage({
         </Card>
       ) : (
         <>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard label="ช่วงที่คำนวณ" value={view.monthCount ?? 0} unit="เดือน" />
-            <StatCard label="จำนวนรายการยา" value={result.summary.distinctDrugs} unit="รายการ" />
-            <StatCard label="ปริมาณใช้รวม" value={result.summary.totalQuantity} unit="หน่วย" />
-            <StatCard
-              label="เฉลี่ยการใช้รวมต่อเดือน"
-              value={formatAverage(result.summary.averageTotalPerMonth)}
-              unit="หน่วย/เดือน"
-              accent
-            />
-          </div>
-
-          <p className="mt-3 text-xs text-muted">
-            สำรองคงคลัง <span className="font-semibold text-ink">{formatAverage(view.reserveMonths)}</span> เดือน ·
-            ปริมาณสำรองที่แนะนำ = อัตราการใช้เฉลี่ยต่อเดือน × จำนวนเดือนสำรอง
-          </p>
+          <ConsumptionRateKpiGrid
+            monthCount={view.monthCount ?? 0}
+            distinctDrugs={result.summary.distinctDrugs}
+            totalQuantity={result.summary.totalQuantity}
+            averageTotalPerMonth={formatAverage(result.summary.averageTotalPerMonth)}
+          />
 
           {view.currentMonthNote ? (
-            <p className="mt-2 rounded-[8px] bg-warn-soft px-3 py-2 text-xs text-warn">
+            <p className="mt-2 rounded-[8px] border border-amber-200/70 bg-amber-50 px-3 py-1.5 text-[11.5px] text-amber-800">
               เดือนปัจจุบันยังไม่สิ้นสุด ตัวเลขเดือนนี้เป็นข้อมูลที่มีถึงวันที่นำเข้าล่าสุด
             </p>
           ) : null}
 
-          <Card
-            title="อัตราการใช้ยาเฉลี่ยต่อเดือน รายรายการ"
-            description={`ช่วง ${view.startMonth} ถึง ${view.endMonth} · ${formatNumber(
+          <AverageUsageTable
+            rows={reserveRows}
+            context={`ช่วง ${view.startMonth} ถึง ${view.endMonth} · ${formatNumber(
               view.monthCount ?? 0,
-            )} เดือน · สำรอง ${formatAverage(view.reserveMonths)} เดือน · เรียงตามค่าเฉลี่ยมากไปน้อย · พิมพ์ค้นหาแล้วกรองทันที`}
-            className="mt-5"
-          >
-            <AverageUsageTable rows={reserveRows} />
-          </Card>
+            )} เดือน · ตัวคูณ ${formatAverage(view.reserveMonths)} เดือน · ปริมาณสำรองที่แนะนำ = ค่าเฉลี่ยต่อเดือน × ตัวคูณ`}
+          />
         </>
       )}
     </>
